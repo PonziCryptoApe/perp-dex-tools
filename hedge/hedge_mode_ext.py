@@ -15,6 +15,8 @@ from typing import Tuple
 from lighter.signer_client import SignerClient
 import sys
 import os
+
+from helpers.lark_bot import LarkBot
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from exchanges.extended import ExtendedClient
@@ -1107,8 +1109,13 @@ class HedgeBot:
 
             self.logger.info(f"[STEP 1] Extended position: {self.extended_position} | Lighter position: {self.lighter_position}")
 
-            if abs(self.extended_position + self.lighter_position) > 0.2:
+            if abs(self.extended_position + self.lighter_position) > self.order_quantity * 2:
                 self.logger.error(f"❌ Position diff is too large: {self.extended_position + self.lighter_position}")
+                self.stop_flag = True
+                lark_token = os.getenv("LARK_TOKEN")
+                if lark_token:
+                    async with LarkBot() as Lark:
+                        await Lark.send_message(f"❌ Hedge bot stopped due to large position diff: {self.extended_position + self.lighter_position}")
                 break
 
             self.order_execution_complete = False
@@ -1214,9 +1221,8 @@ class HedgeBot:
             self.logger.info("\n🛑 Received interrupt signal...")
         finally:
             self.logger.info("🔄 Cleaning up...")
-            self.shutdown()
-
-
+            self.shutdown() 
+              
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Trading bot for Extended and Lighter')
