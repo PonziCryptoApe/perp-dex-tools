@@ -1114,8 +1114,8 @@ class HedgeBot:
                 self.stop_flag = True
                 lark_token = os.getenv("LARK_TOKEN")
                 if lark_token:
-                    async with LarkBot() as Lark:
-                        await Lark.send_message(f"❌ Hedge bot stopped due to large position diff: {self.extended_position + self.lighter_position}")
+                    async with LarkBot(lark_token) as Lark:
+                        await Lark.send_text(f"❌ Hedge bot stopped due to large position diff: {self.extended_position + self.lighter_position}")
                 break
 
             self.order_execution_complete = False
