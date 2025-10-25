@@ -54,7 +54,7 @@ Examples:
 
 def validate_exchange(exchange):
     """Validate that the exchange is supported."""
-    supported_exchanges = ['backpack', 'extended']
+    supported_exchanges = ['backpack', 'extended', 'var']
     if exchange.lower() not in supported_exchanges:
         print(f"Error: Unsupported exchange '{exchange}'")
         print(f"Supported exchanges: {', '.join(supported_exchanges)}")
@@ -69,6 +69,9 @@ def get_hedge_bot_class(exchange):
             return HedgeBot
         elif exchange.lower() == 'extended':
             from hedge.hedge_mode_ext import HedgeBot
+            return HedgeBot
+        elif exchange.lower() == 'var':
+            from hedge.hedge_mode_var import HedgeBot
             return HedgeBot
         else:
             raise ValueError(f"Unsupported exchange: {exchange}")

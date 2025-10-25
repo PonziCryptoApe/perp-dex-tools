@@ -17,6 +17,7 @@ class ExchangeFactory:
         'lighter': 'exchanges.lighter.LighterClient',
         'grvt': 'exchanges.grvt.GrvtClient',
         'extended': 'exchanges.extended.ExtendedClient',
+        'var': 'exchanges.variational.VariationalClient',
     }
 
     @classmethod
@@ -36,6 +37,7 @@ class ExchangeFactory:
         exchange_name = exchange_name.lower()
 
         if exchange_name not in cls._registered_exchanges:
+            print('cls._registered_exchanges:', cls._registered_exchanges)
             available_exchanges = ', '.join(cls._registered_exchanges.keys())
             raise ValueError(f"Unsupported exchange: {exchange_name}. Available exchanges: {available_exchanges}")
 
@@ -94,5 +96,5 @@ class ExchangeFactory:
         module_name = exchange_class.__module__
         class_name = exchange_class.__name__
         class_path = f"{module_name}.{class_name}"
-        
+        # print(f"Registering exchange '{name}' with class path '{class_path}'")
         cls._registered_exchanges[name.lower()] = class_path

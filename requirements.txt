@@ -26,3 +26,7 @@ git+https://github.com/elliottech/lighter-python.git@d0009799970aad54ebb940aa3dc
 
 # Extended exchange SDK
 x10-python-trading-starknet
+
+# Variation exchange 
+cloudscraper >= 1.2.60
+eth-account >= 0.5.9
