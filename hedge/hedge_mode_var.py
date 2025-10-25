@@ -713,29 +713,117 @@ class HedgeBot:
 
 
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal):
+        """Place a limit order on Lighter with cancel and replace mechanism (similar to Variational)."""
         if not self.lighter_client:
-            await self.initialize_lighter_client()
+            self.initialize_lighter_client()
 
-        best_bid, best_ask = self.get_lighter_best_levels()
-
-        # Determine order parameters
-        if lighter_side.lower() == 'buy':
-            is_ask = False
-            price = best_ask[0]
-        else:
-            is_ask = True
-            price = best_bid[0] * Decimal('0.998')
-        
-        self.logger.info(f"Placing Lighter market order: {lighter_side} {quantity} @ {price} | is_ask: {is_ask}")
-
-        # Reset order state
         self.lighter_order_filled = False
-        self.lighter_order_price = price
-        self.lighter_order_side = lighter_side
-        self.lighter_order_size = quantity
+        self.logger.info(f"[OPEN] [Lighter] [{lighter_side}] Placing Lighter limit order with cancel/replace mechanism")
+        
+        # Place initial order
+        order_id, order_price = await self._place_lighter_limit_order(lighter_side, quantity)
+        if not order_id:
+            self.logger.error("❌ Failed to place initial Lighter order")
+            return None
+            
+        self.logger.info(f"Placed Lighter order {order_id} at price {order_price}")
+        start_time = time.time()
+        last_cancel_time = 0
+        
+        while not self.lighter_order_filled and not self.stop_flag:
+            self.logger.info(f"Monitoring Lighter order {order_id} | Price: {order_price}")
+            
+            # Check if order needs to be cancelled and replaced
+            await asyncio.sleep(0.5)
+            
+            # Get current market prices
+            try:
+                best_bid, best_ask = self.get_lighter_best_levels()
+                if not best_bid or not best_ask:
+                    await asyncio.sleep(1)
+                    continue
+                    
+                current_best_bid = best_bid[0]
+                current_best_ask = best_ask[0]
+                
+                # Check if our order price is still competitive
+                should_cancel = False
+                if lighter_side.lower() == 'buy':
+                    # For buy orders, cancel if our price is below current best bid
+                    if order_price < current_best_bid:
+                        should_cancel = True
+                else:
+                    # For sell orders, cancel if our price is above current best ask
+                    if order_price > current_best_ask:
+                        should_cancel = True
+                        
+            except Exception as e:
+                self.logger.warning(f"⚠️ Could not get Lighter BBO prices: {e}")
+                should_cancel = False
+            
+            # Cancel and replace logic with 30-second timeout
+            current_time = time.time()
+            if current_time - start_time > 30:  # 30 seconds timeout for Lighter
+                if should_cancel and current_time - last_cancel_time > 10:  # Prevent rapid cancellations
+                    try:
+                        self.logger.info(f"Canceling Lighter order {order_id} due to timeout/price mismatch")
+                        
+                        # Cancel the current order
+                        cancel_success = await self._cancel_lighter_order(order_id)
+                        
+                        if cancel_success:
+                            last_cancel_time = current_time
+                            
+                            # Place new order
+                            self.logger.info(f"Order {order_id} canceled, placing new order")
+                            order_id, order_price = await self._place_lighter_limit_order(lighter_side, quantity)
+                            if not order_id:
+                                self.logger.error("❌ Failed to place replacement Lighter order")
+                                break
+                                
+                            self.logger.info(f"Placed new Lighter order {order_id} at price {order_price}")
+                            start_time = time.time()  # Reset timer for new order
+                        else:
+                            self.logger.error(f"❌ Failed to cancel Lighter order {order_id}")
+                            
+                    except Exception as e:
+                        self.logger.error(f"❌ Error during Lighter order cancel/replace: {e}")
+                elif not should_cancel:
+                    self.logger.info(f"Waiting for Lighter order to be filled (order price is competitive)")
+    
+            # Check if order has been filled (this will be handled by WebSocket callback)
+            if self.lighter_order_filled:
+                self.logger.info(f"Lighter order {order_id} filled successfully")
+                break
+                
+            await asyncio.sleep(1)
 
+    async def _place_lighter_limit_order(self, lighter_side: str, quantity: Decimal) -> Tuple[str, Decimal]:
+        """Place a single limit order on Lighter and return order ID and price."""
         try:
+            best_bid, best_ask = self.get_lighter_best_levels()
+            if not best_bid or not best_ask:
+                raise Exception("Cannot get best bid/ask levels")
+
+            # Determine order parameters
+            if lighter_side.lower() == 'buy':
+                is_ask = False
+                # Place buy order slightly below best ask to improve fill probability
+                price = best_ask[0] - Decimal('0.1')
+            else:
+                is_ask = True  
+                # Place sell order slightly above best bid to improve fill probability  
+                price = best_bid[0] + Decimal('0.1')
+            
+            self.logger.info(f"Placing Lighter limit order: {lighter_side} {quantity} @ {price} | is_ask: {is_ask}")
+
+            # Reset order state
+            self.lighter_order_price = price
+            self.lighter_order_side = lighter_side
+            self.lighter_order_size = quantity
+
             client_order_index = int(time.time() * 1000)
+            
             # Sign the order transaction
             tx_info, error = self.lighter_client.sign_create_order(
                 market_index=self.lighter_market_index,
@@ -748,29 +836,60 @@ class HedgeBot:
                 reduce_only=False,
                 trigger_price=0,
             )
+            
             if error is not None:
                 raise Exception(f"Sign error: {error}")
 
-            # Prepare the form data
+            # Send the transaction
             tx_hash = await self.lighter_client.send_tx(
                 tx_type=self.lighter_client.TX_TYPE_CREATE_ORDER,
                 tx_info=tx_info
             )
-            self.logger.info(f"🚀 Lighter limit order sent: {lighter_side} {quantity}")
-            await self.monitor_lighter_order(client_order_index)
-
-            return tx_hash
+            
+            self.logger.info(f"🚀 Lighter limit order sent: {lighter_side} {quantity} @ {price}")
+            
+            # Return order ID (using client_order_index as identifier) and price
+            return str(client_order_index), price
+            
         except Exception as e:
-            self.logger.error(f"❌ Error placing Lighter order: {e}")
-            return None
+            self.logger.error(f"❌ Error placing Lighter limit order: {e}")
+            return None, None
+
+    async def _cancel_lighter_order(self, order_id: str) -> bool:
+        try:
+            # Convert order_id to order_index
+            order_index = int(order_id)
+            
+            # 方案1：使用高级方法（推荐）
+            cancel_order_obj, tx_response, error = await self.lighter_client.cancel_order(
+                market_index=self.lighter_market_index,
+                order_index=order_index
+            )
+            
+            if error is not None:
+                self.logger.error(f"Cancel order error: {error}")
+                return False
+            
+            if tx_response and hasattr(tx_response, 'tx_hash'):
+                self.logger.info(f"🚫 Lighter cancel order successful, tx_hash: {tx_response.tx_hash}")
+            else:
+                self.logger.info(f"🚫 Lighter cancel order sent for order {order_id}")
+            
+            # Wait for blockchain confirmation
+            await asyncio.sleep(2)
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"❌ Error canceling Lighter order {order_id}: {e}")
+            return False
 
     async def monitor_lighter_order(self, client_order_index: int):
-        """Monitor Lighter order and adjust price if needed."""
-        self.logger.info(f"🔍 Starting to monitor Lighter order - Order ID: {client_order_index}")
-
-        start_time = time.time()
-        while not self.lighter_order_filled and not self.stop_flag:
-            await asyncio.sleep(0.1)  # Check every 100ms
+        """Monitor Lighter order (now integrated into place_lighter_market_order)."""
+        self.logger.info(f"🔍 Lighter order monitoring is now integrated into place_lighter_market_order")
+        
+        # The monitoring logic has been moved to place_lighter_market_order
+        # This method can be kept for backward compatibility or removed
+        pass
 
     async def setup_variational_websocket(self):
         """Setup Variational websocket for order updates and order book data."""
@@ -1059,4 +1178,4 @@ class HedgeBot:
             self.logger.info("\n🛑 Received interrupt signal...")
         finally:
             self.logger.info("🔄 Cleaning up...")
-            self.shutdown() 
+            self.shutdown()
