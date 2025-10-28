@@ -12,6 +12,7 @@ import traceback
 from typing import Dict, Any, Optional, Tuple, List
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone, timedelta
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 import cloudscraper
 import aiohttp
@@ -74,7 +75,7 @@ class VariationalClient(BaseExchangeClient):
             "funding_interval_s": 3600
         }
 
-        self.logger.log("VariationalClient initialized", "INFO")
+        self.logger.log("【VARIATIONAL】VariationalClient initialized", "INFO")
 
     def _validate_config(self) -> None:
         """Validate the configuration for Variational exchange."""
@@ -111,13 +112,13 @@ class VariationalClient(BaseExchangeClient):
             return response.json()
             
         except Exception as e:
-            self.logger.log(f"Variational API request failed: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Variational API request failed: {e}", "ERROR")
             raise
 
     async def connect(self) -> None:
         """Connect to Variational exchange."""
-        self.logger.log("Connecting to Variational exchange...", "INFO")
-        
+        self.logger.log("【VARIATIONAL】Connecting to Variational exchange...", "INFO")
+
         # 1. 认证登录
         await self._authenticate()
         
@@ -127,13 +128,13 @@ class VariationalClient(BaseExchangeClient):
         
         # 3. 等待 WebSocket 连接建立
         await asyncio.sleep(2)
-        
-        self.logger.log("Connected to Variational exchange", "INFO")
+
+        self.logger.log("【VARIATIONAL】Connected to Variational exchange", "INFO")
 
     async def disconnect(self) -> None:
         """Disconnect from Variational exchange."""
-        self.logger.log("Disconnecting from Variational exchange...", "INFO")
-        
+        self.logger.log("【VARIATIONAL】Disconnecting from Variational exchange...", "INFO")
+
         try:
             # 1. 取消未完成的买单
             active_orders = await self.get_active_orders(self.config.contract_id)
@@ -162,12 +163,12 @@ class VariationalClient(BaseExchangeClient):
             self.orderbook = None
             self._order_update_handler = None
             self.auth_token = None
-            
-            self.logger.log("Variational exchange disconnected successfully", "INFO")
-            
+
+            self.logger.log("【VARIATIONAL】Variational exchange disconnected successfully", "INFO")
+
         except Exception as e:
-            self.logger.log(f"Error during Variational disconnect: {e}", "ERROR")
-            self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Error during Variational disconnect: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Traceback: {traceback.format_exc()}", "ERROR")
             raise
 
     async def _authenticate(self) -> None:
@@ -176,8 +177,8 @@ class VariationalClient(BaseExchangeClient):
             # 1. 获取签名数据
             signing_data = await self._fetch_signing_data()
             message = signing_data["message"]
-            self.logger.log(f"获取签名数据: {message}", "INFO")
-            
+            self.logger.log(f"【VARIATIONAL】获取签名数据: {message}", "INFO")
+
             # 2. 签名消息
             signature_hex = self._sign_message(message)
             
@@ -186,12 +187,12 @@ class VariationalClient(BaseExchangeClient):
             self.auth_token = login_response.get("token")
             
             if not self.auth_token:
-                raise ValueError("Failed to get auth token")
-                
-            self.logger.log("Authentication successful", "INFO")
-            
+                raise ValueError("【VARIATIONAL】Failed to get auth token")
+
+            self.logger.log("【VARIATIONAL】Authentication successful", "INFO")
+
         except Exception as e:
-            self.logger.log(f"Authentication failed: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Authentication failed: {e}", "ERROR")
             raise
 
     async def _fetch_signing_data(self) -> Dict[str, Any]:
@@ -249,7 +250,7 @@ class VariationalClient(BaseExchangeClient):
             try:
                 self._prices_ws.run_forever()
             except Exception as e:
-                self.logger.log(f"Prices WebSocket error: {e}", "ERROR")
+                self.logger.log(f"【VARIATIONAL】Prices WebSocket error: {e}", "ERROR")
                 time.sleep(3)
 
     def _run_portfolio_ws(self) -> None:
@@ -257,7 +258,7 @@ class VariationalClient(BaseExchangeClient):
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
         }
-        self.logger.log("Starting Portfolio WebSocket...", "INFO")
+        self.logger.log("【VARIATIONAL】Starting Portfolio WebSocket...", "INFO")
         self._portfolio_ws = websocket.WebSocketApp(
             self.ws_portfolio_url,
             header=headers,
@@ -271,12 +272,12 @@ class VariationalClient(BaseExchangeClient):
             try:
                 self._portfolio_ws.run_forever()
             except Exception as e:
-                self.logger.log(f"Portfolio WebSocket error: {e}", "ERROR")
+                self.logger.log(f"【VARIATIONAL】Portfolio WebSocket error: {e}", "ERROR")
                 time.sleep(3)
 
     def _on_prices_open(self, ws):
         """价格 WebSocket 连接建立"""
-        self.logger.log("Prices WebSocket connected", "INFO")
+        self.logger.log("【VARIATIONAL】Prices WebSocket connected", "INFO")
         subscribe_msg = {
             "action": "subscribe",
             "instruments": [self.instrument]
@@ -286,7 +287,7 @@ class VariationalClient(BaseExchangeClient):
 
     def _on_prices_message(self, ws, message):
         """处理价格 WebSocket 消息"""
-        self.logger.log(f"Received prices message: {message[:200]}", "DEBUG")
+        self.logger.log(f"【VARIATIONAL】Received prices message: {message[:200]}", "DEBUG")
         try:
             data = json.loads(message)
             # 更新订单簿数据
@@ -296,23 +297,23 @@ class VariationalClient(BaseExchangeClient):
                     'asks': [[data['ask'], data.get('ask_size', '0')]],
                     'timestamp': datetime.now(timezone.utc).isoformat()
                 }
-                self.logger.log(f"Orderbook updated: bid={data['bid']}, ask={data['ask']}", "DEBUG")
+                self.logger.log(f"【VARIATIONAL】Orderbook updated: bid={data['bid']}, ask={data['ask']}", "DEBUG")
         except json.JSONDecodeError:
-            self.logger.log(f"Failed to parse prices message: {message[:200]}", "WARNING")
+            self.logger.log(f"【VARIATIONAL】Failed to parse prices message: {message[:200]}", "WARNING")
         except Exception as e:
-            self.logger.log(f"Error handling prices message: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Error handling prices message: {e}", "ERROR")
 
     def _on_prices_error(self, ws, error):
         """价格 WebSocket 错误"""
-        self.logger.log(f"Prices WebSocket error: {error}", "ERROR")
+        self.logger.log(f"【VARIATIONAL】Prices WebSocket error: {error}", "ERROR")
 
     def _on_prices_close(self, ws, close_status_code, close_msg):
         """价格 WebSocket 关闭"""
-        self.logger.log(f"Prices WebSocket closed: {close_status_code} - {close_msg}", "INFO")
+        self.logger.log(f"【VARIATIONAL】Prices WebSocket closed: {close_status_code} - {close_msg}", "INFO")
 
     def _on_portfolio_open(self, ws):
         """投资组合 WebSocket 连接建立"""
-        self.logger.log("Portfolio WebSocket connected", "INFO")
+        self.logger.log("【VARIATIONAL】Portfolio WebSocket connected", "INFO")
         if self.auth_token:
             subscribe_msg = {
                 "claims": self.auth_token
@@ -329,17 +330,17 @@ class VariationalClient(BaseExchangeClient):
                     if self._order_update_handler:
                         self._order_update_handler(data['positions'])
         except json.JSONDecodeError:
-            self.logger.log(f"Failed to parse portfolio message: {message[:200]}", "WARNING")
+            self.logger.log(f"【VARIATIONAL】Failed to parse portfolio message: {message[:200]}", "WARNING")
         except Exception as e:
-            self.logger.log(f"Error handling portfolio message: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Error handling portfolio message: {e}", "ERROR")
 
     def _on_portfolio_error(self, ws, error):
         """投资组合 WebSocket 错误"""
-        self.logger.log(f"Portfolio WebSocket error: {error}", "ERROR")
+        self.logger.log(f"【VARIATIONAL】Portfolio WebSocket error: {error}", "ERROR")
 
     def _on_portfolio_close(self, ws, close_status_code, close_msg):
         """投资组合 WebSocket 关闭"""
-        self.logger.log(f"Portfolio WebSocket closed: {close_status_code} - {close_msg}", "INFO")
+        self.logger.log(f"【VARIATIONAL】Portfolio WebSocket closed: {close_status_code} - {close_msg}", "INFO")
 
     async def fetch_bbo_prices(self, contract_id: str, quantity: Decimal = None) -> Tuple[Decimal, Decimal]:
         """从订单簿获取最佳买卖价格"""
@@ -355,7 +356,6 @@ class VariationalClient(BaseExchangeClient):
                     min_qty = Decimal(str(qty_limits.get('ask').get('min_qty', '0.00001')))
                     self.config.tick_size = min_qty
                 
-                # self.logger.log(f"Fetched indicative quote for BBO prices: ", "INFO")
                 if indicative_data and 'bid' in indicative_data and 'ask' in indicative_data:
                     return Decimal(str(indicative_data['bid'])), Decimal(str(indicative_data['ask']))
                 return Decimal('0'), Decimal('0')
@@ -372,34 +372,45 @@ class VariationalClient(BaseExchangeClient):
             return best_bid, best_ask
             
         except Exception as e:
-            self.logger.log(f"Error fetching BBO prices: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Error fetching BBO prices: {e}", "ERROR")
             return Decimal('0'), Decimal('0')
 
-    async def _fetch_indicative_quote(self, qty: Decimal) -> Dict[str, Any]:
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_fixed(3),
+        retry=retry_if_exception_type(Exception),
+        reraise=True)
+    async def _fetch_indicative_quote(self, qty: Decimal, contract_id: Optional[str] = None) -> Dict[str, Any]:
         """获取指示性报价"""
         url = f"{self.api_base}/quotes/indicative"
+        instrument = {
+                "underlying": contract_id.split('-')[0],
+                "instrument_type": "perpetual_future",
+                "settlement_asset": "USDC",
+                "funding_interval_s": 3600
+            } if contract_id else self.instrument
         payload = {
-            "instrument": self.instrument,
+            "instrument": instrument,
             "qty": str(qty)
         }
         
         # 设置 cookies
         cookies = {"vr-token": self.auth_token} if self.auth_token else {}
-        self.logger.log(f"Fetching indicative quote with payload: {payload}", "INFO")
-        self.logger.log(f"Using cookies: {cookies}", "INFO")
+        self.logger.log(f"【VARIATIONAL】Fetching indicative quote with payload: {payload}", "INFO")
+        self.logger.log(f"【VARIATIONAL】Using cookies: {cookies}", "INFO")
         try:
             return await self._make_var_request('POST', url, json=payload, cookies=cookies)
         except Exception as e:
-            self.logger.log(f"Failed to fetch indicative quote: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Failed to fetch indicative quote: {e}", "ERROR")
             return {}
 
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """下开仓订单"""
         try:
             best_bid, best_ask = await self.fetch_bbo_prices(contract_id, quantity)
-            self.logger.log(f"Placing open order: direction={direction}, quantity={quantity}", "INFO")
-            self.logger.log(f"Best Bid: {best_bid}, Best Ask: {best_ask}", "INFO")
-            self.logger.log(f"Tick Size: {self.config.tick_size}", "INFO")
+            self.logger.log(f"【VARIATIONAL】Placing open order: direction={direction}, quantity={quantity}", "INFO")
+            self.logger.log(f"【VARIATIONAL】Best Bid: {best_bid}, Best Ask: {best_ask}", "INFO")
+            self.logger.log(f"【VARIATIONAL】Tick Size: {self.config.tick_size}", "INFO")
             if best_bid <= 0 or best_ask <= 0:
                 return OrderResult(success=False, error_message='Invalid bid/ask prices')
             
@@ -443,7 +454,7 @@ class VariationalClient(BaseExchangeClient):
         
         try:
             data = await self._make_var_request('POST', url, json=payload, cookies=cookies)
-            self.logger.log(f"Placed limit order response: {data}", "INFO")
+            self.logger.log(f"【VARIATIONAL】Placed limit order response: {data}", "INFO")
             order_id = data.get('rfq_id')
             if order_id:
                 return OrderResult(
@@ -496,7 +507,7 @@ class VariationalClient(BaseExchangeClient):
                 )
             return None
         except Exception as e:
-            self.logger.log(f"Error getting order info: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Error getting order info: {e}", "ERROR")
             return None
 
     async def get_active_orders(self, contract_id: str) -> List[OrderInfo]:
@@ -524,7 +535,7 @@ class VariationalClient(BaseExchangeClient):
             return orders
             
         except Exception as e:
-            self.logger.log(f"Error getting active orders: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Error getting active orders: {e}", "ERROR")
             return []
 
     async def get_account_positions(self) -> Decimal:
@@ -544,7 +555,7 @@ class VariationalClient(BaseExchangeClient):
             return Decimal('0')
             
         except Exception as e:
-            self.logger.log(f"Error getting account positions: {e}", "ERROR")
+            self.logger.log(f"【VARIATIONAL】Error getting account positions: {e}", "ERROR")
             return Decimal('0')
 
     def setup_order_update_handler(self, handler) -> None:

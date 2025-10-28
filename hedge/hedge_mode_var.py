@@ -656,22 +656,22 @@ class HedgeBot:
                 last_cancel_time = 0  # Reset cancel timer
                 await asyncio.sleep(0.5)
             elif self.variational_order_status in ['OPEN', 'PARTIALLY_FILLED']:
-                await asyncio.sleep(0.5)
-                self.variational_best_bid, self.variational_best_ask = await self.variational_client.fetch_bbo_prices(self.variational_contract_id, quantity)
-                # Check if we need to cancel and replace the order
-                should_cancel = False
-                if side == 'buy':
-                    if order_price < self.variational_best_bid:
-                        should_cancel = True
-                else:
-                    if order_price > self.variational_best_ask:
-                        should_cancel = True
-
-                # Cancel order if it's been too long or price is off
                 current_time = time.time()
+                await asyncio.sleep(0.5)                
                 if current_time - start_time > 10:
-                    if should_cancel and current_time - last_cancel_time > 5:  # Prevent rapid cancellations
+                    if current_time - last_cancel_time > 5:  # Prevent rapid cancellations
                         try:
+                            self.variational_best_bid, self.variational_best_ask = await self.variational_client.fetch_bbo_prices(self.variational_contract_id, quantity)
+                            # Check if we need to cancel and replace the order
+                            should_cancel = False
+                            if side == 'buy':
+                                if order_price < self.variational_best_bid:
+                                    should_cancel = True
+                            else:
+                                if order_price > self.variational_best_ask:
+                                    should_cancel = True
+                            if should_cancel is False:
+                                continue
                             self.logger.info(f"Canceling order {order_id} due to timeout/price mismatch")
                             cancel_result = await self.variational_client.cancel_order(order_id)
                             self.logger.info(f"cancel_result: {cancel_result}")
@@ -763,7 +763,7 @@ class HedgeBot:
             
             # Cancel and replace logic with 30-second timeout
             current_time = time.time()
-            if current_time - start_time > 30:  # 30 seconds timeout for Lighter
+            if current_time - start_time > 20:  # 30 seconds timeout for Lighter
                 if should_cancel and current_time - last_cancel_time > 10:  # Prevent rapid cancellations
                     try:
                         self.logger.info(f"Canceling Lighter order {order_id} due to timeout/price mismatch")
@@ -776,6 +776,7 @@ class HedgeBot:
                             
                             # Place new order
                             self.logger.info(f"Order {order_id} canceled, placing new order")
+                            
                             order_id, order_price = await self._place_lighter_limit_order(lighter_side, quantity)
                             if not order_id:
                                 self.logger.error("❌ Failed to place replacement Lighter order")
@@ -918,7 +919,7 @@ class HedgeBot:
                     self.variational_order_status = 'FILLED'
                     price = 'unknown'
                     # self.logger.info(f"📊 Variational order filled: {self.order_quantity} @ {price}")
-                        
+                    self.logger.info(f"Variational 平仓成功, 当前仓位：{self.variational_position}")
                     self.log_trade_to_csv(
                         exchange='Variational',
                         side= 'SELL',
@@ -964,7 +965,11 @@ class HedgeBot:
                     
                     # 等待平仓中
                     if self.variational_position == self.order_quantity and self.position_is_full is True:
-                        self.logger.info(f"Variational {self.variational_contract_id} 等待平仓中： {self.order_quantity}")
+                        if self.lighter_order_filled:
+                            self.logger.info(f"Variational {self.variational_contract_id}建仓成功，lighter建仓成功，等待Variational平仓中")
+                        else :
+                            self.logger.info("Variational {self.variational_contract_id}建仓成功，等待lighter建仓中")
+                        # self.logger.info(f"Variational {self.variational_contract_id} 等待平仓中： {self.order_quantity}")
                         return
                     if 0 < self.variational_position < self.order_quantity and self.position_is_full is True:
                         self.variational_order_status = 'PARTIALLY_FILLED'
@@ -1136,13 +1141,13 @@ class HedgeBot:
             self.logger.info(f"[STEP 3] Variational position: {self.variational_position} | Lighter position: {self.lighter_position}")
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
-            if self.variational_position == 0:
+            if self.variational_position == 0 and self.lighter_position == 0:
                 continue
-            elif self.variational_position > 0:
+            if self.variational_position > 0:
                 side = 'sell'
-            else:
+            if self.variational_position < 0:
                 side = 'buy'
-
+            self.logger.info(f"variational_position before closing: {self.variational_position}")
             try:
                 # Determine side based on some logic (for now, alternate)
                 await self.place_variational_post_only_order(side, abs(self.variational_position))
@@ -1166,6 +1171,22 @@ class HedgeBot:
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
+            
+            self.logger.info(f"lighter_position before closing: {self.lighter_position}")
+            if self.lighter_position == 0:
+                continue
+            if self.lighter_position > 0:
+                lighter_side = 'sell'
+            if self.lighter_position < 0:
+                lighter_side = 'buy'
+            try:
+                await self.place_lighter_market_order(lighter_side, abs(self.lighter_position))
+            except Exception as e:
+                self.logger.error(f"⚠️ Error in trading loop: {e}")
+                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                break
+        await asyncio.sleep(20)
+            
         self.logger.info("✅ Trading loop exited")
     
     async def run(self):
