@@ -937,6 +937,7 @@ class HedgeBot:
                 if positions:
                     self.variational_position = Decimal(position_data.get('position_info', {"qty": "0"}).get('qty', '0'))
                     self.logger.info(f"Variational 当前仓位： {self.variational_position}")
+                    self.logger.info(f"lighter 当前仓位: {self.lighter_position}")
                     # 开仓中
                     if 0 < self.variational_position < self.order_quantity and self.position_is_full is False:
                         self.variational_order_status = 'PARTIALLY_FILLED'
@@ -968,7 +969,7 @@ class HedgeBot:
                         if self.lighter_order_filled:
                             self.logger.info(f"Variational {self.variational_contract_id}建仓成功，lighter建仓成功，等待Variational平仓中")
                         else :
-                            self.logger.info("Variational {self.variational_contract_id}建仓成功，等待lighter建仓中")
+                            self.logger.info(f"Variational {self.variational_contract_id}建仓成功，等待lighter建仓中")
                         # self.logger.info(f"Variational {self.variational_contract_id} 等待平仓中： {self.order_quantity}")
                         return
                     if 0 < self.variational_position < self.order_quantity and self.position_is_full is True:
@@ -1143,18 +1144,15 @@ class HedgeBot:
             self.waiting_for_lighter_fill = False
             if self.variational_position == 0 and self.lighter_position == 0:
                 continue
-            if self.variational_position > 0:
-                side = 'sell'
-            if self.variational_position < 0:
-                side = 'buy'
-            self.logger.info(f"variational_position before closing: {self.variational_position}")
-            try:
-                # Determine side based on some logic (for now, alternate)
-                await self.place_variational_post_only_order(side, abs(self.variational_position))
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
+            if self.variational_position > 0 or self.variational_position < 0:
+                side = 'sell' if self.variational_position > 0 else 'buy'
+                self.logger.info(f"variational_position before closing: {self.variational_position}")
+                try:
+                    await self.place_variational_post_only_order(side, abs(self.variational_position))
+                except Exception as e:
+                    self.logger.error(f"⚠️ Error in trading loop: {e}")
+                    self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                    break
 
             # Wait for order to be filled via WebSocket
             while not self.order_execution_complete and not self.stop_flag:
