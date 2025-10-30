@@ -602,11 +602,10 @@ class HedgeBot:
         reraise=True)
     async def get_lighter_positions(self):
         self.logger.info("Fetching Lighter positions...")
-        # self.logger.info(f"📊 Lighter wallet address: {self.lighter_client.wallet_address}")
-        address = os.getenv('LIGHTER_WALLET_ADDRESS')
-        if not address: 
-            raise Exception("LIGHTER_WALLET_ADDRESS environment variable not set")
-        url = f"{self.lighter_base_url}/api/v1/account?by=l1_address&value={address}"
+        account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        if not account_index: 
+            raise Exception("LIGHTER_ACCOUNT_INDEX environment variable not set")
+        url = f"{self.lighter_base_url}/api/v1/account?by=index&value={account_index}"
         headers = {"accept": "application/json"}
 
         try:
