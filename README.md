@@ -346,6 +346,7 @@ python hedge_mode.py --exchange backpack --ticker ETH --size 0.1 --iter 20
 - `API_KEY_PRIVATE_KEY`: Lighter API 私钥
 - `LIGHTER_ACCOUNT_INDEX`: Lighter 账户索引
 - `LIGHTER_API_KEY_INDEX`: Lighter API 密钥索引
+- `LIGHTER_WALLET_ADDRESS`: Lighter 钱包地址
 
 #### GRVT 配置
 

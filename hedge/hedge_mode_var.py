@@ -16,6 +16,8 @@ from lighter.signer_client import SignerClient
 import sys
 import os
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+
 from helpers.lark_bot import LarkBot
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -203,6 +205,18 @@ class HedgeBot:
 
         self.logger.info(f"📊 Trade logged to CSV: {exchange} {side} {quantity} @ {price}")
 
+    async def notify(self, message: str, level: str = "INFO"):
+        """发送 Lark 通知"""
+        if not os.getenv("LARK_TOKEN"):
+            return
+        
+        try:
+            emoji = {"INFO": "ℹ️", "ERROR": "❌", "SUCCESS": "✅", "WARNING": "⚠️"}.get(level, "📢")
+            async with LarkBot(os.getenv("LARK_TOKEN")) as lark:
+                await lark.send_text(f"{emoji} {message}")
+        except:
+            pass  # 通知失败不影响主程序
+
     def handle_lighter_order_result(self, order_data):
         """Handle Lighter order result from WebSocket."""
         try:
@@ -373,6 +387,8 @@ class HedgeBot:
                             self.logger.info("✅ Subscribed to account orders with auth token (expires in 10 minutes)")
                     except Exception as e:
                         self.logger.warning(f"⚠️ Error creating auth token for account orders subscription: {e}")
+                        await self.notify(f"⚠️ Error creating auth token for account orders subscription: {e}", level="ERROR")
+                        raise Exception(f"Error creating auth token for account orders subscription: {e}")
 
                     while not self.stop_flag:
                         try:
@@ -519,6 +535,7 @@ class HedgeBot:
             # Check client
             err = self.lighter_client.check_client()
             if err is not None:
+                # await self.notify(f"❌ Lighter client initialization failed: {err}", level="ERROR")
                 raise Exception(f"CheckClient error: {err}")
 
             self.logger.info("✅ Lighter client initialized successfully")
@@ -574,6 +591,58 @@ class HedgeBot:
 
         except Exception as e:
             self.logger.error(f"⚠️ Error getting market config: {e}")
+            raise
+    
+    @retry(
+        stop=stop_after_attempt(10),
+        wait=wait_fixed(3),
+        retry=retry_if_exception_type(Exception),
+        reraise=True)
+    async def get_lighter_positions(self):
+        self.logger.info("Fetching Lighter positions...")
+        # self.logger.info(f"📊 Lighter wallet address: {self.lighter_client.wallet_address}")
+        address = os.getenv('LIGHTER_WALLET_ADDRESS')
+        if not address: 
+            raise Exception("LIGHTER_WALLET_ADDRESS environment variable not set")
+        url = f"{self.lighter_base_url}/api/v1/account?by=l1_address&value={address}"
+        headers = {"accept": "application/json"}
+
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+
+            if not response.text.strip():
+                raise Exception("Empty response from Lighter API")
+
+            data = response.json()
+            # self.logger.info(f"📊 Lighter positions data: {data}")
+
+            if "accounts" not in data or not data["accounts"]:
+              raise Exception("No accounts found in response")
+            
+            account = data["accounts"][0]  # 取第一个账户
+            positions = account.get("positions", [])
+        
+            self.logger.info(f"📊 Lighter market_index: {self.lighter_market_index}")
+
+            # 🟢 找到对应市场的仓位
+            for pos in positions:
+                if pos["market_id"] == self.lighter_market_index:
+                # 🟢 正确解析仓位数据
+                    position_size = Decimal(pos.get("position", "0"))
+                    sign = pos.get("sign", 1)  # 1=多头, -1=空头
+                    
+                    # 🟢 计算净仓位（考虑方向）
+                    net_position = position_size * sign
+                    
+                    self.logger.info(f"📊 Found position - Size: {position_size}, Sign: {sign}, Net: {net_position}")
+                    return net_position
+                
+            # 如果没找到对应市场，返回 0
+            self.logger.info(f"📊 No position found for market_id {self.lighter_market_index}")
+            return Decimal('0')
+        except Exception as e:
+            self.logger.error(f"⚠️ Error getting lighter positions: {e}")
             raise
 
     async def get_variational_contract_info(self) -> Tuple[str, Decimal]:
@@ -854,7 +923,8 @@ class HedgeBot:
             
         except Exception as e:
             self.logger.error(f"❌ Error placing Lighter limit order: {e}")
-            return None, None
+            raise Exception(f"Error placing Lighter limit order: {e}")
+            # return None, None
 
     async def _cancel_lighter_order(self, order_id: str) -> bool:
         try:
@@ -1010,6 +1080,7 @@ class HedgeBot:
 
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize: {e}")
+            await self.notify(f"❌ Hedge bot initialization failed: {e}", level="ERROR")
             return
 
         # Setup Variational websocket
@@ -1034,6 +1105,7 @@ class HedgeBot:
 
         except Exception as e:
             self.logger.error(f"❌ Failed to setup Variational websocket: {e}")
+            await self.notify(f"❌ Hedge bot Variational websocket setup failed: {e}", level="ERROR")
             return
 
         # Setup Lighter websocket
@@ -1058,6 +1130,7 @@ class HedgeBot:
 
         except Exception as e:
             self.logger.error(f"❌ Failed to setup Lighter websocket: {e}")
+            await self.notify(f"❌ Hedge bot Lighter websocket setup failed: {e}", level="ERROR")
             return
 
         await asyncio.sleep(5)
@@ -1074,10 +1147,7 @@ class HedgeBot:
             if abs(self.variational_position + self.lighter_position) > self.order_quantity * 2:
                 self.logger.error(f"❌ Position diff is too large: {self.variational_position + self.lighter_position}")
                 self.stop_flag = True
-                lark_token = os.getenv("LARK_TOKEN")
-                if lark_token:
-                    async with LarkBot(lark_token) as Lark:
-                        await Lark.send_text(f"❌ Hedge bot stopped due to large position diff: {self.variational_position + self.lighter_position}")
+                await self.notify(f"❌ Hedge bot stopped due to large position diff: {self.variational_position + self.lighter_position}")
                 break
 
             self.order_execution_complete = False
@@ -1089,6 +1159,7 @@ class HedgeBot:
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                await self.notify(f"⚠️ Hedge bot trading loop error, variational buy failed: {e}", level="ERROR")
                 break
 
             start_time = time.time()
@@ -1121,6 +1192,7 @@ class HedgeBot:
             except Exception as e:
                 self.logger.error(f"⚠️ Error in trading loop: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                await self.notify(f"⚠️ Hedge bot trading loop error, variational sell failed: {e}", level="ERROR")
                 break
 
             while not self.order_execution_complete and not self.stop_flag:
@@ -1139,6 +1211,7 @@ class HedgeBot:
                     break
 
             # Close remaining position
+            self.lighter_position = await self.get_lighter_positions()
             self.logger.info(f"[STEP 3] Variational position: {self.variational_position} | Lighter position: {self.lighter_position}")
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
@@ -1152,15 +1225,28 @@ class HedgeBot:
                 except Exception as e:
                     self.logger.error(f"⚠️ Error in trading loop: {e}")
                     self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
+                    await self.notify(f"⚠️ Hedge bot trading loop error, variational close failed: {e}", level="ERROR")
                     break
+            else:
+                self.waiting_for_lighter_fill = True
+                self.logger.info("No remaining Variational position to close")
+
+            self.logger.info(f"lighter_position before closing: {self.lighter_position}")
+            self.logger.info(f"self.order_execution_complete before closing: {self.order_execution_complete}")
 
             # Wait for order to be filled via WebSocket
             while not self.order_execution_complete and not self.stop_flag:
                 # Check if Variational order filled and we need to place Lighter order
                 if self.waiting_for_lighter_fill:
+                    if self.lighter_position == 0:
+                        break
+                    if self.lighter_position > 0:
+                        lighter_side = 'sell'
+                    if self.lighter_position < 0:
+                        lighter_side = 'buy'
                     await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
+                        lighter_side,
+                        abs(self.lighter_position),
                         # self.current_lighter_price
                     )
                     break
@@ -1169,23 +1255,10 @@ class HedgeBot:
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
-            
-            self.logger.info(f"lighter_position before closing: {self.lighter_position}")
-            if self.lighter_position == 0:
-                continue
-            if self.lighter_position > 0:
-                lighter_side = 'sell'
-            if self.lighter_position < 0:
-                lighter_side = 'buy'
-            try:
-                await self.place_lighter_market_order(lighter_side, abs(self.lighter_position))
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
         await asyncio.sleep(20)
             
         self.logger.info("✅ Trading loop exited")
+        await self.notify("✅ Hedge bot trading loop exited")
     
     async def run(self):
         """Run the hedge bot."""

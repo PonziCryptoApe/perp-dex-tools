@@ -19,6 +19,8 @@ import aiohttp
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
+from helpers.lark_bot import LarkBot
+
 from .base import BaseExchangeClient, OrderResult, OrderInfo
 from helpers.logger import TradingLogger
 
@@ -89,7 +91,19 @@ class VariationalClient(BaseExchangeClient):
         missing_vars = [var for var in required_env_vars if not os.getenv(var)]
         if missing_vars:
             raise ValueError(f"Missing environment variables: {missing_vars}")
-
+        
+    async def notify(self, message: str, level: str = "INFO"):
+        """发送 Lark 通知"""
+        if not os.getenv("LARK_TOKEN"):
+            return
+        
+        try:
+            emoji = {"INFO": "ℹ️", "ERROR": "❌", "SUCCESS": "✅", "WARNING": "⚠️"}.get(level, "📢")
+            async with LarkBot(os.getenv("LARK_TOKEN")) as lark:
+                await lark.send_text(f"{emoji} {message}")
+        except:
+            pass  # 通知失败不影响主程序
+    
     async def _make_var_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
         """使用 cloudscraper 发起 Variational API 请求"""
         loop = asyncio.get_event_loop()
@@ -192,6 +206,7 @@ class VariationalClient(BaseExchangeClient):
             self.logger.log("【VARIATIONAL】Authentication successful", "INFO")
 
         except Exception as e:
+            self.notify(f"❌ Variational authentication failed: {e}", level="ERROR")
             self.logger.log(f"【VARIATIONAL】Authentication failed: {e}", "ERROR")
             raise
 

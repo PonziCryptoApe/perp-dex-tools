@@ -33,6 +33,7 @@ ASTER_SECRET_KEY=your_aster_secret_key
 API_KEY_PRIVATE_KEY=your_api_key_private_key_here
 LIGHTER_ACCOUNT_INDEX=0
 LIGHTER_API_KEY_INDEX=0
+LIGHTER_WALLET_ADDRESS=your_wallet_address_here
 
 # Extended Configuration
 EXTENDED_API_KEY=your_extended_api_key
