@@ -37,7 +37,7 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on Variational and hedges with market orders on Lighter."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20, oi_interval_seconds: int = 2):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
@@ -46,6 +46,7 @@ class HedgeBot:
         self.variational_position = Decimal('0')
         self.lighter_position = Decimal('0')
         self.current_order = {}
+        self.oi_interval_seconds = oi_interval_seconds
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -133,6 +134,7 @@ class HedgeBot:
         # Strategy state
         self.waiting_for_lighter_fill = False
         self.wait_start_time = None
+        self.oi_waiting = False
 
         # Order execution tracking
         self.order_execution_complete = False
@@ -1006,8 +1008,9 @@ class HedgeBot:
                 # 有仓位
                 if positions:
                     self.variational_position = Decimal(position_data.get('position_info', {"qty": "0"}).get('qty', '0'))
-                    self.logger.info(f"Variational 当前仓位： {self.variational_position}")
-                    self.logger.info(f"lighter 当前仓位: {self.lighter_position}")
+                    if self.oi_waiting is False:
+                        self.logger.info(f"Variational 当前仓位： {self.variational_position}")
+                        self.logger.info(f"lighter 当前仓位: {self.lighter_position}")
                     # 开仓中
                     if 0 < self.variational_position < self.order_quantity and self.position_is_full is False:
                         self.variational_order_status = 'PARTIALLY_FILLED'
@@ -1037,7 +1040,8 @@ class HedgeBot:
                     # 等待平仓中
                     if self.variational_position == self.order_quantity and self.position_is_full is True:
                         if self.lighter_order_filled:
-                            self.logger.info(f"Variational {self.variational_contract_id}建仓成功，lighter建仓成功，等待Variational平仓中")
+                            if self.oi_waiting is False:
+                                self.logger.info(f"Variational {self.variational_contract_id}建仓成功，lighter建仓成功，等待Variational平仓中")
                         else :
                             self.logger.info(f"Variational {self.variational_contract_id}建仓成功，等待lighter建仓中")
                         # self.logger.info(f"Variational {self.variational_contract_id} 等待平仓中： {self.order_quantity}")
@@ -1180,6 +1184,10 @@ class HedgeBot:
 
             if self.stop_flag:
                 break
+            self.oi_waiting = True
+            self.logger.info(f"Waiting for {self.oi_interval_seconds} seconds before next step...")
+            await asyncio.sleep(self.oi_interval_seconds)
+            self.oi_waiting = False
 
             # Close position
             self.logger.info(f"[STEP 2] Variational position: {self.variational_position} | Lighter position: {self.lighter_position}")

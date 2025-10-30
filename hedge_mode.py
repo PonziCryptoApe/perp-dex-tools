@@ -33,6 +33,7 @@ def parse_arguments():
 Examples:
     python hedge_mode.py --exchange backpack --ticker BTC --size 0.01 --iter 10
     python hedge_mode.py --exchange extended --ticker ETH --size 0.1 --iter 5
+    python hedge_mode.py --exchange var --ticker BTC --size 0.003 --iter 50 --oi-interval 900 # 15 minutes
         """
     )
     
@@ -48,7 +49,9 @@ Examples:
                         help='Timeout in seconds for maker order fills (default: 5)')
     parser.add_argument('--env-file', type=str, default=".env",
                         help=".env file path (default: .env)")
-    
+    parser.add_argument('--oi-interval', type=int, default=2,
+                        help='Order information interval in seconds (default: 2)')
+
     return parser.parse_args()
 
 
@@ -102,6 +105,8 @@ async def main():
     
     print(f"Starting hedge mode for {args.exchange} exchange...")
     print(f"Ticker: {args.ticker}, Size: {args.size}, Iterations: {args.iter}")
+    if args.exchange.lower() == 'var':
+        print(f"Order Info Interval (seconds): {args.oi_interval}")
     print("-" * 50)
     
     try:
@@ -113,14 +118,21 @@ async def main():
                 fill_timeout=args.fill_timeout,
                 iterations=args.iter
             )
-        else:  # extended
+        elif args.exchange.lower() == 'var':
+            bot = HedgeBotClass(
+                ticker=args.ticker.upper(),
+                order_quantity=Decimal(args.size),
+                fill_timeout=args.fill_timeout,
+                iterations=args.iter,
+                oi_interval_seconds=args.oi_interval
+            ) 
+        else:
             bot = HedgeBotClass(
                 ticker=args.ticker.upper(),
                 order_quantity=Decimal(args.size),
                 fill_timeout=args.fill_timeout,
                 iterations=args.iter
             )
-        
         # Run the bot
         await bot.run()
         
