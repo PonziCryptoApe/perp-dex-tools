@@ -343,7 +343,9 @@ class VariationalClient(BaseExchangeClient):
             if 'positions' in data:
                 # for position_update in data['positions']:
                     if self._order_update_handler:
-                        self._order_update_handler(data['positions'])
+                        result = self._order_update_handler(data['positions'])
+                        if asyncio.iscoroutine(result):
+                            asyncio.run(result)
         except json.JSONDecodeError:
             self.logger.log(f"【VARIATIONAL】Failed to parse portfolio message: {message[:200]}", "WARNING")
         except Exception as e:
@@ -552,6 +554,88 @@ class VariationalClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"【VARIATIONAL】Error getting active orders: {e}", "ERROR")
             return []
+    
+    # 获取订单历史记录
+    async def get_orders_history(
+        self, 
+        limit: int = 20, 
+        offset: int = 0, 
+        # start_date: Optional[datetime] = None,
+        # end_date: Optional[datetime] = None,
+        rfq_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        获取订单历史记录
+        
+        Args:
+            limit: 返回记录数量限制 (默认20)
+            offset: 偏移量 (默认0) 
+            start_date: 开始时间 (可选)
+            end_date: 结束时间 (可选)
+            rfq_id: 特定订单ID过滤 (可选)
+            
+        Returns:
+            包含订单历史和分页信息的字典
+        """
+        try:
+            url = f"{self.api_base}/orders/v2"
+            
+            # 构建查询参数
+            params = {
+                'limit': str(limit),
+                'offset': str(offset),
+                'order_by': 'created_at',
+                'order': 'desc',
+                'status': 'canceled,cleared,rejected'
+            }
+            
+            # 获取当前时间
+            now = datetime.now(timezone.utc)
+
+            # 设置开始时间：前天的16:00:00 UTC
+            # start_date = (now - timedelta(days=2)).replace(hour=16, minute=0, second=0, microsecond=0)
+            # start_iso = start_date.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-3] + 'Z'
+            # params['created_at_gte'] = start_iso
+
+            # # 设置结束时间：今天的15:59:59.999 UTC
+            # end_date = now.replace(hour=15, minute=59, second=59, microsecond=999000)
+            # end_iso = end_date.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-3] + 'Z'
+            # params['created_at_lte'] = end_iso
+
+            # 设置认证 cookies
+            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+            
+            self.logger.log(f"【VARIATIONAL】Fetching orders history with params: {params}", "INFO")
+            
+            # 发起请求
+            response_data = await self._make_var_request('GET', url, params=params, cookies=cookies)
+            # self.logger.log(f"【VARIATIONAL】Orders history response: {response_data}", "INFO")
+            # 如果指定了 rfq_id，进行过滤
+            if rfq_id and 'result' in response_data:
+                filtered_orders = [
+                    order for order in response_data['result'] 
+                    if order.get('rfq_id') == rfq_id
+                ]
+                
+                response_data['result'] = filtered_orders
+                # 更新对象计数
+                response_data['pagination']['object_count'] = len(filtered_orders)
+                
+                self.logger.log(f"【VARIATIONAL】Filtered {len(filtered_orders)} orders for rfq_id: {rfq_id}", "INFO")
+            
+            self.logger.log(f"【VARIATIONAL】Retrieved {len(response_data.get('result', []))} orders", "INFO")
+            return response_data
+            
+        except Exception as e:
+            self.logger.log(f"【VARIATIONAL】Error fetching orders history: {e}", "ERROR")
+            return {
+                'pagination': {
+                    'object_count': 0,
+                    'next_page': None,
+                    'last_page': None
+                },
+                'result': []
+            }
 
     async def get_account_positions(self) -> Decimal:
         """使用 cloudscraper 获取账户持仓"""

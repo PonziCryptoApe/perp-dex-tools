@@ -15,6 +15,7 @@ from typing import Tuple
 from lighter.signer_client import SignerClient
 import sys
 import os
+logging.getLogger("asyncio").setLevel(logging.INFO)
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
@@ -101,7 +102,8 @@ class HedgeBot:
         self.variational_tick_size = None
         self.variational_order_status = None
         # self.variational_position_size = Decimal('0')
-        self.position_is_full = False
+        self.variational_position_is_full = False
+        self.variational_order_id = None
 
         # Variational order book state for websocket-based BBO
         self.variational_order_book = {'bids': {}, 'asks': {}}
@@ -711,6 +713,7 @@ class HedgeBot:
         self.variational_order_status = None
         self.logger.info(f"[OPEN] [Variational] [{side}] Placing Variational POST-ONLY order")
         order_id, order_price = await self.place_bbo_order(side, quantity)
+        self.variational_order_id = order_id
         self.logger.info(f"Placed Variational order {order_id} at price {order_price}")
         start_time = time.time()
         last_cancel_time = 0
@@ -721,6 +724,7 @@ class HedgeBot:
                 self.logger.info(f"Order {order_id} was canceled or failed, placing new order")
                 self.variational_order_status = None  # Reset to None to trigger new order
                 order_id, order_price = await self.place_bbo_order(side, quantity)
+                self.variational_order_id = order_id
                 self.logger.info(f"Placed new Variational order {order_id} at price {order_price}")
                 start_time = time.time()
                 last_cancel_time = 0  # Reset cancel timer
@@ -967,8 +971,8 @@ class HedgeBot:
         """Setup Variational websocket for order updates and order book data."""
         if not self.variational_client:
             raise Exception("Variational client not initialized")
-
-        def order_update_handler(positions):
+        
+        async def order_update_handler(positions):
             """Handle order updates from Variational WebSocket."""
             # self.logger.info(f"Variational order update received position_data")
             # self.logger.info(f"variational_contract_id: {self.variational_contract_id}")
@@ -978,18 +982,25 @@ class HedgeBot:
             #     self.logger.info(f"Ignoring order update from {position_data.get('instrument').get('underlying')}")
             #     return
             try:
-                # 初始状态下，仓位为0, 且position_is_full为False
-                if positions == [] and self.position_is_full is False:
+                # 初始状态下，仓位为0, 且variational_position_is_full为False
+                if positions == [] and self.variational_position_is_full is False:
                     # self.logger.info("Variational 仓位为空，等待开仓或订单成交")
                     return
                 # 平仓成功了
-                if positions == [] and self.position_is_full is True:
+                if positions == [] and self.variational_position_is_full is True:
                     # self.logger.info("Variational 平仓成功，仓位为空")
-                    self.position_is_full = False
+                    self.variational_position_is_full = False
                     self.variational_position = Decimal('0')
                     self.variational_order_status = 'FILLED'
-                    price = 'unknown'
-                    # self.logger.info(f"📊 Variational order filled: {self.order_quantity} @ {price}")
+                    # 通过接口获取平仓价格
+                    history = await self.variational_client.get_orders_history(20, 0, self.variational_order_id)
+                    # self.logger.info(f"Variational 平仓订单历史: {history}")
+                    if history.get('result'):
+                        price = history.get('result')[0].get('price', 'error')
+                        self.logger.info(f"📊 Variational order filled: {self.order_quantity} @ {price}")
+                    else:
+                        price = 'error'
+                        self.logger.info(f"📊 Variational order filled: {self.order_quantity} @ {price} (could not fetch from history)")
                     self.logger.info(f"Variational 平仓成功, 当前仓位：{self.variational_position}")
                     self.log_trade_to_csv(
                         exchange='Variational',
@@ -1007,17 +1018,19 @@ class HedgeBot:
                 # 有仓位
                 if positions:
                     self.variational_position = Decimal(position_data.get('position_info', {"qty": "0"}).get('qty', '0'))
+                    self.logger.info(f"Variational 当前仓位： {self.variational_position}")
+                    # 持仓等待期间无需发送日志
                     if self.oi_waiting is False:
                         self.logger.info(f"Variational 当前仓位： {self.variational_position}")
                         self.logger.info(f"lighter 当前仓位: {self.lighter_position}")
                     # 开仓中
-                    if 0 < self.variational_position < self.order_quantity and self.position_is_full is False:
+                    if 0 < self.variational_position < self.order_quantity and self.variational_position_is_full is False:
                         self.variational_order_status = 'PARTIALLY_FILLED'
                         self.logger.info(f"Variational 开仓中： {self.variational_position} / {self.order_quantity}")
                         return
                     # 开仓成功
-                    if self.variational_position == self.order_quantity and self.position_is_full is False:
-                        self.position_is_full = True
+                    if self.variational_position == self.order_quantity and self.variational_position_is_full is False:
+                        self.variational_position_is_full = True
                         self.variational_order_status = 'FILLED'
                         price = Decimal(position_data.get('position_info', {"avg_entry_price": "0"}).get('avg_entry_price', '0'))
                         self.logger.info(f"📊 Variational order filled: {self.order_quantity} @ {price}")
@@ -1037,7 +1050,7 @@ class HedgeBot:
                         return
                     
                     # 等待平仓中
-                    if self.variational_position == self.order_quantity and self.position_is_full is True:
+                    if self.variational_position == self.order_quantity and self.variational_position_is_full is True:
                         if self.lighter_order_filled:
                             if self.oi_waiting is False:
                                 self.logger.info(f"Variational {self.variational_contract_id}建仓成功，lighter建仓成功，等待Variational平仓中")
@@ -1045,7 +1058,7 @@ class HedgeBot:
                             self.logger.info(f"Variational {self.variational_contract_id}建仓成功，等待lighter建仓中")
                         # self.logger.info(f"Variational {self.variational_contract_id} 等待平仓中： {self.order_quantity}")
                         return
-                    if 0 < self.variational_position < self.order_quantity and self.position_is_full is True:
+                    if 0 < self.variational_position < self.order_quantity and self.variational_position_is_full is True:
                         self.variational_order_status = 'PARTIALLY_FILLED'
                         self.logger.info(f"Variational {self.variational_contract_id} 平仓中： {self.variational_position} / {self.order_quantity}")
                         return
