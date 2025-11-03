@@ -16,6 +16,8 @@ from lighter.signer_client import SignerClient
 import sys
 import os
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+
 from helpers.lark_bot import LarkBot
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -575,7 +577,58 @@ class HedgeBot:
         except Exception as e:
             self.logger.error(f"⚠️ Error getting market config: {e}")
             raise
+    
+    @retry(
+        stop=stop_after_attempt(10),
+        wait=wait_fixed(3),
+        retry=retry_if_exception_type(Exception),
+        reraise=True)
+    async def get_lighter_positions(self):
+        self.logger.info("Fetching Lighter positions...")
+        account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        if not account_index: 
+            raise Exception("LIGHTER_ACCOUNT_INDEX environment variable not set")
+        url = f"{self.lighter_base_url}/api/v1/account?by=index&value={account_index}"
+        headers = {"accept": "application/json"}
 
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+
+            if not response.text.strip():
+                raise Exception("Empty positions response from Lighter API")
+
+            data = response.json()
+            # self.logger.info(f"📊 Lighter positions data: {data}")
+
+            if "accounts" not in data or not data["accounts"]:
+              raise Exception("No accounts found in response")
+            
+            account = data["accounts"][0]  # 取第一个账户
+            positions = account.get("positions", [])
+        
+            self.logger.info(f"📊 Lighter market_index: {self.lighter_market_index}")
+
+            # 🟢 找到对应市场的仓位
+            for pos in positions:
+                if pos["market_id"] == self.lighter_market_index:
+                # 🟢 正确解析仓位数据
+                    position_size = Decimal(pos.get("position", "0"))
+                    sign = pos.get("sign", 1)  # 1=多头, -1=空头
+                    
+                    # 🟢 计算净仓位（考虑方向）
+                    net_position = position_size * sign
+                    
+                    self.logger.info(f"📊 Found position - Size: {position_size}, Sign: {sign}, Net: {net_position}")
+                    return net_position
+                
+            # 如果没找到对应市场，返回 0
+            self.logger.info(f"📊 No position found for market_id {self.lighter_market_index}")
+            return Decimal('0')
+        except Exception as e:
+            self.logger.error(f"⚠️ Error getting lighter positions: {e}")
+            raise
+    
     async def get_extended_contract_info(self) -> Tuple[str, Decimal]:
         """Get Extended contract ID and tick size."""
         if not self.extended_client:
@@ -1177,6 +1230,7 @@ class HedgeBot:
                     break
 
             # Close remaining position
+            self.lighter_position = await self.get_lighter_positions()            
             self.logger.info(f"[STEP 3] Extended position: {self.extended_position} | Lighter position: {self.lighter_position}")
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
@@ -1199,6 +1253,13 @@ class HedgeBot:
             while not self.order_execution_complete and not self.stop_flag:
                 # Check if Extended order filled and we need to place Lighter order
                 if self.waiting_for_lighter_fill:
+                    if self.lighter_position == 0:
+                        break
+                    if self.lighter_position > 0:
+                        self.current_lighter_side = 'sell'
+                    if self.lighter_position < 0:
+                        self.current_lighter_side = 'buy'
+                    self.current_lighter_quantity = abs(self.lighter_position)
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
                         self.current_lighter_quantity,
