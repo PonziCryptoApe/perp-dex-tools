@@ -1,6 +1,7 @@
 # used to distinguish log files for multiple accounts, optional
 
 ACCOUNT_NAME=
+MODE_NAME=
 
 # EdgeX Account Credentials (REQUIRED for API access)
 # Find these in your EdgeX account under "API Management"
