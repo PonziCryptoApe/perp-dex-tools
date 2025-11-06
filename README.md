@@ -306,6 +306,32 @@ python hedge_mode.py --exchange backpack --ticker ETH --size 0.1 --iter 20
 - `--iter`: 交易循环次数
 - `--fill-timeout`: maker 订单填充超时时间（秒，默认 5）
 
+## 🆕 单一交易所市价开关仓刷量模式 (Single Mode)
+
+新增的单一模式 (`single_mode.py`) 是一个新的交易策略，通过消耗手续费和滑点的交易费来赚取交易量，目前只支持extended
+
+### 单一刷量模式工作原理
+
+1. **开仓阶段**：在选定交易所（如 Backpack）下 taker 订单
+3. **平仓阶段**：在选定交易所下另一个 maker 订单平仓
+
+### 单一刷量模式使用示例
+
+```bash
+# 运行 BTC 单一刷量模式
+python single_mode.py --exchange extended --ticker BTC --size 0.05 --iter 20
+python single_mode.py --exchange extended --ticker BTC --size 0.0001 --iter 2 --side sell --env-file .env.extend
+```
+
+### 单一刷量模式参数
+
+- `--exchange`: 主要交易所（目前支持 'backpack'）
+- `--ticker`: 交易对符号（如 BTC, ETH）
+- `--size`: 每笔订单数量
+- `--iter`: 交易循环次数
+- `--side`: taker 交易方向
+- `--env-file`: 环境变量文件
+
 ## 配置
 
 ### 环境变量
@@ -313,6 +339,7 @@ python hedge_mode.py --exchange backpack --ticker ETH --size 0.1 --iter 20
 #### 通用配置
 
 - `ACCOUNT_NAME`: 环境变量中当前账号的名称，用于多账号日志区分，可自定义，非必须
+- `MODE_NAME`: 当单一模式会生效，用于区分日志和csv文件，加上后会在日志和csv文件中带上，对冲模式不会生效，是因为对冲文件的log没有使用helpers里的logger文件
 
 #### Telegram 配置（可选）
 

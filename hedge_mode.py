@@ -18,6 +18,7 @@ Cross-platform compatibility:
 """
 
 import asyncio
+import gc
 import sys
 import argparse
 from decimal import Decimal
@@ -144,7 +145,22 @@ async def main():
         import traceback
         print(f"Full traceback: {traceback.format_exc()}")
         return 1
-    
+    finally:
+        # 等待清理
+        await asyncio.sleep(1.5)
+        
+        # 取消所有剩余任务
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if tasks:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 强制垃圾回收
+        gc.collect()
+        
+        # 再等待一下
+        await asyncio.sleep(1.0)
     return 0
 
 

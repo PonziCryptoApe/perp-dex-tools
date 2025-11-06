@@ -104,6 +104,17 @@ class ExtendedClient(BaseExchangeClient):
         self.initial_check_for_open_orders = True  # PATCH: will turn to False after 2 times (to match the trading bot logic), so that we can get the open orders even after restarting the script
         self.get_active_orders_cnt = 0
 
+         # 创建共享的 aiohttp session
+        self._session = None
+        self._session_lock = asyncio.Lock()
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession()
+            return self._session
+        
     def _validate_config(self) -> None:
         """Validate the exchange-specific configuration."""
         required_env_vars = ['EXTENDED_VAULT', 'EXTENDED_STARK_KEY_PRIVATE', 'EXTENDED_STARK_KEY_PUBLIC', 'EXTENDED_API_KEY']
@@ -134,43 +145,67 @@ class ExtendedClient(BaseExchangeClient):
         ]
         self.logger.log("Streams started", "INFO")
         
-    async def disconnect(self) -> None:
-        """Disconnect from the exchange gracefully."""
+    async def disconnect(self):
+        """Disconnect from Extended exchange"""
+        self.logger.log("Starting graceful disconnect from Extended exchange")
+        
         try:
-            self.logger.log("Starting graceful disconnect from Extended exchange", "INFO")
-            
-            # 1. Cancel outstanding buy orders
-            active_orders = await self.get_active_orders(self.config.contract_id)
-            for order in active_orders:
-                if order.side == "buy":
-                    await self.cancel_order(order.order_id)
-                
-            
-            # Stop WebSocket streams
+            # 1. 停止 WebSocket 流
             self._stop_event.set()
-            for t in self._tasks:
-                t.cancel()
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-            self.logger.log("Streams stopped", "INFO")
-            
-            # 2. Close the main client connection if it exists
-            if hasattr(self, 'client') and self.perpetual_trading_client:
+
+            # 2. 等待一下让任务检测到停止标志
+            await asyncio.sleep(0.2)
+
+            # 3. 等待所有任务完成
+            if self._tasks:
+                for task in self._tasks:
+                    if not task.done():
+                        task.cancel()
+                # 用 wait_for 限制等待时间
                 try:
-                    await self.perpetual_trading_client.close()
-                    self.logger.log("Main client connection closed", "INFO")
+                    await asyncio.wait_for(
+                        asyncio.gather(*self._tasks, return_exceptions=True),
+                        timeout=2.0
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.log("⚠️ Some tasks did not finish in time")
+                
+                self.logger.log("Streams stopped")
+
+            # 4. 关闭共享的 aiohttp session
+            if hasattr(self, '_session') and self._session and not self._session.closed:
+                await self._session.close()
+                await asyncio.sleep(0.25)
+                self.logger.log("Shared session closed")
+            
+            if self.perpetual_trading_client:
+                try:
+                    # 先检查是否有 close 方法
+                    if hasattr(self.perpetual_trading_client, 'close'):
+                        await asyncio.wait_for(
+                            self.perpetual_trading_client.close(),
+                            timeout=1.0
+                        )
+                        self.logger.log("Trading client closed")
+                    # 如果没有 close 方法，检查是否有 _session
+                    elif hasattr(self.perpetual_trading_client, '_session'):
+                        if not self.perpetual_trading_client._session.closed:
+                            await self.perpetual_trading_client._session.close()
+                            await asyncio.sleep(0.25)
+                            self.logger.log("Trading client session closed")
+                except asyncio.TimeoutError:
+                    self.logger.log("⚠️ Trading client close timeout")
                 except Exception as e:
-                    self.logger.log(f"Error closing main client: {e}", "WARNING")
+                    self.logger.log(f"⚠️ Error closing trading client: {e}")
+        
+            # 5. 等待所有连接完全关闭
+            await asyncio.sleep(0.5)
             
-            # 5. Reset internal state
-            self.orderbook = None
-            self._order_update_handler = None
-            
-            self.logger.log("Extended exchange disconnected successfully", "INFO")
+            self.logger.log("Extended exchange disconnected successfully")
             
         except Exception as e:
-            self.logger.log(f"Error during Extended disconnect: {e}", "ERROR")
+            self.logger.log(f"Error during disconnect: {e}", level="ERROR")
             self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
-            raise
         
         
     async def fetch_bbo_prices(self, contract_id: str) -> tuple[Decimal, Decimal]:
@@ -199,6 +234,102 @@ class ExtendedClient(BaseExchangeClient):
             self.logger.log(f"Error fetching BBO prices for {contract_id}: {str(e)}", level="ERROR")
             return Decimal('0'), Decimal('0')
 
+    async def place_market_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
+        """Place an open order with Extended using official SDK with retry logic for POST_ONLY rejections."""
+        max_retries = 15
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                if self.orderbook == None:
+                    # the websocket orderbook is not updated yet, sleep for 1 second
+                    await asyncio.sleep(1)
+                    self.logger.log(f"Orderbook is not updated yet, sleeping for 1 second", level="INFO")
+                    continue
+
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+
+                if best_bid <= 0 or best_ask <= 0:
+                    return OrderResult(success=False, error_message='Invalid bid/ask prices')
+
+                if direction == 'buy':
+                    # For buy orders, place slightly below best ask to ensure execution
+                    order_price = best_ask * Decimal('1.0005')
+                    side = OrderSide.BUY
+                else:
+                    # For sell orders, place slightly above best bid to ensure execution
+                    order_price = best_bid * Decimal('0.9995')
+                    side = OrderSide.SELL
+
+                # Round price to appropriate precision
+                rounded_price = self.round_to_tick(order_price)
+
+                # set timeout to 9 seconds for open orders to avoid orders being filled right when trading_bot hit 10s timeout and call cancel_order
+                # Place the order using official SDK (post-only to ensure maker order)
+                order_result = await self.perpetual_trading_client.place_order(
+                    market_name=contract_id,
+                    amount_of_synthetic=quantity,
+                    price=rounded_price,
+                    side=side,
+                    time_in_force=TimeInForce.IOC,
+                    post_only=False,  # Ensure MAKER orders
+                    expire_time = utc_now() + timedelta(days=1), # SDK 1 hour default
+                )
+
+                if not order_result or not order_result.data or order_result.status != 'OK':
+                    return OrderResult(success=False, error_message='Failed to place order')
+
+                # Extract order ID from response
+                order_id = order_result.data.id
+                if not order_id:
+                    return OrderResult(success=False, error_message='No order ID in response')
+
+                # Check order status after a short delay to see if it was rejected
+                await asyncio.sleep(0.01)
+                order_info = await self.get_order_info(order_id)
+
+                if order_info:
+                    if order_info.status in ['CANCELED', 'REJECTED']:
+                        if retry_count < max_retries - 1:
+                            self.logger.log(f"POST-ONLY order rejected, retrying", level="INFO")
+                            retry_count += 1
+                            continue
+                        else:
+                            self.logger.log(f"POST-ONLY order rejected after {max_retries} attempts", level="ERROR")
+                            return OrderResult(success=False, error_message=f'Order rejected after {max_retries} attempts')
+                    elif order_info.status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED']:
+                        # Order successfully placed
+                        return OrderResult(
+                            success=True,
+                            order_id=order_id,
+                            side=side.value,
+                            size=quantity,
+                            price=rounded_price,
+                            status=order_info.status
+                        )
+                    else:
+                        return OrderResult(success=False, error_message=f'Unexpected order status: {order_info.status}')
+                else:
+                    # Assume order is successful if we can't get info
+                    self.logger.log(f"Could not get order info for {order_id}, assuming order is successful", level="ERROR")
+                    return OrderResult(
+                        success=True,
+                        order_id=order_id,
+                        side=side.value,
+                        size=quantity,
+                        price=rounded_price
+                    )
+
+            except Exception as e:
+                if retry_count < max_retries - 1:
+                    retry_count += 1
+                    await asyncio.sleep(0.1)  # Wait before retry
+                    continue
+                else:
+                    return OrderResult(success=False, error_message=str(e))
+
+        return OrderResult(success=False, error_message='Max retries exceeded')
+    
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with Extended using official SDK with retry logic for POST_ONLY rejections."""
         max_retries = 15
@@ -473,42 +604,41 @@ class ExtendedClient(BaseExchangeClient):
         while not order_info and attempt < 50:
             attempt += 1
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers) as response:
-                        if response.status == 200:
-                            data = await response.json()
+                session = await self._get_session()  # ✅ 使用共享 session
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+
+                        if data.get("status") != "OK" or not data.get("data"):
+                            self.logger.log(f"Failed to get order info attempt {attempt} for {order_id}: {data}", "ERROR")
+                            return None
+
+                        order_data = data["data"]
                             
-                            if data.get("status") != "OK" or not data.get("data"):
-                                self.logger.log(f"Failed to get order info attempt {attempt} for {order_id}: {data}", "ERROR")
-                                return None
-                            
-                            order_data = data["data"]
-                            
-                            # Convert status to match expected format
-                            status = order_data.get("status", "")
-                            if status == "NEW":
-                                status = "OPEN"
-                            elif status == "CANCELLED":
-                                status = "CANCELED"
-                            
-                            # Create OrderInfo object
-                            order_info = OrderInfo(
-                                order_id=str(order_data.get("id", "")),
-                                side=order_data.get("side", "").lower(),
-                                size=Decimal(order_data.get("qty", "0")) - Decimal(order_data.get("filledQty", "0")),
-                                price=Decimal(order_data.get("price", "0")),
-                                status=status,
-                                filled_size=Decimal(order_data.get("filledQty", "0")),
-                                remaining_size=Decimal(order_data.get("qty", "0")) - Decimal(order_data.get("filledQty", "0"))
-                            )
-                            return order_info
+                        # Convert status to match expected format
+                        status = order_data.get("status", "")
+                        if status == "NEW":
+                            status = "OPEN"
+                        elif status == "CANCELLED":
+                            status = "CANCELED"
                         
-                        elif response.status == 404:
-                            # Order not found
-                            self.logger.log(f"Order {order_id} not found attempt {attempt}", "INFO")
+                        # Create OrderInfo object
+                        order_info = OrderInfo(
+                            order_id=str(order_data.get("id", "")),
+                            side=order_data.get("side", "").lower(),
+                            size=Decimal(order_data.get("qty", "0")) - Decimal(order_data.get("filledQty", "0")),
+                            price=Decimal(order_data.get("price", "0")),
+                            status=status,
+                            filled_size=Decimal(order_data.get("filledQty", "0")),
+                            remaining_size=Decimal(order_data.get("qty", "0")) - Decimal(order_data.get("filledQty", "0"))
+                        )
+                        return order_info
                         
-                        else:
-                            self.logger.log(f"Failed to get order info attempt {attempt} for {order_id}: HTTP {response.status}", "ERROR")
+                    elif response.status == 404:
+                        self.logger.log(f"Order {order_id} not found attempt {attempt}", "INFO")
+                        return None
+                    else:
+                        self.logger.log(f"Failed to get order info attempt {attempt} for {order_id}: HTTP {response.status}", "ERROR")
                             
             except Exception as e:
                 self.logger.log(f"Error getting order info attempt {attempt} for {order_id}: {str(e)}", "ERROR")

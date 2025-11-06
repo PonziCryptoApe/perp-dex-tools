@@ -28,6 +28,10 @@ class TradingLogger:
         if account_name:
             order_file_name = f"{exchange}_{ticker}_{account_name}_orders.csv"
             debug_log_file_name = f"{exchange}_{ticker}_{account_name}_activity.log"
+        mode_name = os.getenv('MODE_NAME')
+        if mode_name:
+            order_file_name = f"{exchange}_{ticker}_{account_name}_{mode_name}_orders.csv"
+            debug_log_file_name = f"{exchange}_{ticker}_{account_name}_{mode_name}_activity.log"
 
         # Log file paths inside logs directory
         self.log_file = os.path.join(logs_dir, order_file_name)

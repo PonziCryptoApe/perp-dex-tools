@@ -9,6 +9,8 @@ import requests
 import argparse
 import traceback
 import csv
+import gc
+
 from decimal import Decimal
 from typing import Tuple
 
@@ -105,6 +107,8 @@ class HedgeBot:
         self.extended_best_bid = None
         self.extended_best_ask = None
         self.extended_order_book_ready = False
+        self.depth_ws_task = None  # 新增：Extended depth WebSocket 任务
+        self._shutdown_called = False  # 防止重复调用 shutdown
 
         # Lighter order book state
         self.lighter_client = None
@@ -152,35 +156,107 @@ class HedgeBot:
         self.extended_stark_key_public = os.getenv('EXTENDED_STARK_KEY_PUBLIC')
         self.extended_api_key = os.getenv('EXTENDED_API_KEY')
 
-    def shutdown(self, signum=None, frame=None):
+    async def shutdown(self, signum=None, frame=None):
         """Graceful shutdown handler."""
+        if hasattr(self, '_shutdown_called') and self._shutdown_called:
+            return
+        self._shutdown_called = True
+        
         self.stop_flag = True
         self.logger.info("\n🛑 Stopping...")
 
-        # Close WebSocket connections
-        if self.extended_client:
-            try:
-                # Note: disconnect() is async, but shutdown() is sync
-                # We'll let the cleanup happen naturally
-                self.logger.info("🔌 Extended WebSocket will be disconnected")
-            except Exception as e:
-                self.logger.error(f"Error disconnecting Extended WebSocket: {e}")
-
-        # Cancel Lighter WebSocket task
-        if self.lighter_ws_task and not self.lighter_ws_task.done():
-            try:
+        try:
+            # 1. 取消 Lighter WebSocket 任务
+            if self.lighter_ws_task and not self.lighter_ws_task.done():
                 self.lighter_ws_task.cancel()
-                self.logger.info("🔌 Lighter WebSocket task cancelled")
-            except Exception as e:
-                self.logger.error(f"Error cancelling Lighter WebSocket task: {e}")
-
-        # Close logging handlers properly
-        for handler in self.logger.handlers[:]:
-            try:
-                handler.close()
-                self.logger.removeHandler(handler)
-            except Exception:
-                pass
+                try:
+                    await asyncio.wait_for(self.lighter_ws_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                self.logger.info("🔄 Lighter WebSocket task cancelled")
+            
+            # 2. 取消 Extended Depth WebSocket 任务
+            if hasattr(self, 'depth_ws_task') and self.depth_ws_task and not self.depth_ws_task.done():
+                self.depth_ws_task.cancel()
+                try:
+                    await asyncio.wait_for(self.depth_ws_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                self.logger.info("🔄 Extended Depth WebSocket task cancelled")
+            
+            # 3. 等待一下
+            await asyncio.sleep(0.5)
+            
+            # 4. 断开 Extended client
+            if self.extended_client:
+                try:
+                    await asyncio.wait_for(self.extended_client.disconnect(), timeout=3.0)
+                    self.logger.info("🔌 Extended client disconnected")
+                except asyncio.TimeoutError:
+                    self.logger.warning("⚠️ Extended disconnect timeout, forcing close...")
+                except Exception as e:
+                    self.logger.error(f"Error disconnecting Extended client: {e}")
+            
+            # 5. 强制关闭所有 session
+            if self.extended_client:
+                self.logger.info("🔧 Forcing session cleanup...")
+                
+                # 5.1 关闭 extended_client._session
+                if hasattr(self.extended_client, '_session'):
+                    try:
+                        if self.extended_client._session and not self.extended_client._session.closed:
+                            await self.extended_client._session.close()
+                            await asyncio.sleep(0.3)
+                            self.logger.info("✅ Forced close: extended_client._session")
+                    except Exception as e:
+                        self.logger.warning(f"Error force closing _session: {e}")
+                
+                # 5.2 关闭 perpetual_trading_client
+                if hasattr(self.extended_client, 'perpetual_trading_client'):
+                    client = self.extended_client.perpetual_trading_client
+                    
+                    if hasattr(client, 'close'):
+                        try:
+                            await asyncio.wait_for(client.close(), timeout=2.0)
+                            self.logger.info("✅ Called: trading_client.close()")
+                        except Exception as e:
+                            self.logger.warning(f"Error calling trading_client.close(): {e}")
+                    
+                    await asyncio.sleep(0.5)
+                    
+                    # 遍历所有可能的 session 属性
+                    for attr_name in ['_session', 'session', '_http_client', 'http_client']:
+                        if hasattr(client, attr_name):
+                            try:
+                                session_obj = getattr(client, attr_name)
+                                if session_obj and hasattr(session_obj, 'closed') and not session_obj.closed:
+                                    await session_obj.close()
+                                    await asyncio.sleep(0.3)
+                                    self.logger.info(f"✅ Forced close: trading_client.{attr_name}")
+                            except Exception as e:
+                                self.logger.warning(f"Error closing {attr_name}: {e}")
+            
+            # 6. 强制垃圾回收
+            gc.collect()
+            self.logger.info("🗑️ Garbage collection triggered")
+            
+            # 7. 最后等待
+            await asyncio.sleep(1.0)
+            
+        except Exception as e:
+            self.logger.error(f"Error during shutdown: {e}", exc_info=True)
+        finally:
+            self.logger.info("🔌 Extended WebSocket will be disconnected")
+            
+            # 关闭日志处理器
+            for handler in self.logger.handlers[:]:
+                try:
+                    handler.close()
+                    self.logger.removeHandler(handler)
+                except Exception:
+                    pass
+            
+            self.logger.info("✅ Shutdown complete.")
 
     def _initialize_csv_file(self):
         """Initialize CSV file with headers if it doesn't exist."""
@@ -501,8 +577,13 @@ class HedgeBot:
 
     def setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
-        signal.signal(signal.SIGINT, self.shutdown)
-        signal.signal(signal.SIGTERM, self.shutdown)
+        def signal_handler(signum, frame):
+            """Synchronous signal handler."""
+            if not self.stop_flag:  # 防止重复触发
+                self.logger.info("\n🛑 Received shutdown signal...")
+                self.stop_flag = True
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
     def initialize_lighter_client(self):
         """Initialize the Lighter client."""
@@ -1077,7 +1158,7 @@ class HedgeBot:
                         await asyncio.sleep(2)
 
             # Start depth WebSocket in background
-            asyncio.create_task(handle_depth_websocket())
+            self.depth_ws_task = asyncio.create_task(handle_depth_websocket())
             self.logger.info("✅ Extended order book WebSocket task started")
 
         except Exception as e:
@@ -1276,14 +1357,20 @@ class HedgeBot:
         """Run the hedge bot."""
         self.setup_signal_handlers()
 
-        try:
+        try:    
             await self.trading_loop()
         except KeyboardInterrupt:
-            self.logger.info("\n🛑 Received interrupt signal...")
+            self.logger.info("\n🛑 Received KeyboardInterrupt...")
+            self.stop_flag = True
+        except Exception as e:
+            self.logger.error(f"❌ Run error: {e}", exc_info=True)
+            self.stop_flag = True
         finally:
-            self.logger.info("🔄 Cleaning up...")
-            self.shutdown() 
-              
+            # 确保 shutdown 被调用
+            if not self.stop_flag:
+                self.stop_flag = True
+            await self.shutdown()
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Trading bot for Extended and Lighter')
