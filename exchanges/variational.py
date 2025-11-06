@@ -697,3 +697,23 @@ class VariationalClient(BaseExchangeClient):
             return price
         
         return (price / self.config.tick_size).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * self.config.tick_size
+    
+    async def getVariationalVolume(self) -> Decimal:
+        url = f"{self.api_base}/portfolio/trade_volume"
+        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+
+        data = await self._make_var_request('GET', url, cookies=cookies)
+
+        if 'all_time' in data:
+            return Decimal(data['all_time'])
+        return Decimal('0')
+
+    async def getVariationalBalance(self) -> Decimal:
+        url = f"{self.api_base}/portfolio?compute_margin=true"
+        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+            
+        data = await self._make_var_request('GET', url, cookies=cookies)
+
+        if 'balance' in data:
+            return Decimal(data['balance'])
+        return Decimal('0')
