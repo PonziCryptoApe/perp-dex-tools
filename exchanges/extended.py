@@ -206,9 +206,8 @@ class ExtendedClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"Error during disconnect: {e}", level="ERROR")
             self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
-        
-        
-    async def fetch_bbo_prices(self, contract_id: str) -> tuple[Decimal, Decimal]:
+
+    async def fetch_bbo_prices(self, contract_id: str) -> tuple[Decimal, Decimal, int]:
         """Fetch best bid and offer prices from orderbook."""
         try:
             # Get the orderbook from the websocket updated cache
@@ -216,8 +215,8 @@ class ExtendedClient(BaseExchangeClient):
             
             if orderbook == None:
                 self.logger.log(f"Error fetching BBO prices for {contract_id}: orderbook is None", level="ERROR")
-                return Decimal('0'), Decimal('0')
-            
+                return Decimal('0'), Decimal('0'), 0
+
             # Get best bid (highest bid price)
             best_bid = Decimal('0')
             if orderbook["bid"] and len(orderbook["bid"]) > 0:
@@ -227,9 +226,11 @@ class ExtendedClient(BaseExchangeClient):
             best_ask = Decimal('0')
             if orderbook["ask"] and len(orderbook["ask"]) > 0:
                 best_ask = Decimal(orderbook["ask"][0]["p"])
-
-            return best_bid, best_ask
             
+            ts = orderbook.get('ts', 0)
+
+            return best_bid, best_ask, ts
+
         except Exception as e:
             self.logger.log(f"Error fetching BBO prices for {contract_id}: {str(e)}", level="ERROR")
             return Decimal('0'), Decimal('0')
@@ -830,9 +831,11 @@ class ExtendedClient(BaseExchangeClient):
                 market = data.get('m', '')
                 bids = data.get('b', [])
                 asks = data.get('a', [])
+                ts = message.get('ts', 0)
                 
                 # update orderbook
                 self.orderbook = {
+                    'ts': ts,
                     'market': market,
                     'bid': bids,  # should be list of [{"p": price, "q": quantity}] with a length of 1 
                     'ask': asks   # should be list of [{"p": price, "q": quantity}] with a length of 1

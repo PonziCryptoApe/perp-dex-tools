@@ -30,3 +30,8 @@ x10-python-trading-starknet
 # Variation exchange 
 cloudscraper >= 1.2.60
 eth-account >= 0.5.9
+
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
