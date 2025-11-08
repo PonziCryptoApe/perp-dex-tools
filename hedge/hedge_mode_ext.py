@@ -735,7 +735,7 @@ class HedgeBot:
         if not self.extended_client:
             raise Exception("Extended client not initialized")
 
-        best_bid, best_ask = await self.extended_client.fetch_bbo_prices(self.extended_contract_id)
+        best_bid, best_ask, _ts = await self.extended_client.fetch_bbo_prices(self.extended_contract_id)
 
         return best_bid, best_ask
 

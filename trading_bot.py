@@ -425,7 +425,7 @@ class TradingBot:
             next_close_order = picker(self.active_close_orders, key=lambda o: o["price"])
             next_close_price = next_close_order["price"]
 
-            best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+            best_bid, best_ask, *rest = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
             if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
                 raise ValueError("No bid/ask data available")
 
@@ -453,7 +453,7 @@ class TradingBot:
         if self.config.pause_price == self.config.stop_price == -1:
             return stop_trading, pause_trading
 
-        best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+        best_bid, best_ask, *rest = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
             raise ValueError("No bid/ask data available")
 

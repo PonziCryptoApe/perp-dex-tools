@@ -248,7 +248,7 @@ class ExtendedClient(BaseExchangeClient):
                     self.logger.log(f"Orderbook is not updated yet, sleeping for 1 second", level="INFO")
                     continue
 
-                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+                best_bid, best_ask, _ts = await self.fetch_bbo_prices(contract_id)
 
                 if best_bid <= 0 or best_ask <= 0:
                     return OrderResult(success=False, error_message='Invalid bid/ask prices')
@@ -344,7 +344,7 @@ class ExtendedClient(BaseExchangeClient):
                     self.logger.log(f"Orderbook is not updated yet, sleeping for 1 second", level="INFO")
                     continue
 
-                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+                best_bid, best_ask, _ts = await self.fetch_bbo_prices(contract_id)
 
                 if best_bid <= 0 or best_ask <= 0:
                     return OrderResult(success=False, error_message='Invalid bid/ask prices')
@@ -434,7 +434,7 @@ class ExtendedClient(BaseExchangeClient):
 
         while retry_count < max_retries:
             try:
-                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+                best_bid, best_ask, _ts = await self.fetch_bbo_prices(contract_id)
                 print(f"best_bid: {best_bid}, best_ask: {best_ask}")
                 print('--------------------------------')
                 if best_bid <= 0 or best_ask <= 0:
@@ -887,7 +887,7 @@ class ExtendedClient(BaseExchangeClient):
 
     async def get_order_price(self, direction: str) -> Decimal:
         """Get the price of an order with Backpack using official SDK."""
-        best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
+        best_bid, best_ask, _ts = await self.fetch_bbo_prices(self.config.contract_id)
         if best_bid <= 0 or best_ask <= 0:
             self.logger.log("Invalid bid/ask prices", "ERROR")
             raise ValueError("Invalid bid/ask prices")

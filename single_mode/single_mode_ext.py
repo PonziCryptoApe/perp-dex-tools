@@ -17,11 +17,12 @@ from helpers.util import Config
 
 
 class SingleBot:
-    def __init__(self, ticker, order_quantity, iterations, side):
+    def __init__(self, ticker, order_quantity, iterations, side, interval = 6):
         # 初始化参数、日志、交易所 client
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.iterations = iterations
+        self.interval = interval  # 每次开平仓间隔，秒
         self.side = side
         trading_logger = TradingLogger('extended', ticker, log_to_console=True)
         self.logger = trading_logger.logger
@@ -528,11 +529,11 @@ class SingleBot:
                 # 每次循环间隔
                 iter += 1
                 if iter < self.iterations and not self.stop_flag:
-                    self.logger.info(f"⏳ 等待3秒后进行下一次开平仓...")
-                    for _ in range(6):  # 分成多次检查，提高响应速度
+                    self.logger.info(f"⏳ 等待{self.interval}秒后进行下一次开平仓...")
+                    for _ in range(self.interval):  # 分成多次检查，提高响应速度
                         if self.stop_flag:
                             break
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1)
             # 正常退出
             if not self.stop_flag:
                 self.logger.info("✅ 所有交易完成")

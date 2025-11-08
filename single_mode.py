@@ -12,6 +12,7 @@ def parse_arguments():
     parser.add_argument('--size', type=str, required=True)
     parser.add_argument('--iter', type=int, required=True)
     parser.add_argument('--side', type=str, required=True, choices=['buy', 'sell'], help='Order side')
+    parser.add_argument('--interval', type=int, default=6, help='开平仓间隔，秒')
     parser.add_argument('--env-file', type=str, default=".env")
     return parser.parse_args()
 
@@ -30,6 +31,7 @@ async def main():
         ticker=args.ticker.upper(),
         order_quantity=Decimal(args.size),
         iterations=args.iter,
+        interval=args.interval,
         side=args.side
     )
     

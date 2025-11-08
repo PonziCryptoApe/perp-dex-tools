@@ -320,16 +320,17 @@ python hedge_mode.py --exchange backpack --ticker ETH --size 0.1 --iter 20
 ```bash
 # 运行 BTC 单一刷量模式
 python single_mode.py --exchange extended --ticker BTC --size 0.05 --iter 20
-python single_mode.py --exchange extended --ticker BTC --size 0.0001 --iter 2 --side sell --env-file .env.extend
+python single_mode.py --exchange extended --ticker BTC --size 0.0001 --iter 2 --side sell --env-file .env.extend --interval 30
 ```
 
 ### 单一刷量模式参数
 
-- `--exchange`: 主要交易所（目前支持 'backpack'）
+- `--exchange`: 主要交易所（目前支持 extended）
 - `--ticker`: 交易对符号（如 BTC, ETH）
 - `--size`: 每笔订单数量
 - `--iter`: 交易循环次数
 - `--side`: taker 交易方向
+- `--interval`: 每次循环之间的间隔，默认6秒
 - `--env-file`: 环境变量文件
 
 ## 配置
