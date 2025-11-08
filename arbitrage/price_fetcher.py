@@ -327,13 +327,15 @@ class PriceFetcher:
         """处理 Lighter 订单簿更新"""
         try:
             order_book = data.get("order_book", {})
-            
+            timestamp = data.get("timestamp", 0)
+
             new_offset = order_book.get("offset")
             if new_offset and new_offset <= self.lighter_order_book_offset:
                 return
             
             self.lighter_order_book_offset = new_offset or self.lighter_order_book_offset
-            
+            self.lighter_timestamp = timestamp
+
             # 更新 bids
             for bid in order_book.get("bids", []):
                 parsed = self._parse_order_entry(bid)
