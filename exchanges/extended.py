@@ -234,7 +234,38 @@ class ExtendedClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"Error fetching BBO prices for {contract_id}: {str(e)}", level="ERROR")
             return Decimal('0'), Decimal('0')
+    
+    async def fetch_bbo_prices_extended(self, contract_id: str) -> tuple[Decimal, Decimal, int]:
+        """Fetch best bid and offer prices from orderbook."""
+        try:
+            # Get the orderbook from the websocket updated cache
+            orderbook = self.orderbook
+            
+            if orderbook == None:
+                self.logger.log(f"Error fetching BBO prices for {contract_id}: orderbook is None", level="ERROR")
+                return Decimal('0'), Decimal('0'), 0
 
+            # Get best bid (highest bid price)
+            best_bid = Decimal('0')
+            if orderbook["bid"] and len(orderbook["bid"]) > 0:
+                best_bid = Decimal(orderbook["bid"][0]["p"])
+            
+            # Get best ask (lowest ask price)  
+            best_ask = Decimal('0')
+            if orderbook["ask"] and len(orderbook["ask"]) > 0:
+                best_ask = Decimal(orderbook["ask"][0]["p"])
+            
+            ts = orderbook.get('ts', 0)
+
+            bid_size = orderbook["bid"][0]["q"] if orderbook["bid"] and len(orderbook["bid"]) > 0 else 0
+            ask_size = orderbook["ask"][0]["q"] if orderbook["ask"] and len(orderbook["ask"]) > 0 else 0
+
+            return best_bid, best_ask, ts, bid_size, ask_size
+
+        except Exception as e:
+            self.logger.log(f"Error fetching BBO prices for {contract_id}: {str(e)}", level="ERROR")
+            return Decimal('0'), Decimal('0')
+    
     async def place_market_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with Extended using official SDK with retry logic for POST_ONLY rejections."""
         max_retries = 15
@@ -840,7 +871,7 @@ class ExtendedClient(BaseExchangeClient):
                     'bid': bids,  # should be list of [{"p": price, "q": quantity}] with a length of 1 
                     'ask': asks   # should be list of [{"p": price, "q": quantity}] with a length of 1
                 }
-                
+
                 self.logger.log(f"Orderbook updated for {market}: bid={bids[0] if bids else 'N/A'}, ask={asks[0] if asks else 'N/A'}", "DEBUG")
                 
         except asyncio.CancelledError:

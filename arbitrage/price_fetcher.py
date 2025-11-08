@@ -399,8 +399,8 @@ class PriceFetcher:
         try:
             if not self.extended_client:
                 return None
-            
-            best_bid, best_ask, ts = await self.extended_client.fetch_bbo_prices(
+
+            best_bid, best_ask, ts, bid_size, ask_size = await self.extended_client.fetch_bbo_prices_extended(
                 self.extended_client.config.contract_id
             )
             
@@ -412,8 +412,8 @@ class PriceFetcher:
                 'ask_price': float(best_ask),
                 'mid_price': float((best_bid + best_ask) / 2),
                 'timestamp': ts,
-                'bid_size': 0,
-                'ask_size': 0
+                'bid_size': bid_size,
+                'ask_size': ask_size
             }
             
         except Exception as e:
@@ -577,6 +577,9 @@ class PriceFetcher:
             print(f'  卖一: ${ext["ask_price"]:.2f}')
             print(f'  中间价: ${ext["mid_price"]:.2f}')
             print(f'  价差: ${ext["ask_price"] - ext["bid_price"]:.2f} ({(ext["ask_price"] - ext["bid_price"]) / ext["mid_price"] * 100:.3f}%)')
+            print(f'  时间戳: {ext["timestamp"]}')
+            print(f'  买单深度: ${ext["bid_price"]:.2f} * {ext["bid_size"]}')
+            print(f'  卖单深度: ${ext["ask_price"]:.2f} * {ext["ask_size"]}')
         else:
             print('\n📊 Extended: 数据获取失败')
         
