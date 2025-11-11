@@ -1,5 +1,4 @@
 #!/bin/bash
-# filepath: scripts/test_ws_latency.sh
 
 SYMBOL="${1:-BTC}"
 DURATION="${2:-30}"
@@ -34,20 +33,15 @@ EXTENDED_LOG = "${EXTENDED_LOG}"
 LIGHTER_LOG = "${LIGHTER_LOG}"
 
 def normalize_timestamp(ts, recv_time_ms):
-    """
-    标准化时间戳到毫秒
-    ts: 服务器时间戳
-    recv_time_ms: 本地接收时间（毫秒）
-    """
+    """标准化时间戳到毫秒"""
     if ts == 0:
         return 0
     
-    # 判断时间戳单位
-    if ts > 1e15:  # 微秒 (16位以上)
+    if ts > 1e15:  # 微秒
         return ts / 1000
-    elif ts > 1e12:  # 毫秒 (13-15位)
+    elif ts > 1e12:  # 毫秒
         return ts
-    elif ts > 1e9:   # 秒 (10-12位)
+    elif ts > 1e9:   # 秒
         return ts * 1000
     else:
         return ts
@@ -68,7 +62,7 @@ async def test_extended():
             while time.time() - start_time < DURATION:
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=5)
-                    recv_time = time.time() * 1000  # 毫秒
+                    recv_time = time.time() * 1000
                     
                     data = json.loads(msg)
                     msg_type = data.get("type", "")
@@ -80,12 +74,8 @@ async def test_extended():
                             server_ts = normalize_timestamp(server_ts_raw, recv_time)
                             latency = recv_time - server_ts
                             
-                            # 首条消息打印调试信息
                             if first_msg:
-                                print(f"   [调试] 服务器原始时间戳: {server_ts_raw}")
-                                print(f"   [调试] 标准化后: {server_ts}")
-                                print(f"   [调试] 本地时间: {recv_time}")
-                                print(f"   [调试] 延迟: {latency:.1f}ms")
+                                print(f"   首条延迟: {latency:.1f}ms")
                                 first_msg = False
                             
                             msg_count += 1
@@ -94,7 +84,7 @@ async def test_extended():
                                 f.write(f"{recv_time},{server_ts},{latency}\n")
                             
                             if msg_count % 50 == 0:
-                                print(f"Extended: {msg_count} 条, 延迟 {latency:.1f}ms")
+                                print(f"Extended: {msg_count} 条")
                     
                     elif msg_type == "PING":
                         await ws.send(json.dumps({"type": "PONG"}))
@@ -105,17 +95,10 @@ async def test_extended():
                     print(f"⚠️ Extended: {e}")
                     break
     
-    except ConnectionResetError:
-        print(f"❌ Extended 连接被重置")
-    except asyncio.TimeoutError:
-        print(f"❌ Extended 连接超时")
     except Exception as e:
         print(f"❌ Extended 失败: {type(e).__name__}: {e}")
     
-    if msg_count > 0:
-        print(f"✅ Extended: {msg_count} 条")
-    else:
-        print(f"⚠️ Extended: 无数据")
+    print(f"{'✅' if msg_count > 0 else '⚠️'} Extended: {msg_count} 条")
 
 async def test_lighter():
     import requests
@@ -126,12 +109,12 @@ async def test_lighter():
         
         market_id = None
         for m in data.get("order_books", []):
-            symbol = m["symbol"]
-            if symbol == SYMBOL:
+            if m["symbol"] == SYMBOL:
                 market_id = m["market_id"]
                 break
+        
         print(f"\n🔍 查找目标: '{SYMBOL}'")
-
+        
         if market_id is None:
             print(f"❌ 未找到 {SYMBOL}")
             return
@@ -173,10 +156,7 @@ async def test_lighter():
                             latency = recv_time - server_ts
                             
                             if first_msg:
-                                print(f"   [调试] 服务器原始时间戳: {server_ts_raw}")
-                                print(f"   [调试] 标准化后: {server_ts}")
-                                print(f"   [调试] 本地时间: {recv_time}")
-                                print(f"   [调试] 延迟: {latency:.1f}ms")
+                                print(f"   首条延迟: {latency:.1f}ms")
                                 first_msg = False
                             
                             msg_count += 1
@@ -185,7 +165,7 @@ async def test_lighter():
                                 f.write(f"{recv_time},{server_ts},{latency}\n")
                             
                             if msg_count % 50 == 0:
-                                print(f"Lighter: {msg_count} 条, 延迟 {latency:.1f}ms")
+                                print(f"Lighter: {msg_count} 条")
                     
                     elif msg_type == "ping":
                         await ws.send(json.dumps({"type": "pong"}))
@@ -199,7 +179,7 @@ async def test_lighter():
     except Exception as e:
         print(f"❌ Lighter 失败: {e}")
     
-    print(f"✅ Lighter: {msg_count} 条")
+    print(f"{'✅' if msg_count > 0 else '⚠️'} Lighter: {msg_count} 条")
 
 async def main():
     await asyncio.gather(test_extended(), test_lighter(), return_exceptions=True)
@@ -229,6 +209,16 @@ def analyze(f):
         return None
     
     s = sorted(lat)
+    
+    # 计算抖动（相邻延迟的差值）
+    jitter = []
+    for i in range(1, len(lat)):
+        jitter.append(abs(lat[i] - lat[i-1]))
+    
+    # 计算时钟偏移估算（假设最小物理延迟 0.3ms）
+    min_physical_latency = 0.3
+    clock_offset_estimate = statistics.median(lat) - min_physical_latency
+    
     return {
         'n': len(lat),
         'mean': statistics.mean(lat),
@@ -236,56 +226,164 @@ def analyze(f):
         'min': min(lat),
         'max': max(lat),
         'std': statistics.stdev(lat) if len(lat) > 1 else 0,
+        'p5': s[int(len(s)*0.05)],
         'p95': s[int(len(s)*0.95)],
-        'p99': s[int(len(s)*0.99)]
+        'p99': s[int(len(s)*0.99)],
+        'jitter_mean': statistics.mean(jitter) if jitter else 0,
+        'jitter_max': max(jitter) if jitter else 0,
+        'jitter_p95': sorted(jitter)[int(len(jitter)*0.95)] if jitter else 0,
+        'range': max(lat) - min(lat),
+        'clock_offset': clock_offset_estimate,
+        'true_latency_estimate': statistics.median(lat) - clock_offset_estimate
     }
 
 ext = analyze("${EXTENDED_LOG}")
 lgt = analyze("${LIGHTER_LOG}")
 
 with open("${REPORT}", 'w') as f:
-    f.write("=" * 60 + "\n")
-    f.write("WebSocket 延迟测试\n")
-    f.write("=" * 60 + "\n\n")
+    f.write("=" * 70 + "\n")
+    f.write("WebSocket 延迟测试 (考虑时钟偏移)\n")
+    f.write("=" * 70 + "\n\n")
     f.write(f"交易对: ${SYMBOL}\n")
-    f.write(f"时长: ${DURATION}s\n\n")
+    f.write(f"测试时长: ${DURATION}s\n\n")
+    f.write("说明:\n")
+    f.write("  - 测量延迟 = 真实延迟 + 时钟偏移（负值说明服务器时钟快）\n")
+    f.write("  - 关注稳定性指标: 标准差、抖动（不受时钟偏移影响）\n")
+    f.write("  - 真实延迟 = 测量中位数 - 估算时钟偏移\n\n")
     
     if ext:
-        f.write("Extended\n" + "-" * 60 + "\n")
-        f.write(f"消息: {ext['n']}\n")
-        f.write(f"平均: {ext['mean']:.2f} ms\n")
-        f.write(f"中位: {ext['med']:.2f} ms\n")
-        f.write(f"P95: {ext['p95']:.2f} ms\n")
-        f.write(f"P99: {ext['p99']:.2f} ms\n")
-        f.write(f"范围: {ext['min']:.2f} - {ext['max']:.2f}\n\n")
+        f.write("Extended Exchange\n" + "-" * 70 + "\n")
+        f.write(f"消息数量:        {ext['n']}\n")
+        f.write(f"频率:            {ext['n']/${DURATION}:.1f} msg/s\n\n")
+        
+        f.write("【测量延迟 (含时钟偏移)】\n")
+        f.write(f"  平均:          {ext['mean']:>8.2f} ms\n")
+        f.write(f"  中位数:        {ext['med']:>8.2f} ms\n")
+        f.write(f"  范围:          {ext['min']:>8.2f} ~ {ext['max']:.2f} ms\n")
+        f.write(f"  P5-P95:        {ext['p5']:>8.2f} ~ {ext['p95']:.2f} ms\n")
+        f.write(f"  P99:           {ext['p99']:>8.2f} ms\n\n")
+        
+        f.write("【稳定性指标 (不受时钟偏移影响)】⭐\n")
+        f.write(f"  标准差:        {ext['std']:>8.2f} ms  (越小越稳定)\n")
+        f.write(f"  波动范围:      {ext['range']:>8.2f} ms  (max - min)\n")
+        f.write(f"  平均抖动:      {ext['jitter_mean']:>8.2f} ms  (越小越好)\n")
+        f.write(f"  P95抖动:       {ext['jitter_p95']:>8.2f} ms\n")
+        f.write(f"  最大抖动:      {ext['jitter_max']:>8.2f} ms\n\n")
+        
+        f.write("【真实延迟估算】\n")
+        f.write(f"  估算时钟偏移:  {ext['clock_offset']:>8.2f} ms\n")
+        f.write(f"  估算真实延迟:  {ext['true_latency_estimate']:>8.2f} ms (中位数 - 偏移)\n\n")
     else:
         f.write("Extended: 无数据\n\n")
     
     if lgt:
-        f.write("Lighter\n" + "-" * 60 + "\n")
-        f.write(f"消息: {lgt['n']}\n")
-        f.write(f"平均: {lgt['mean']:.2f} ms\n")
-        f.write(f"中位: {lgt['med']:.2f} ms\n")
-        f.write(f"P95: {lgt['p95']:.2f} ms\n")
-        f.write(f"P99: {lgt['p99']:.2f} ms\n")
-        f.write(f"范围: {lgt['min']:.2f} - {lgt['max']:.2f}\n\n")
+        f.write("Lighter Network\n" + "-" * 70 + "\n")
+        f.write(f"消息数量:        {lgt['n']}\n")
+        f.write(f"频率:            {lgt['n']/${DURATION}:.1f} msg/s\n\n")
+        
+        f.write("【测量延迟 (含时钟偏移)】\n")
+        f.write(f"  平均:          {lgt['mean']:>8.2f} ms\n")
+        f.write(f"  中位数:        {lgt['med']:>8.2f} ms\n")
+        f.write(f"  范围:          {lgt['min']:>8.2f} ~ {lgt['max']:.2f} ms\n")
+        f.write(f"  P5-P95:        {lgt['p5']:>8.2f} ~ {lgt['p95']:.2f} ms\n")
+        f.write(f"  P99:           {lgt['p99']:>8.2f} ms\n\n")
+        
+        f.write("【稳定性指标 (不受时钟偏移影响)】⭐\n")
+        f.write(f"  标准差:        {lgt['std']:>8.2f} ms  (越小越稳定)\n")
+        f.write(f"  波动范围:      {lgt['range']:>8.2f} ms  (max - min)\n")
+        f.write(f"  平均抖动:      {lgt['jitter_mean']:>8.2f} ms  (越小越好)\n")
+        f.write(f"  P95抖动:       {lgt['jitter_p95']:>8.2f} ms\n")
+        f.write(f"  最大抖动:      {lgt['jitter_max']:>8.2f} ms\n\n")
+        
+        f.write("【真实延迟估算】\n")
+        f.write(f"  估算时钟偏移:  {lgt['clock_offset']:>8.2f} ms\n")
+        f.write(f"  估算真实延迟:  {lgt['true_latency_estimate']:>8.2f} ms (中位数 - 偏移)\n\n")
     else:
         f.write("Lighter: 无数据\n\n")
     
     if ext and lgt:
-        f.write("=" * 60 + "\n对比\n" + "=" * 60 + "\n")
-        faster = "Extended" if ext['mean'] < lgt['mean'] else "Lighter"
-        diff = abs(ext['mean'] - lgt['mean'])
-        f.write(f"更快: {faster}\n")
-        f.write(f"差值: {diff:.2f}ms\n")
+        f.write("=" * 70 + "\n")
+        f.write("对比分析\n")
+        f.write("=" * 70 + "\n\n")
+        
+        # 稳定性对比
+        f.write("【稳定性对比】(关键指标)\n")
+        more_stable_std = "Extended" if ext['std'] < lgt['std'] else "Lighter"
+        more_stable_jitter = "Extended" if ext['jitter_mean'] < lgt['jitter_mean'] else "Lighter"
+        more_stable_range = "Extended" if ext['range'] < lgt['range'] else "Lighter"
+        
+        f.write(f"  标准差更小:    {more_stable_std:>10s}  (Ext: {ext['std']:.2f} vs Lgt: {lgt['std']:.2f})\n")
+        f.write(f"  抖动更小:      {more_stable_jitter:>10s}  (Ext: {ext['jitter_mean']:.2f} vs Lgt: {lgt['jitter_mean']:.2f})\n")
+        f.write(f"  波动更小:      {more_stable_range:>10s}  (Ext: {ext['range']:.2f} vs Lgt: {lgt['range']:.2f})\n\n")
+        
+        # 频率对比
+        ext_freq = ext['n'] / ${DURATION}
+        lgt_freq = lgt['n'] / ${DURATION}
+        more_freq = "Extended" if ext_freq > lgt_freq else "Lighter"
+        f.write(f"【消息频率】\n")
+        f.write(f"  更高频率:      {more_freq:>10s}  (Ext: {ext_freq:.1f} vs Lgt: {lgt_freq:.1f} msg/s)\n\n")
+        
+        # 真实延迟对比
+        f.write(f"【估算真实延迟】\n")
+        f.write(f"  Extended:      {ext['true_latency_estimate']:>8.2f} ms ± {ext['std']:.2f} (标准差)\n")
+        f.write(f"  Lighter:       {lgt['true_latency_estimate']:>8.2f} ms ± {lgt['std']:.2f} (标准差)\n\n")
+        
+        # 综合评分
+        ext_score = 0
+        lgt_score = 0
+        
+        if ext['std'] < lgt['std']:
+            ext_score += 2  # 标准差最重要，权重2
+        else:
+            lgt_score += 2
+            
+        if ext['jitter_mean'] < lgt['jitter_mean']:
+            ext_score += 2  # 抖动也很重要，权重2
+        else:
+            lgt_score += 2
+            
+        if ext['range'] < lgt['range']:
+            ext_score += 1
+        else:
+            lgt_score += 1
+            
+        if ext_freq > lgt_freq:
+            ext_score += 1  # 频率加分
+        else:
+            lgt_score += 1
+        
+        winner = "Extended" if ext_score > lgt_score else "Lighter" if lgt_score > ext_score else "平局"
+        
+        f.write("=" * 70 + "\n")
+        f.write(f"【综合评分】 {winner} 获胜\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"  Extended:  {ext_score}/6 分\n")
+        f.write(f"  Lighter:   {lgt_score}/6 分\n\n")
+        
+        f.write("评分标准:\n")
+        f.write("  - 标准差更小: +2 分 (稳定性)\n")
+        f.write("  - 抖动更小:   +2 分 (平滑度)\n")
+        f.write("  - 波动更小:   +1 分 (一致性)\n")
+        f.write("  - 频率更高:   +1 分 (实时性)\n\n")
+        
+        f.write("💡 建议:\n")
+        if winner == "Extended":
+            f.write("  - Extended 更稳定，推荐用于对冲套利\n")
+            f.write("  - 标准差小，延迟可预测，适合精确定价\n")
+        elif winner == "Lighter":
+            f.write("  - Lighter 表现更好\n")
+        else:
+            f.write("  - 两者表现相当，可以都用\n")
+    
     elif lgt and not ext:
-        f.write("=" * 60 + "\n")
+        f.write("=" * 70 + "\n")
         f.write("注意: Extended 无数据，仅 Lighter 结果有效\n")
 
 print(open("${REPORT}").read())
-print(f"\n数据文件:")
+print(f"\n📁 数据文件:")
 print(f"  Extended: ${EXTENDED_LOG}")
 print(f"  Lighter:  ${LIGHTER_LOG}")
+print(f"  Report:   ${REPORT}")
 EOF
 
 echo "✅ 完成"
