@@ -441,6 +441,7 @@ class SingleBot:
         while not success and not self.stop_flag:
             # 下单
             self.logger.info(f"[第{iter_num}次] 尝试{order_type}单 ({side})...")
+            timestamp1 = time.perf_counter()
             order_result = await self.exchange_client.place_market_order(
                 self.extended_contract_id, self.order_quantity, side
             )
@@ -448,7 +449,8 @@ class SingleBot:
             if order_result.success:
                 order_id = order_result.order_id
                 self.logger.info(f"{order_type}单已提交: {order_id}")
-                
+                timestamp2 = time.perf_counter()
+                self.logger.info(f"📦 Placed Extended {side.upper()} order: ID={order_id}, Price={order_result.price}, TimeDiff={timestamp2 - timestamp1}")
                 # 等待订单成交，最多等待10秒
                 wait_time = 0
                 max_wait = 10
