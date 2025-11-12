@@ -942,6 +942,7 @@ class HedgeBot:
 
         try:
             client_order_index = int(time.time() * 1000)
+            timestamp1 = time.perf_counter()
             # Sign the order transaction
             tx_info, error = self.lighter_client.sign_create_order(
                 market_index=self.lighter_market_index,
@@ -963,6 +964,8 @@ class HedgeBot:
                 tx_info=tx_info
             )
             self.logger.info(f"🚀 Lighter limit order sent: {lighter_side} {quantity}")
+            timestamp2 = time.perf_counter()
+            self.logger.info(f"⏱️ Lighter order placement time: {(timestamp2 - timestamp1) * 1000:.2f} ms")
             await self.monitor_lighter_order(client_order_index)
 
             return tx_hash
