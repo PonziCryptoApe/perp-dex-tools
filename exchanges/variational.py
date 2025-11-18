@@ -68,17 +68,18 @@ class VariationalClient(BaseExchangeClient):
         self.orderbook = None
         self.open_orders = {}
         self._order_update_handler = None
-        
-        # 交易参数
-        self.instrument = {
-            "underlying": self.config.ticker,
+
+        self.logger.log("【VARIATIONAL】VariationalClient initialized", "INFO")
+    
+    def _build_instrument(self, ticker: str = None) -> Dict[str, Any]:
+        """✅ 动态构建 instrument"""
+        underlying = ticker or self.config.ticker
+        return {
+            "underlying": underlying,
             "instrument_type": "perpetual_future",
             "settlement_asset": "USDC",
             "funding_interval_s": 3600
         }
-
-        self.logger.log("【VARIATIONAL】VariationalClient initialized", "INFO")
-
     def _validate_config(self) -> None:
         """Validate the configuration for Variational exchange."""
         required_configs = ['ticker']
@@ -206,7 +207,7 @@ class VariationalClient(BaseExchangeClient):
             self.logger.log("【VARIATIONAL】Authentication successful", "INFO")
 
         except Exception as e:
-            self.notify(f"❌ Variational authentication failed: {e}", level="ERROR")
+            await self.notify(f"❌ Variational authentication failed: {e}", level="ERROR")
             self.logger.log(f"【VARIATIONAL】Authentication failed: {e}", "ERROR")
             raise
 
@@ -295,7 +296,7 @@ class VariationalClient(BaseExchangeClient):
         self.logger.log("【VARIATIONAL】Prices WebSocket connected", "INFO")
         subscribe_msg = {
             "action": "subscribe",
-            "instruments": [self.instrument]
+            "instruments": [self._build_instrument()]
         }
         ws.send(json.dumps(subscribe_msg))
         self._ws_connected.set()
@@ -400,21 +401,21 @@ class VariationalClient(BaseExchangeClient):
     async def _fetch_indicative_quote(self, qty: Decimal, contract_id: Optional[str] = None) -> Dict[str, Any]:
         """获取指示性报价"""
         url = f"{self.api_base}/quotes/indicative"
-        instrument = {
-                "underlying": contract_id.split('-')[0],
-                "instrument_type": "perpetual_future",
-                "settlement_asset": "USDC",
-                "funding_interval_s": 3600
-            } if contract_id else self.instrument
+        
+        if contract_id:
+            ticker = contract_id.split('-')[0]
+        else:
+            ticker = self.config.ticker
+        
         payload = {
-            "instrument": instrument,
+            "instrument": self._build_instrument(ticker),
             "qty": str(qty)
         }
         
         # 设置 cookies
         cookies = {"vr-token": self.auth_token} if self.auth_token else {}
-        self.logger.log(f"【VARIATIONAL】Fetching indicative quote with payload: {payload}", "INFO")
-        self.logger.log(f"【VARIATIONAL】Using cookies: {cookies}", "INFO")
+        # self.logger.log(f"【VARIATIONAL】Fetching indicative quote with payload: {payload}", "INFO")
+        # self.logger.log(f"【VARIATIONAL】Using cookies: {cookies}", "INFO")
         try:
             return await self._make_var_request('POST', url, json=payload, cookies=cookies)
         except Exception as e:
@@ -459,7 +460,7 @@ class VariationalClient(BaseExchangeClient):
             "order_type": "limit",
             "limit_price": str(price),
             "side": side,
-            "instrument": self.instrument,
+            "instrument": self._build_instrument(),
             "qty": str(quantity),
             "is_auto_resize": False,
             "use_mark_price": False,
@@ -665,18 +666,28 @@ class VariationalClient(BaseExchangeClient):
         """获取交易所名称"""
         return "variational"
 
-    async def get_contract_attributes(self) -> Tuple[str, Decimal]:
+    async def get_contract_attributes(self, ticker: Optional[str] = None) -> Tuple[str, Decimal]:
         """获取合约属性"""
-        ticker = self.config.ticker
+        ticker = ticker or self.config.ticker
         if not ticker:
             raise ValueError("Ticker is empty")
         
-        # Variational 使用不同的合约标识
+        # ✅ 使用动态 ticker（重要！）
         self.config.contract_id = f"{ticker}-PERP"
         
-        # 设置默认的 tick size（可能需要从 API 获取）
-        self.config.tick_size = Decimal('0.01')  # 根据实际情况调整
-        
+        # ✅ 尝试从 API 获取 tick size
+        try:
+            quote = await self._fetch_indicative_quote(Decimal('0.00001'))
+            qty_limits = quote.get('qty_limits', {})
+            
+            if qty_limits and 'ask' in qty_limits:
+                min_qty = Decimal(str(qty_limits['ask'].get('min_qty', '0.01')))
+                self.config.tick_size = min_qty
+                self.logger.log(f"【VARIATIONAL】Tick size for {ticker}: {min_qty}", "INFO")
+        except:
+            # 使用默认值
+            self.config.tick_size = Decimal('0.01')
+
         return self.config.contract_id, self.config.tick_size
 
     async def get_order_price(self, direction: str) -> Decimal:
