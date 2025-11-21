@@ -263,7 +263,12 @@ class LighterClient(BaseExchangeClient):
             return OrderResult(
                 success=False, order_id=str(order_params['client_order_index']),
                 error_message=f"Order creation error: {error}")
-
+        if create_order is None:
+            return OrderResult(
+                success=False,
+                order_id=str(order_params['client_order_index']),
+                error_message="Order creation returned None"
+            )
         else:
             return OrderResult(success=True, order_id=str(order_params['client_order_index']))
 
@@ -288,7 +293,7 @@ class LighterClient(BaseExchangeClient):
 
         # Create order parameters
         order_params = {
-            'market_index': self.config.contract_id,
+            'market_index': contract_id or self.config.contract_id,
             'client_order_index': client_order_index,
             'base_amount': int(quantity * self.base_amount_multiplier),
             'price': int(price * self.price_multiplier),
@@ -539,6 +544,7 @@ class LighterClient(BaseExchangeClient):
         order_book_details = market_summary.order_book_details[0]
         # Set contract_id to market name (Lighter uses market IDs as identifiers)
         self.config.contract_id = market_info.market_id
+        print(f"Market ID for {ticker}: {self.config.contract_id}")
         self.base_amount_multiplier = pow(10, market_info.supported_size_decimals)
         self.price_multiplier = pow(10, market_info.supported_price_decimals)
 

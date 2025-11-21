@@ -1,0 +1,47 @@
+# 交易对配置文件
+
+pairs:
+  # ========== Extended vs Lighter ==========
+  
+  extended_lighter_btc:
+    enabled: true
+    symbol: BTC
+    exchange_a: extended      # 开空的交易所
+    exchange_b: lighter       # 开多的交易所
+    quantity: "0.01"
+    open_threshold: 0.06      # 开仓阈值（%）
+    close_threshold: 0.0      # 平仓阈值（%）
+  
+  extended_lighter_eth:
+    enabled: true
+    symbol: ETH
+    exchange_a: lighter
+    exchange_b: extended
+    quantity: "0.001"
+    open_threshold: 0.05
+    close_threshold: 0.0
+  
+  extended_lighter_sol:
+    enabled: false
+    symbol: SOL
+    exchange_a: extended
+    exchange_b: lighter
+    quantity: "1.0"
+    open_threshold: 0.10
+    close_threshold: 0.0
+
+  # ========== Extended vs Variational ==========
+  extended_variational_eth:
+    enabled: true
+    symbol: ETH
+    exchange_a: extended
+    exchange_b: variational
+    quantity: "0.01"
+    open_threshold: 0.11
+    close_threshold: -0.03
+
+    # ✅ Variational 特殊配置
+    variational_config:
+      polling_interval: 1.0   # 订单簿轮询间隔（秒）
+      query_quantity: 0.01     # 查询数量（可选，默认使用上面的 quantity）
+

@@ -488,7 +488,67 @@ class VariationalClient(BaseExchangeClient):
                 
         except Exception as e:
             return OrderResult(success=False, error_message=str(e))
+    
+    async def _place_market_order(self, quote_id: str, side: str, max_slippage: int) -> OrderResult:
+        url = f"{self.api_base}/orders/new/market"
+        payload = {
+            "side": side,
+            "is_reduce_only": False,
+            "max_slippage": max_slippage,
+            "quote_id": quote_id
+        }
+         # 设置 cookies
+        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+        
+        try:
+            data = await self._make_var_request('POST', url, json=payload, cookies=cookies)
+            self.logger.log(f"【VARIATIONAL】Placed market order response: {data}", "INFO")
+            order_id = data.get('rfq_id')
+            if not order_id:
+                return OrderResult(
+                    success=False, 
+                    error_message=data.get('error', 'No rfq_id returned')
+                )
+            return OrderResult(
+                success=True,
+                order_id=order_id,
+                side=side,
+                size='',
+                price='',
+                status='PENDING'
+            )
+        except Exception as e:
+            return OrderResult(success=False, error_message=str(e))
 
+    async def _place_accept_order(self, quote_id: str, side: str, max_slippage: int) -> OrderResult:
+        url = f"{self.api_base}/quotes/accept"
+        payload = {
+            "side": side,
+            "is_reduce_only": True,
+            "max_slippage": max_slippage,
+            "quote_id": quote_id
+        }
+         # 设置 cookies
+        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+        
+        try:
+            data = await self._make_var_request('POST', url, json=payload, cookies=cookies)
+            self.logger.log(f"【VARIATIONAL】Placed accept order response: {data}", "INFO")
+            order_id = data.get('rfq_id')
+            if order_id:
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    side=side,
+                    size='',
+                    price='',
+                    status='PENDING'
+                )
+            else:
+                return OrderResult(success=False, error_message=data.get('error', 'Unknown error'))
+                
+        except Exception as e:
+            return OrderResult(success=False, error_message=str(e))
     async def cancel_order(self, order_id: str) -> OrderResult:
         """使用 cloudscraper 取消订单"""
         url = f"{self.api_base}/orders/cancel"
