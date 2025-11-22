@@ -121,6 +121,9 @@ class HedgeStrategy(BaseStrategy):
             return
         
         try:
+            # ✅ 记录价格更新的时间
+            price_update_time = time.time()
+
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
@@ -128,17 +131,17 @@ class HedgeStrategy(BaseStrategy):
             # ✅ 根据持仓状态决定检查哪种信号
             if self.position is None: 
                 # 无持仓，检查开仓信号
-                await self._check_open_signal(prices, spread_pct)
+                await self._check_open_signal(prices, spread_pct, price_update_time)
             else:
                 # 有持仓，检查平仓信号
-                await self._check_close_signal(prices, reverse_spread_pct)
+                await self._check_close_signal(prices, reverse_spread_pct, price_update_time)
 
         except Exception as e:
             logger.error(f"❌ 价格更新处理失败: {e}")
             import traceback
             traceback.print_exc()
-    
-    async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal):
+
+    async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, price_update_time: float):
         """
         检查开仓信号
         
@@ -163,6 +166,9 @@ class HedgeStrategy(BaseStrategy):
         
         # 判断是否满足开仓阈值
         if spread_pct >= Decimal(str(self.open_threshold_pct)):
+            # 记录信号触发时间
+            signal_trigger_time = time.time()
+
             self.open_signal_count += 1
             
             logger.info(
@@ -170,6 +176,7 @@ class HedgeStrategy(BaseStrategy):
                 f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
                 f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
                 f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
+                f"   ⏱️ 价格更新 → 信号触发: {(signal_trigger_time - price_update_time) * 1000:.2f} ms"
             )
             
             # ✅ 检查是否为监控模式
@@ -208,7 +215,8 @@ class HedgeStrategy(BaseStrategy):
                         exchange_b_price=prices.exchange_b_ask,
                         spread_pct=spread_pct,
                         exchange_a_quote_id=prices.exchange_a_quote_id,
-                        exchange_b_quote_id=prices.exchange_b_quote_id
+                        exchange_b_quote_id=prices.exchange_b_quote_id,
+                        signal_trigger_time=signal_trigger_time
                     )
                     
                     if success:
@@ -242,7 +250,7 @@ class HedgeStrategy(BaseStrategy):
                 finally:
                     self._is_executing = False
 
-    async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal):
+    async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal, price_update_time: float):
         """
         检查平仓信号
         
@@ -261,6 +269,8 @@ class HedgeStrategy(BaseStrategy):
 
         # 判断是否满足平仓阈值
         if spread_pct >= Decimal(str(self.close_threshold_pct)):
+            # 记录信号触发时间
+            signal_trigger_time = time.time()
             self.close_signal_count += 1
 
             # 计算当前盈亏
@@ -275,7 +285,7 @@ class HedgeStrategy(BaseStrategy):
                 f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)\n"
                 f"   盈亏: {pnl_pct:.4f}%\n"
                 f"   持仓时长: {self.position.get_holding_duration()}\n"
-                
+                f"   ⏱️ 价格更新 → 信号触发: {(signal_trigger_time - price_update_time) * 1000:.2f} ms"
             )
             
             # ✅ 检查是否为监控模式
@@ -305,7 +315,8 @@ class HedgeStrategy(BaseStrategy):
                         exchange_a_price=prices.exchange_a_ask,
                         exchange_b_price=prices.exchange_b_bid,
                         exchange_a_quote_id=prices.exchange_a_quote_id,
-                        exchange_b_quote_id=prices.exchange_b_quote_id
+                        exchange_b_quote_id=prices.exchange_b_quote_id,
+                        signal_trigger_time=signal_trigger_time
                     )
                     
                     if success:

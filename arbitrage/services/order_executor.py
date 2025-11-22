@@ -2,6 +2,7 @@
 
 import logging
 from decimal import Decimal
+import time
 from typing import Tuple, Optional
 from ..models.position import Position
 from ..exchanges.base import ExchangeAdapter
@@ -42,7 +43,8 @@ class OrderExecutor:
         exchange_b_price: Decimal,
         spread_pct: Decimal,
         exchange_a_quote_id: Optional[str] = None,
-        exchange_b_quote_id: Optional[str] = None
+        exchange_b_quote_id: Optional[str] = None,
+        signal_trigger_time: Optional[float] = None
     ) -> Tuple[bool, Optional[Position]]:
         """
         执行开仓
@@ -55,6 +57,14 @@ class OrderExecutor:
         Returns:
             (success: bool, position: Optional[Position])
         """
+        # ✅ 记录开始执行时间
+        execution_start_time = time.time()
+        
+        # ✅ 计算信号触发 → 开始执行的延迟
+        if signal_trigger_time:
+            signal_to_execution_delay = (execution_start_time - signal_trigger_time) * 1000
+            logger.info(f"⏱️ 信号触发 → 开始执行: {signal_to_execution_delay:.2f} ms")
+    
         logger.info(
             f"📤 执行开仓:\n"
             f"   {self.exchange_a.exchange_name} 开空 @ ${exchange_a_price}\n"
@@ -62,6 +72,9 @@ class OrderExecutor:
         )
         
         try:
+            # ✅ 记录 A 所下单开始时间
+            exchange_a_start_time = time.time()
+        
             # ✅ Exchange A 开空（卖出）
             order_a_result = await self.exchange_a.place_open_order(
                 side='sell',
@@ -70,6 +83,16 @@ class OrderExecutor:
                 retry_mode='opportunistic',
                 quote_id=exchange_a_quote_id
             )
+
+            # ✅ 记录 A 所下单完成时间
+            exchange_a_end_time = time.time()
+            exchange_a_duration = (exchange_a_end_time - exchange_a_start_time) * 1000
+
+            logger.info(
+                f"⏱️ {self.exchange_a.exchange_name} 下单耗时: {exchange_a_duration:.2f} ms\n"
+                f"   开始时间: {exchange_a_start_time:.3f}\n"
+                f"   结束时间: {exchange_a_end_time:.3f}"
+            )
             
             if not order_a_result.get('success'):
                 logger.error(
@@ -77,7 +100,12 @@ class OrderExecutor:
                     f"{order_a_result.get('error')}"
                 )
                 return False, None
-            
+            # ✅ 记录 B 所下单开始时间
+            exchange_b_start_time = time.time()
+            # ✅ 计算 A 所完成 → B 所开始的间隔
+            a_to_b_gap = (exchange_b_start_time - exchange_a_end_time) * 1000
+            logger.info(f"⏱️ A 所完成 → B 所开始间隔: {a_to_b_gap:.2f} ms")
+        
             # ✅ Exchange B 开多（买入）
             order_b_result = await self.exchange_b.place_open_order(
                 side='buy',
@@ -86,7 +114,15 @@ class OrderExecutor:
                 retry_mode='aggressive',
                 quote_id=exchange_b_quote_id
             )
+            # ✅ 记录 B 所下单完成时间
+            exchange_b_end_time = time.time()
+            exchange_b_duration = (exchange_b_end_time - exchange_b_start_time) * 1000
             
+            logger.info(
+                f"⏱️ {self.exchange_b.exchange_name} 下单耗时: {exchange_b_duration:.2f} ms\n"
+                f"   开始时间: {exchange_b_start_time:.3f}\n"
+                f"   结束时间: {exchange_b_end_time:.3f}"
+            )
             if not order_b_result.get('success'):
                 logger.error(
                     f"❌ {self.exchange_b.exchange_name} 开多失败: "
@@ -147,6 +183,45 @@ class OrderExecutor:
                 f"   价差: {spread_pct:.4f}%"
             )
             
+            # ✅ 记录总执行时间
+            total_execution_time = (exchange_b_end_time - execution_start_time) * 1000
+            
+            # ✅ 打印完整时间链
+            logger.info(
+                f"\n{'='*60}\n"
+                f"⏱️ 开仓时间链路分析\n"
+                f"{'='*60}\n"
+            )
+            
+            if signal_trigger_time:
+                signal_to_execution = (execution_start_time - signal_trigger_time) * 1000
+                signal_to_a_complete = (exchange_a_end_time - signal_trigger_time) * 1000
+                signal_to_b_start = (exchange_b_start_time - signal_trigger_time) * 1000
+                signal_to_b_complete = (exchange_b_end_time - signal_trigger_time) * 1000
+                
+                logger.info(
+                    f"1️⃣ 信号触发 → 开始执行:        {signal_to_execution:.2f} ms\n"
+                    f"2️⃣ 开始执行 → A 所下单完成:   {exchange_a_duration:.2f} ms\n"
+                    f"3️⃣ A 所完成 → B 所开始:       {a_to_b_gap:.2f} ms\n"
+                    f"4️⃣ B 所开始 → B 所下单完成:   {exchange_b_duration:.2f} ms\n"
+                    f"\n"
+                    f"📊 累计时间:\n"
+                    f"   信号 → A 所完成:           {signal_to_a_complete:.2f} ms\n"
+                    f"   信号 → B 所开始:           {signal_to_b_start:.2f} ms\n"
+                    f"   信号 → B 所完成:           {signal_to_b_complete:.2f} ms\n"
+                    f"\n"
+                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
+                    f"{'='*60}\n"
+                )
+            else:
+                logger.info(
+                    f"1️⃣ A 所下单耗时:             {exchange_a_duration:.2f} ms\n"
+                    f"2️⃣ A 所完成 → B 所开始:      {a_to_b_gap:.2f} ms\n"
+                    f"3️⃣ B 所下单耗时:             {exchange_b_duration:.2f} ms\n"
+                    f"\n"
+                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
+                    f"{'='*60}\n"
+                )
             return True, position
         
         except Exception as e:
@@ -161,7 +236,8 @@ class OrderExecutor:
         exchange_a_price: Decimal,
         exchange_b_price: Decimal,
         exchange_a_quote_id: Optional[str] = None,
-        exchange_b_quote_id: Optional[str] = None
+        exchange_b_quote_id: Optional[str] = None,
+        signal_trigger_time: Optional[float] = None
     ) -> bool:
         """
         执行平仓
@@ -174,6 +250,14 @@ class OrderExecutor:
         Returns:
             success: bool
         """
+        # ✅ 记录开始执行时间
+        execution_start_time = time.time()
+        
+        # ✅ 计算信号触发 → 开始执行的延迟
+        if signal_trigger_time:
+            signal_to_execution_delay = (execution_start_time - signal_trigger_time) * 1000
+            logger.info(f"⏱️ 信号触发 → 开始执行: {signal_to_execution_delay:.2f} ms")
+        
         logger.info(
             f"📤 执行平仓:\n"
             f"   {self.exchange_a.exchange_name} 平空 @ ${exchange_a_price}\n"
@@ -181,6 +265,9 @@ class OrderExecutor:
         )
         
         try:
+            # ✅ 记录 A 所下单开始时间
+            exchange_a_start_time = time.time()
+
             # ✅ Exchange A 平空（买入）
             order_a_result = await self.exchange_a.place_close_order(
                 side='buy',
@@ -190,6 +277,12 @@ class OrderExecutor:
                 quote_id=exchange_a_quote_id
             )
             
+            # ✅ 记录 A 所下单完成时间
+            exchange_a_end_time = time.time()
+            exchange_a_duration = (exchange_a_end_time - exchange_a_start_time) * 1000
+            
+            logger.info(f"⏱️ {self.exchange_a.exchange_name} 平仓耗时: {exchange_a_duration:.2f} ms")
+            
             if not order_a_result.get('success'):
                 logger.error(
                     f"❌ {self.exchange_a.exchange_name} 平空失败: "
@@ -197,6 +290,13 @@ class OrderExecutor:
                 )
                 return False
             
+            # ✅ 记录 B 所下单开始时间
+            exchange_b_start_time = time.time()
+
+            # ✅ 计算 A 所完成 → B 所开始的间隔
+            a_to_b_gap = (exchange_b_start_time - exchange_a_end_time) * 1000
+            logger.info(f"⏱️ A 所完成 → B 所开始间隔: {a_to_b_gap:.2f} ms")
+        
             # ✅ Exchange B 平多（卖出）
             order_b_result = await self.exchange_b.place_close_order(
                 side='sell',
@@ -205,6 +305,12 @@ class OrderExecutor:
                 retry_mode='aggressive',
                 quote_id=exchange_b_quote_id
             )
+            
+            # ✅ 记录 B 所下单完成时间
+            exchange_b_end_time = time.time()
+            exchange_b_duration = (exchange_b_end_time - exchange_b_start_time) * 1000
+            
+            logger.info(f"⏱️ {self.exchange_b.exchange_name} 平仓耗时: {exchange_b_duration:.2f} ms")
             
             if not order_b_result.get('success'):
                 logger.error(
@@ -240,8 +346,48 @@ class OrderExecutor:
                     f"平仓失败：{self.exchange_a.exchange_name} 已平仓但 "
                     f"{self.exchange_b.exchange_name} 失败，需要手动处理仓位！"
                 )
-                # return False
+            logger.info(
+                f"✅ {self.exchange_b.exchange_name} 平多成功: "
+                f"{order_b_result.get('order_id')}"
+            )
+            # ✅ 记录总执行时间
+            total_execution_time = (exchange_b_end_time - execution_start_time) * 1000
             
+            # ✅ 打印完整时间链
+            logger.info(
+                f"\n{'='*60}\n"
+                f"⏱️ 平仓时间链路分析\n"
+                f"{'='*60}\n"
+            )
+            
+            if signal_trigger_time:
+                signal_to_execution = (execution_start_time - signal_trigger_time) * 1000
+                signal_to_a_complete = (exchange_a_end_time - signal_trigger_time) * 1000
+                signal_to_b_complete = (exchange_b_end_time - signal_trigger_time) * 1000
+                
+                logger.info(
+                    f"1️⃣ 信号触发 → 开始执行:        {signal_to_execution:.2f} ms\n"
+                    f"2️⃣ 开始执行 → A 所平仓完成:   {exchange_a_duration:.2f} ms\n"
+                    f"3️⃣ A 所完成 → B 所开始:       {a_to_b_gap:.2f} ms\n"
+                    f"4️⃣ B 所开始 → B 所平仓完成:   {exchange_b_duration:.2f} ms\n"
+                    f"\n"
+                    f"📊 累计时间:\n"
+                    f"   信号 → A 所完成:           {signal_to_a_complete:.2f} ms\n"
+                    f"   信号 → B 所完成:           {signal_to_b_complete:.2f} ms\n"
+                    f"\n"
+                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
+                    f"{'='*60}\n"
+                )
+            else:
+                logger.info(
+                    f"1️⃣ A 所平仓耗时:             {exchange_a_duration:.2f} ms\n"
+                    f"2️⃣ A 所完成 → B 所开始:      {a_to_b_gap:.2f} ms\n"
+                    f"3️⃣ B 所平仓耗时:             {exchange_b_duration:.2f} ms\n"
+                    f"\n"
+                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
+                    f"{'='*60}\n"
+                )
+        
             # ✅ 计算盈亏
             pnl_pct = position.calculate_pnl_pct(
                 exchange_a_price=exchange_a_price,
