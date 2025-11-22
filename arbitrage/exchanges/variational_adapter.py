@@ -60,6 +60,12 @@ class VariationalAdapter(ExchangeAdapter):
         self._latest_ask = None
         self._price_timestamp = None
         self._quote_id = None
+
+        # ✅ 时间差统计
+        self._orderbook_fetch_time = None  # 订单簿获取时间
+        self._order_place_time = None      # 下单时间
+        self._time_diffs = []              # 时间差列表（毫秒）
+    
         
         logger.info(
             f"🔧 VariationalAdapter 初始化:\n"
@@ -196,6 +202,8 @@ class VariationalAdapter(ExchangeAdapter):
             }
         """
         try:
+            fetch_start = time.time()
+
             # ✅ 调用 indicative quote API
             quote_data = await asyncio.wait_for(
                 self.client._fetch_indicative_quote(
@@ -204,7 +212,9 @@ class VariationalAdapter(ExchangeAdapter):
                 ),
                 timeout=5.0  # 5 秒超时
             )
-            
+            fetch_end = time.time()
+            self._orderbook_fetch_time = fetch_end  # 记录订单簿获取时间
+
             if not quote_data or 'bid' not in quote_data or 'ask' not in quote_data:
                 logger.debug("Variational quote 数据不完整")
                 return None
@@ -212,12 +222,16 @@ class VariationalAdapter(ExchangeAdapter):
             bid_price = Decimal(str(quote_data['bid']))
             ask_price = Decimal(str(quote_data['ask']))
             
+            fetch_duration_ms = (fetch_end - fetch_start) * 1000  # 毫秒
+            logger.debug(f"📊 订单簿获取耗时: {fetch_duration_ms:.2f} ms")
+
             # ✅ 构造订单簿格式（兼容 PriceMonitorService）
             orderbook = {
                 'bids': [[float(bid_price), float(self.query_quantity)]],  # [price, size]
                 'asks': [[float(ask_price), float(self.query_quantity)]],
                 'timestamp': asyncio.get_event_loop().time() * 1000,  # 毫秒时间戳
-                'quote_id': quote_data.get('quote_id', None)
+                'quote_id': quote_data.get('quote_id', None),
+                'fetch_duration': fetch_duration_ms
             }
             
             return orderbook
@@ -312,10 +326,29 @@ class VariationalAdapter(ExchangeAdapter):
         - 第 3 次：滑点 0.10% (0.001)
         """
         max_attempts = 1  # 分别对应 0.01%, 0.05%, 0.10%
-        slippage_levels = [0.001]
+        # slippage_levels = [0.0005]
         for attempt in range(max_attempts):
             try:
-                max_slippage = slippage_levels[attempt]
+                # ✅ 记录下单时间
+                self._order_place_time = time.time()
+                # max_slippage = slippage_levels[attempt]
+                max_slippage = 0.0005  # 固定使用 0.05% 滑点
+
+                # ✅ 计算与最后一次订单簿获取的时间差
+                if self._orderbook_fetch_time:
+                    time_diff = (self._order_place_time - self._orderbook_fetch_time) * 1000  # 毫秒
+                    self._time_diffs.append(time_diff)
+                    
+                    logger.info(
+                        f"⏱️ 订单簿获取 → 下单时间差: {time_diff:.2f} ms\n"
+                        f"   订单簿时间: {self._orderbook_fetch_time:.3f}\n"
+                        f"   下单时间:   {self._order_place_time:.3f}"
+                    )
+                    
+                    # ✅ 警告：时间差过大
+                    if time_diff > 1000:  # 超过 1 秒
+                        logger.warning(f"⚠️ 订单簿数据过旧！时间差: {time_diff:.0f} ms")
+                
 
                 # ✅ 第 1 次尝试使用传入的 quote_id，后续重试重新获取
                 if attempt == 0 and quote_id is not None:
@@ -368,6 +401,7 @@ class VariationalAdapter(ExchangeAdapter):
                     f"   方向: {side}\n"
                     f"   quote_id: {current_quote_id[:8]}...\n"
                     f"   最大滑点: {max_slippage * 100:.3f}%"
+                    f"   订单簿年龄: {time_diff:.2f} ms (订单簿 → 下单)"  # ✅ 添加时间差
                 )
                 # ✅ 调用客户端下单
                 result = await self.client._place_market_order(
