@@ -91,7 +91,7 @@ class OrderExecutor:
                     side='buy',
                     quantity=self.quantity,
                     price=exchange_b_price,
-                    retry_mode='opportunistic',
+                    retry_mode='aggressive',
                     quote_id=exchange_b_quote_id
                 )
             )
@@ -297,7 +297,7 @@ class OrderExecutor:
                     side='sell',
                     quantity=self.quantity,
                     price=exchange_b_price,
-                    retry_mode='opportunistic',
+                    retry_mode='aggressive',
                     quote_id=exchange_b_quote_id
                 )
             )
