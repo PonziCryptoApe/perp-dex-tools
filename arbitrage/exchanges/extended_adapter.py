@@ -142,6 +142,7 @@ class ExtendedAdapter(ExchangeAdapter):
     ):
         event = asyncio.Event()
         self._order_status_events[order_id] = event
+        logger.info(f"⏳ 开始等待订单状态: {order_id}, 超时={timeout}s")
 
         try:
             await asyncio.wait_for(event.wait(), timeout)
