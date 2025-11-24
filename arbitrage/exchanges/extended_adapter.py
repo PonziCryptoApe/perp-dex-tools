@@ -140,20 +140,56 @@ class ExtendedAdapter(ExchangeAdapter):
         order_id: str,
         timeout: float = 1.0
     ):
+        # ✅ 1. 先检查是否已经有状态（可能在下单时就已推送）
+        if order_id in self._order_status_data:
+            status = self._order_status_data.pop(order_id)
+            logger.info(f"✅ 订单状态已存在（无需等待）: {order_id} -> {status}")
+            return status
+        
+        # ✅ 2. 创建 Event 并等待
         event = asyncio.Event()
         self._order_status_events[order_id] = event
+        
         logger.info(f"⏳ 开始等待订单状态: {order_id}, 超时={timeout}s")
-
+        
+        wait_start = time.time()
+        
         try:
-            await asyncio.wait_for(event.wait(), timeout)
-
+            # ✅ 使用短超时 + 循环检查（更快响应）
+            check_interval = 0.01  # 10ms 检查一次
+            
+            while time.time() - wait_start < timeout:
+                # ✅ 检查 Event 是否被设置
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=check_interval)
+                    # Event 被设置，立即返回
+                    break
+                except asyncio.TimeoutError:
+                    # 超时，继续下一轮检查
+                    pass
+                
+                # ✅ 检查是否有状态数据（双保险）
+                if order_id in self._order_status_data:
+                    break
+            
+            # ✅ 获取状态
             status = self._order_status_data.get(order_id, None)
+            
+            wait_duration = (time.time() - wait_start) * 1000
+            
+            if status:
+                logger.info(f"✅ 收到状态: {order_id} -> {status} (耗时 {wait_duration:.2f} ms)")
+            else:
+                logger.warning(f"⚠️ 等待订单状态超时: {order_id} ({wait_duration:.2f} ms)")
+            
             return status
-        except TimeoutError:
-            logger.warning(f"⚠️ 等待订单状态超时: {order_id}")
+        
+        except Exception as e:
+            logger.error(f"❌ 等待订单状态异常: {e}")
             return None
+        
         finally:
-            # 清理
+            # ✅ 清理
             self._order_status_events.pop(order_id, None)
             self._order_status_data.pop(order_id, None)
 
