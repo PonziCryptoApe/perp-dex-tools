@@ -288,7 +288,7 @@ class ExtendedAPILatencyTest:
                 stat_key = 'place_order_sell'
             
             order_price = self.client.round_to_tick(order_price)
-            quantity = Decimal('0.001')
+            quantity = Decimal('0.01')
             
             logger.info(f"  📤 下{side.upper()}单: {quantity} @ ${order_price}")
             
