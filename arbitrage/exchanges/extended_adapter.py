@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from decimal import Decimal
+import time
 from typing import Optional, Callable, Dict
 from .base import ExchangeAdapter
 from x10.perpetual.orders import OrderSide, TimeInForce
@@ -123,13 +124,15 @@ class ExtendedAdapter(ExchangeAdapter):
         """处理 WebSocket 订单更新"""
         order_id = order_data.get('order_id')
         status = order_data.get('status')
-        
+        logger.info(f"📨 收到订单更新: order_id={order_id}, status={status}")
+
         if order_id:
             # ✅ 保存最终状态
             self._order_status_data[order_id] = status
             
             # ✅ 通知等待者
             if order_id in self._order_status_events:
+                logger.info(f"✅ 通知等待者: {order_id} -> {status}")
                 self._order_status_events[order_id].set()
 
     async def _wait_for_order_status(
@@ -226,7 +229,8 @@ class ExtendedAdapter(ExchangeAdapter):
             logger.info(
                 f"📤 {self.exchange_name} 下单: {side} {quantity} @ ${price} ({retry_mode})"
             )
-            
+            order_start_time = time.time()
+            logger.info(f"📤 {self.exchange_name} 下单: {side} {quantity} @ ${price} ({retry_mode})")
             # ✅ 调用 ExtendedClient 的下单方法
             order_result = await self.client.perpetual_trading_client.place_order(
                 market_name=self.contract_id,
@@ -236,7 +240,10 @@ class ExtendedAdapter(ExchangeAdapter):
                 time_in_force=TimeInForce.IOC,
                 post_only=False,
             )
-            
+            order_place_time = time.time()
+            place_duration = (order_place_time - order_start_time) * 1000
+            logger.info(f"⏱️ 下单 API 耗时: {place_duration:.2f} ms")  # ← 应该是 ~20ms
+
             if not order_result or not hasattr(order_result, 'data') or not order_result.data:
                 error_msg = getattr(order_result, 'message', 'Unknown error')
                 logger.error(f"❌ 下单失败: {error_msg}")
@@ -270,9 +277,19 @@ class ExtendedAdapter(ExchangeAdapter):
             
             # # ✅ 检查订单状态
             # status = str(order_info.status).upper()
+            # ✅ 等待状态
+            wait_start_time = time.time()
+            logger.info(f"⏳ 开始等待订单状态: {order_id}")
+            
             status = await self._wait_for_order_status(order_id, timeout=1.0)
             logger.info(f"订单状态: {order_id} -> {status}")
-
+            wait_end_time = time.time()
+            wait_duration = (wait_end_time - wait_start_time) * 1000
+            logger.info(f"⏱️ 等待状态耗时: {wait_duration:.2f} ms, 状态: {status}")  # ← 瓶颈在这里！
+            
+            total_duration = (wait_end_time - order_start_time) * 1000
+            logger.info(f"⏱️ 下单总耗时: {total_duration:.2f} ms")
+            
             if status == 'NEW':
                 status = 'OPEN'
             elif status == 'CANCELLED':
