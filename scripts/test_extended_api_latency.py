@@ -8,7 +8,7 @@ import statistics
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -108,6 +108,10 @@ class ExtendedAPILatencyTest:
         self.contract_id = f"{symbol}-USD"
         self.client: ExtendedClient = None
         
+        # ✅ WebSocket 订单推送监听
+        self._order_push_times: Dict[str, float] = {}  # order_id -> 推送时间
+        self._order_place_times: Dict[str, float] = {}  # order_id -> 下单时间
+        
         # ✅ 各接口的统计
         self.stats = {
             'get_markets': LatencyStats('获取市场信息 (get_markets)'),
@@ -117,7 +121,8 @@ class ExtendedAPILatencyTest:
             'place_order_buy': LatencyStats('下市价买单 (place_order BUY)'),
             'place_order_sell': LatencyStats('下市价卖单 (place_order SELL)'),
             'cancel_order': LatencyStats('取消订单 (cancel_order)'),
-            'round_trip': LatencyStats('往返延迟 (下单→成交确认)')
+            'round_trip': LatencyStats('往返延迟 (下单→成交确认)'),
+            'ws_push_latency': LatencyStats('WebSocket 推送延迟 (下单→收到推送)')  # ✅ 新增
         }
     
     async def setup(self):
@@ -136,12 +141,50 @@ class ExtendedAPILatencyTest:
         self.client = ExtendedClient(config)
         await self.client.connect()
         
+        # ✅ 设置 WebSocket 订单推送监听
+        self._setup_order_push_handler()
+        
         # ✅ 获取合约属性（tick_size 等）
         await self.client.get_contract_attributes()
         
         logger.info(f"✅ 客户端已初始化: {self.contract_id}")
         logger.info(f"   tick_size: {self.client.config.tick_size}")
         logger.info(f"   min_order_size: {self.client.min_order_size}")
+    
+    def _setup_order_push_handler(self):
+        """设置 WebSocket 订单推送监听器"""
+        
+        def order_update_handler(order_data: dict):
+            """监听订单推送"""
+            order_id = order_data.get('order_id')
+            status = order_data.get('status')
+            
+            if not order_id:
+                return
+            
+            # ✅ 记录推送时间
+            push_time = time.time()
+            self._order_push_times[order_id] = push_time
+            
+            # ✅ 计算推送延迟
+            if order_id in self._order_place_times:
+                place_time = self._order_place_times[order_id]
+                push_latency = (push_time - place_time) * 1000
+                
+                logger.info(
+                    f"📨 WebSocket 推送: order_id={order_id}, status={status}, "
+                    f"推送延迟={push_latency:.2f} ms"
+                )
+                
+                # ✅ 记录统计（只记录 FILLED 状态）
+                if status in ['FILLED', 'PARTIALLY_FILLED']:
+                    self.stats['ws_push_latency'].record(push_latency, success=True)
+            else:
+                logger.debug(f"📨 WebSocket 推送: order_id={order_id}, status={status} (未追踪)")
+        
+        # ✅ 注册处理器
+        self.client.setup_order_update_handler(order_update_handler)
+        logger.info("✅ WebSocket 订单推送监听器已设置")
     
     async def cleanup(self):
         """清理资源"""
@@ -262,7 +305,7 @@ class ExtendedAPILatencyTest:
     
     # ========== 5. 下单接口（买/卖） ==========
     
-    async def test_place_order(self, side: str = 'buy') -> Tuple[str, float]:
+    async def test_place_order(self, side: str = 'buy') -> Tuple[Optional[str], float]:
         """
         测试下单接口（单次）
         
@@ -281,11 +324,11 @@ class ExtendedAPILatencyTest:
             
             # ✅ 计算订单价格（IOC 市价单）
             if side == 'buy':
-                order_price = best_ask  # 买入价略高于卖一
+                order_price = best_ask
                 order_side = OrderSide.BUY
                 stat_key = 'place_order_buy'
             else:
-                order_price = best_bid  # 卖出价略低于买一
+                order_price = best_bid
                 order_side = OrderSide.SELL
                 stat_key = 'place_order_sell'
             
@@ -295,7 +338,7 @@ class ExtendedAPILatencyTest:
             logger.info(f"  📤 下{side.upper()}单: {quantity} @ ${order_price}")
             
             # ✅ 记录下单时间
-            start = time.time()
+            place_start = time.time()
             
             order_result = await self.client.perpetual_trading_client.place_order(
                 market_name=self.contract_id,
@@ -307,8 +350,8 @@ class ExtendedAPILatencyTest:
                 expire_time=datetime.now(tz=timezone.utc) + timedelta(days=1)
             )
             
-            end = time.time()
-            latency = (end - start) * 1000
+            place_end = time.time()
+            api_latency = (place_end - place_start) * 1000
             
             # ✅ 检查结果
             if not order_result or not hasattr(order_result, 'data') or not order_result.data:
@@ -318,10 +361,27 @@ class ExtendedAPILatencyTest:
             
             order_id = order_result.data.id
             
-            logger.info(f"  ✅ 下单成功: {order_id} ({latency:.2f} ms)")
-            self.stats[stat_key].record(latency, success=True)
+            # ✅ 记录下单时间（用于计算推送延迟）
+            self._order_place_times[order_id] = place_start
             
-            return order_id, latency
+            logger.info(
+                f"  ✅ 下单成功: {order_id}\n"
+                f"     API 耗时: {api_latency:.2f} ms\n"
+                f"     等待 WebSocket 推送..."
+            )
+            self.stats[stat_key].record(api_latency, success=True)
+            
+            # ✅ 等待 WebSocket 推送（最多 2 秒）
+            await asyncio.sleep(2)
+            
+            # ✅ 检查是否收到推送
+            if order_id in self._order_push_times:
+                push_latency = (self._order_push_times[order_id] - place_start) * 1000
+                logger.info(f"  📨 WebSocket 推送延迟: {push_latency:.2f} ms")
+            else:
+                logger.warning(f"  ⚠️ 未收到 WebSocket 推送（2秒超时）")
+            
+            return order_id, api_latency
         
         except Exception as e:
             logger.error(f"  ❌ 下单异常: {e}")
@@ -332,31 +392,7 @@ class ExtendedAPILatencyTest:
             self.stats[stat_key].record(0, success=False)
             return None, 0
     
-    # ========== 6. 取消订单 ==========
-    
-    async def test_cancel_order(self, order_id: str):
-        """测试取消订单接口（单次）"""
-        try:
-            start = time.time()
-            
-            result = await self.client.perpetual_trading_client.orders.cancel_order(order_id)
-            
-            end = time.time()
-            latency = (end - start) * 1000
-            
-            success = (result and hasattr(result, 'data'))
-            self.stats['cancel_order'].record(latency, success)
-            
-            logger.debug(f"  cancel_order: {latency:.2f} ms - {'✅' if success else '❌'}")
-            
-            return success
-        
-        except Exception as e:
-            logger.error(f"  cancel_order 异常: {e}")
-            self.stats['cancel_order'].record(0, success=False)
-            return False
-    
-    # ========== 7. 往返延迟测试（下单→成交确认） ==========
+    # ========== 6. 往返延迟测试（下单→成交确认） ==========
     
     async def test_round_trip_latency(self, count: int = 5):
         """
@@ -364,7 +400,7 @@ class ExtendedAPILatencyTest:
         
         流程：
         1. 下买单（IOC 市价单，应立即成交）
-        2. 等待 2 秒
+        2. 等待 2 秒（等待 WebSocket 推送）
         3. 下卖单（平仓）
         4. 记录总耗时
         """
@@ -405,7 +441,7 @@ class ExtendedAPILatencyTest:
                     continue
                 
                 # ✅ 5. 等待卖单成交
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
                 sell_info = await self.test_get_order_info(sell_order_id)
                 
                 if not sell_info or sell_info.status != 'FILLED':
@@ -413,11 +449,11 @@ class ExtendedAPILatencyTest:
                 else:
                     logger.info(f"  ✅ 卖单已成交: {sell_order_id}")
                 
-                # ✅ 6. 记录往返延迟
+                # ✅ 6. 记录往返延迟（API 延迟）
                 round_trip_time = buy_latency + sell_latency
                 self.stats['round_trip'].record(round_trip_time, success=True)
                 
-                logger.info(f"  ⏱️ 往返延迟: {round_trip_time:.2f} ms")
+                logger.info(f"  ⏱️ 往返延迟 (API): {round_trip_time:.2f} ms")
                 
                 # ✅ 等待下一轮
                 await asyncio.sleep(3)
@@ -445,10 +481,11 @@ class ExtendedAPILatencyTest:
             'get_open_orders',
             'place_order_buy',
             'place_order_sell',
-            'cancel_order',
+            'ws_push_latency',  # ✅ WebSocket 推送延迟
             'round_trip'
         ]:
-            self.stats[key].print_stats()
+            if self.stats[key].successes > 0 or self.stats[key].errors > 0:
+                self.stats[key].print_stats()
         
         print(f"{'='*70}")
         print(f"✅ 测试完成")
@@ -466,13 +503,13 @@ async def main():
         epilog="""
 示例:
   # 完整测试（包含下单）
-  python arbitrage/tools/extended_api_latency_test.py --symbol ETH --full
+  python scripts/test_extended_api_latency.py --symbol ETH --full
   
   # 只测试查询接口（不下单）
-  python arbitrage/tools/extended_api_latency_test.py --symbol ETH --query-only
+  python scripts/test_extended_api_latency.py --symbol ETH --query-only
   
   # 自定义测试次数
-  python arbitrage/tools/extended_api_latency_test.py --symbol ETH --count 20
+  python scripts/test_extended_api_latency.py --symbol ETH --count 20
         """
     )
     
