@@ -128,7 +128,9 @@ class ExtendedAPILatencyTest:
             'exchange': 'extended',
             'ticker': self.symbol,
             'contract_id': self.contract_id,
-            'quantity': Decimal('0.01')
+            'quantity': Decimal('0.01'),
+            'open_order_side': 'buy',
+            'close_order_side': 'sell',
         })
         
         self.client = ExtendedClient(config)
