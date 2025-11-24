@@ -39,9 +39,22 @@ pairs:
     quantity: "0.01"
     open_threshold: 0.11
     close_threshold: -0.03
-
+    
     # ✅ Variational 特殊配置
     variational_config:
       polling_interval: 1.0   # 订单簿轮询间隔（秒）
       query_quantity: 0.01     # 查询数量（可选，默认使用上面的 quantity）
 
+extended_variational_btc:
+    enabled: true
+    symbol: BTC
+    exchange_a: extended
+    exchange_b: variational
+    quantity: "0.0001"
+    open_threshold: 0.08
+    close_threshold: 0
+    
+    # ✅ Variational 特殊配置
+    variational_config:
+      polling_interval: 1.0   # 订单簿轮询间隔（秒）
+      query_quantity: 0.01     # 查询数量（可选，默认使用上面的 quantity）

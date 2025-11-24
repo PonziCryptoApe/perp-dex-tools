@@ -20,6 +20,8 @@ class ExtendedAdapter(ExchangeAdapter):
         # ✅ 订单状态事件
         self._order_status_events: Dict[str, asyncio.Event] = {}
         self._order_status_data: Dict[str, str] = {}  # ← 添加这一行！
+        self._order_status_futures: Dict[str, asyncio.Future] = {}
+
 
     
     async def connect(self):
@@ -126,14 +128,15 @@ class ExtendedAdapter(ExchangeAdapter):
         status = order_data.get('status')
         logger.info(f"📨 收到订单更新: order_id={order_id}, status={status}")
 
-        if order_id:
-            # ✅ 保存最终状态
-            self._order_status_data[order_id] = status
-            
-            # ✅ 通知等待者
-            if order_id in self._order_status_events:
-                logger.info(f"✅ 通知等待者: {order_id} -> {status}")
-                self._order_status_events[order_id].set()
+        if order_id in self._order_status_futures:
+            future = self._order_status_futures[order_id]
+            if not future.done():
+                logger.info(f"✅ 设置 Future 结果: {order_id} -> {status}")
+                future.set_result(status)
+        else:
+            # ✅ 没有等待者，缓存状态
+            logger.debug(f"📦 缓存订单状态: {order_id} -> {status}")
+            self._order_status_data[order_id] = status    
 
     async def _wait_for_order_status(
         self,
@@ -145,45 +148,30 @@ class ExtendedAdapter(ExchangeAdapter):
             status = self._order_status_data.pop(order_id)
             logger.info(f"✅ 订单状态已存在（无需等待）: {order_id} -> {status}")
             return status
-        
-        # ✅ 2. 创建 Event 并等待
-        event = asyncio.Event()
-        self._order_status_events[order_id] = event
+
+        # ✅ 2. 创建 Future 并等待
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._order_status_futures[order_id] = future
         
         logger.info(f"⏳ 开始等待订单状态: {order_id}, 超时={timeout}s")
         
         wait_start = time.time()
-        
+    
         try:
-            # ✅ 使用短超时 + 循环检查（更快响应）
-            check_interval = 0.01  # 10ms 检查一次
-            
-            while time.time() - wait_start < timeout:
-                # ✅ 检查 Event 是否被设置
-                try:
-                    await asyncio.wait_for(event.wait(), timeout=check_interval)
-                    # Event 被设置，立即返回
-                    break
-                except asyncio.TimeoutError:
-                    # 超时，继续下一轮检查
-                    pass
-                
-                # ✅ 检查是否有状态数据（双保险）
-                if order_id in self._order_status_data:
-                    break
-            
-            # ✅ 获取状态
-            status = self._order_status_data.get(order_id, None)
-            
+            # ✅ 直接等待 Future（不循环！）
+            status = await asyncio.wait_for(future, timeout=timeout)
+
             wait_duration = (time.time() - wait_start) * 1000
-            
-            if status:
-                logger.info(f"✅ 收到状态: {order_id} -> {status} (耗时 {wait_duration:.2f} ms)")
-            else:
-                logger.warning(f"⚠️ 等待订单状态超时: {order_id} ({wait_duration:.2f} ms)")
+            logger.info(f"✅ 收到状态: {order_id} -> {status} (耗时 {wait_duration:.2f} ms)")
             
             return status
         
+        except asyncio.TimeoutError:
+            wait_duration = (time.time() - wait_start) * 1000
+            logger.warning(f"⚠️ 等待订单状态超时: {order_id} ({wait_duration:.2f} ms)")
+            return None
+            
         except Exception as e:
             logger.error(f"❌ 等待订单状态异常: {e}")
             return None
@@ -279,8 +267,8 @@ class ExtendedAdapter(ExchangeAdapter):
             )
             order_place_time = time.time()
             place_duration = (order_place_time - order_start_time) * 1000
-            logger.info(f"⏱️ 下单 API 耗时: {place_duration:.2f} ms")  # ← 应该是 ~20ms
-
+            logger.info(f"⏱️ 下单 API 耗时: {place_duration:.2f} ms")
+            logger.info(f"下单结果: {order_result}")
             if not order_result or not hasattr(order_result, 'data') or not order_result.data:
                 error_msg = getattr(order_result, 'message', 'Unknown error')
                 logger.error(f"❌ 下单失败: {error_msg}")
