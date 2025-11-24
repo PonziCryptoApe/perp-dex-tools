@@ -8,7 +8,7 @@ from typing import Optional
 from .base_strategy import BaseStrategy
 from ..models.prices import PriceSnapshot
 from ..services.price_monitor import PriceMonitorService
-from ..services.order_executor import OrderExecutor
+from ..services.order_executor_parallel import OrderExecutor
 from ..models.position import Position
 
 logger = logging.getLogger(__name__)

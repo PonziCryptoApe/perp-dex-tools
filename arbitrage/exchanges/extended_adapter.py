@@ -178,7 +178,7 @@ class ExtendedAdapter(ExchangeAdapter):
         
         finally:
             # ✅ 清理
-            self._order_status_events.pop(order_id, None)
+            self._order_status_futures.pop(order_id, None)
             self._order_status_data.pop(order_id, None)
 
     async def place_open_order(self,
