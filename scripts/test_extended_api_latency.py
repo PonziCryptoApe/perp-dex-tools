@@ -281,11 +281,11 @@ class ExtendedAPILatencyTest:
             
             # ✅ 计算订单价格（IOC 市价单）
             if side == 'buy':
-                order_price = best_ask * Decimal('1.0005')  # 买入价略高于卖一
+                order_price = best_ask  # 买入价略高于卖一
                 order_side = OrderSide.BUY
                 stat_key = 'place_order_buy'
             else:
-                order_price = best_bid * Decimal('0.9995')  # 卖出价略低于买一
+                order_price = best_bid  # 卖出价略低于买一
                 order_side = OrderSide.SELL
                 stat_key = 'place_order_sell'
             
