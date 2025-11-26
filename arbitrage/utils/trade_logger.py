@@ -3,6 +3,7 @@ import csv
 import logging
 from pathlib import Path
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
 
@@ -42,7 +43,9 @@ class TradeLogger:
                     'pair',                # 交易对
                     'exchange',            # 交易所
                     'side',                # 买卖方向
-                    'price',               # 价格
+                    'signal_price',        # ✅ 新增：信号触发价格
+                    'filled_price',        # ✅ 新增：实际成交价格
+                    'slippage_pct',        # ✅ 新增：滑点百分比
                     'quantity',            # 数量
                     'order_id',            # 订单 ID
                     'position_type',       # 仓位类型（open/close）
@@ -56,12 +59,13 @@ class TradeLogger:
         self,
         exchange: str,
         side: str,
-        price: str,
-        quantity: str,
+        signal_price: Decimal,      # ✅ 新增：信号触发价格
+        filled_price: Decimal,      # ✅ 新增：实际成交价格
+        quantity: Decimal,
         order_id: str = '',
         position_type: str = '',
-        spread_pct: str = '',
-        pnl_pct: str = '',
+        spread_pct: Decimal = Decimal('0'),
+        pnl_pct: Decimal = Decimal('0'),
         notes: str = ''
     ):
         """
@@ -70,7 +74,8 @@ class TradeLogger:
         Args:
             exchange: 交易所名称
             side: 买卖方向（buy/sell）
-            price: 成交价格
+            signal_price: 信号触发价格
+            filled_price: 实际成交价格
             quantity: 成交数量
             order_id: 订单 ID
             position_type: 仓位类型（open 开仓 / close 平仓）
@@ -80,6 +85,11 @@ class TradeLogger:
         """
         timestamp = datetime.utcnow().isoformat() + 'Z'
         
+        # ✅ 计算滑点
+        slippage_pct = Decimal('0')
+        if signal_price and signal_price != Decimal('0'):
+            slippage_pct = ((filled_price - signal_price) / signal_price) * 100
+        
         try:
             with open(self.csv_filename, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -88,17 +98,20 @@ class TradeLogger:
                     self.pair,
                     exchange,
                     side,
-                    price,
-                    quantity,
+                    float(signal_price),      # ✅ 信号价格
+                    float(filled_price),      # ✅ 实际成交价
+                    f"{slippage_pct:.6f}",    # ✅ 滑点百分比
+                    float(quantity),
                     order_id,
                     position_type,
-                    spread_pct,
-                    pnl_pct,
+                    f"{spread_pct:.6f}",
+                    f"{pnl_pct:.6f}",
                     notes
                 ])
             
             self.logger.debug(
-                f"📝 记录交易: {exchange} {side} {quantity} @ {price} ({notes})"
+                f"📝 记录交易: {exchange} {side} {quantity} @ ${filled_price} "
+                f"(信号价: ${signal_price}, 滑点: {slippage_pct:+.4f}%, {notes})"
             )
         
         except Exception as e:
@@ -108,14 +121,16 @@ class TradeLogger:
         self,
         exchange_a_name: str,
         exchange_a_side: str,
-        exchange_a_price: str,
+        exchange_a_signal_price: Decimal,   # ✅ 新增：A 所信号价格
+        exchange_a_filled_price: Decimal,   # ✅ 新增：A 所实际成交价
         exchange_a_order_id: str,
         exchange_b_name: str,
         exchange_b_side: str,
-        exchange_b_price: str,
+        exchange_b_signal_price: Decimal,   # ✅ 新增：B 所信号价格
+        exchange_b_filled_price: Decimal,   # ✅ 新增：B 所实际成交价
         exchange_b_order_id: str,
-        quantity: str,
-        spread_pct: str
+        quantity: Decimal,
+        spread_pct: Decimal
     ):
         """
         记录开仓（两条记录）
@@ -123,57 +138,72 @@ class TradeLogger:
         Args:
             exchange_a_name: 交易所 A 名称
             exchange_a_side: 交易所 A 方向
-            exchange_a_price: 交易所 A 价格
+            exchange_a_signal_price: 交易所 A 信号价格
+            exchange_a_filled_price: 交易所 A 实际成交价
             exchange_a_order_id: 交易所 A 订单 ID
             exchange_b_name: 交易所 B 名称
             exchange_b_side: 交易所 B 方向
-            exchange_b_price: 交易所 B 价格
+            exchange_b_signal_price: 交易所 B 信号价格
+            exchange_b_filled_price: 交易所 B 实际成交价
             exchange_b_order_id: 交易所 B 订单 ID
             quantity: 数量
             spread_pct: 价差百分比
         """
-        # 记录交易所 A
+        # ✅ 记录交易所 A
         self.log_trade(
             exchange=exchange_a_name,
             side=exchange_a_side,
-            price=exchange_a_price,
+            signal_price=exchange_a_signal_price,
+            filled_price=exchange_a_filled_price,
             quantity=quantity,
             order_id=exchange_a_order_id,
             position_type='open',
             spread_pct=spread_pct,
-            pnl_pct='0.0',
+            pnl_pct=Decimal('0'),
             notes=f'开仓-{exchange_a_name}-{exchange_a_side}'
         )
         
-        # 记录交易所 B
+        # ✅ 记录交易所 B
         self.log_trade(
             exchange=exchange_b_name,
             side=exchange_b_side,
-            price=exchange_b_price,
+            signal_price=exchange_b_signal_price,
+            filled_price=exchange_b_filled_price,
             quantity=quantity,
             order_id=exchange_b_order_id,
             position_type='open',
             spread_pct=spread_pct,
-            pnl_pct='0.0',
+            pnl_pct=Decimal('0'),
             notes=f'开仓-{exchange_b_name}-{exchange_b_side}'
         )
         
+        # ✅ 计算总滑点
+        slippage_a = ((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
+        slippage_b = ((exchange_b_filled_price - exchange_b_signal_price) / exchange_b_signal_price * 100)
+        total_slippage = slippage_a + slippage_b
+        
         self.logger.info(
-            f"✅ 开仓记录完成: {exchange_a_name}({exchange_a_side}) + "
-            f"{exchange_b_name}({exchange_b_side}), 价差: {spread_pct}%"
+            f"✅ 开仓记录完成:\n"
+            f"   {exchange_a_name}({exchange_a_side}): 信号价 ${exchange_a_signal_price} → 成交价 ${exchange_a_filled_price} (滑点: {slippage_a:+.4f}%)\n"
+            f"   {exchange_b_name}({exchange_b_side}): 信号价 ${exchange_b_signal_price} → 成交价 ${exchange_b_filled_price} (滑点: {slippage_b:+.4f}%)\n"
+            f"   价差: {spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%"
         )
     
     def log_close_position(
         self,
         exchange_a_name: str,
         exchange_a_side: str,
-        exchange_a_price: str,
+        exchange_a_signal_price: Decimal,   # ✅ 新增：A 所信号价格
+        exchange_a_filled_price: Decimal,   # ✅ 新增：A 所实际成交价
+        exchange_a_order_id: str,           # ✅ 新增：A 所订单 ID
         exchange_b_name: str,
         exchange_b_side: str,
-        exchange_b_price: str,
-        quantity: str,
-        spread_pct: str,
-        pnl_pct: str
+        exchange_b_signal_price: Decimal,   # ✅ 新增：B 所信号价格
+        exchange_b_filled_price: Decimal,   # ✅ 新增：B 所实际成交价
+        exchange_b_order_id: str,           # ✅ 新增：B 所订单 ID
+        quantity: Decimal,
+        spread_pct: Decimal,
+        pnl_pct: Decimal
     ):
         """
         记录平仓（两条记录）
@@ -181,40 +211,54 @@ class TradeLogger:
         Args:
             exchange_a_name: 交易所 A 名称
             exchange_a_side: 交易所 A 方向
-            exchange_a_price: 交易所 A 价格
+            exchange_a_signal_price: 交易所 A 信号价格
+            exchange_a_filled_price: 交易所 A 实际成交价
+            exchange_a_order_id: 交易所 A 订单 ID
             exchange_b_name: 交易所 B 名称
             exchange_b_side: 交易所 B 方向
-            exchange_b_price: 交易所 B 价格
+            exchange_b_signal_price: 交易所 B 信号价格
+            exchange_b_filled_price: 交易所 B 实际成交价
+            exchange_b_order_id: 交易所 B 订单 ID
             quantity: 数量
             spread_pct: 价差百分比
             pnl_pct: 盈亏百分比
         """
-        # 记录交易所 A
+        # ✅ 记录交易所 A
         self.log_trade(
             exchange=exchange_a_name,
             side=exchange_a_side,
-            price=exchange_a_price,
+            signal_price=exchange_a_signal_price,
+            filled_price=exchange_a_filled_price,
             quantity=quantity,
-            order_id='',
+            order_id=exchange_a_order_id,
             position_type='close',
             spread_pct=spread_pct,
             pnl_pct=pnl_pct,
             notes=f'平仓-{exchange_a_name}-{exchange_a_side}'
         )
         
-        # 记录交易所 B
+        # ✅ 记录交易所 B
         self.log_trade(
             exchange=exchange_b_name,
             side=exchange_b_side,
-            price=exchange_b_price,
+            signal_price=exchange_b_signal_price,
+            filled_price=exchange_b_filled_price,
             quantity=quantity,
-            order_id='',
+            order_id=exchange_b_order_id,
             position_type='close',
             spread_pct=spread_pct,
             pnl_pct=pnl_pct,
             notes=f'平仓-{exchange_b_name}-{exchange_b_side}'
         )
         
+        # ✅ 计算总滑点
+        slippage_a = ((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
+        slippage_b = ((exchange_b_filled_price - exchange_b_signal_price) / exchange_b_signal_price * 100)
+        total_slippage = slippage_a + slippage_b
+        
         self.logger.info(
-            f"✅ 平仓记录完成: 盈亏 {pnl_pct}%, 价差: {spread_pct}%"
+            f"✅ 平仓记录完成:\n"
+            f"   {exchange_a_name}({exchange_a_side}): 信号价 ${exchange_a_signal_price} → 成交价 ${exchange_a_filled_price} (滑点: {slippage_a:+.4f}%)\n"
+            f"   {exchange_b_name}({exchange_b_side}): 信号价 ${exchange_b_signal_price} → 成交价 ${exchange_b_filled_price} (滑点: {slippage_b:+.4f}%)\n"
+            f"   盈亏: {pnl_pct:.4f}%, 价差: {spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%"
         )

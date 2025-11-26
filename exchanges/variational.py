@@ -63,6 +63,9 @@ class VariationalClient(BaseExchangeClient):
         self._prices_ws = None
         self._portfolio_ws = None
         self._ws_connected = threading.Event()
+        # ✅ 添加连接状态标志
+        self._portfolio_ws_connected = False
+        self._portfolio_ws_lock = threading.Lock()
         
         # 订单簿和状态管理
         self.orderbook = None
@@ -151,6 +154,31 @@ class VariationalClient(BaseExchangeClient):
         self.logger.log("【VARIATIONAL】Disconnecting from Variational exchange...", "INFO")
 
         try:
+            # 1. 停止 WebSocket
+            self._stop_event.set()
+            
+            # ✅ 关闭 WebSocket 连接
+            if self._prices_ws:
+                try:
+                    self._prices_ws.close()
+                except:
+                    pass
+            
+            if self._portfolio_ws:
+                try:
+                    self._portfolio_ws.close()
+                except:
+                    pass
+            
+            # ✅ 等待线程退出
+            time.sleep(2)
+            
+            # ✅ 重置状态
+            with self._portfolio_ws_lock:
+                self._portfolio_ws_connected = False
+            
+            self._portfolio_reconnect_count = 0
+
             # 1. 取消未完成的买单
             active_orders = await self.get_active_orders(self.config.contract_id)
             for order in active_orders:
@@ -158,11 +186,11 @@ class VariationalClient(BaseExchangeClient):
                     await self.cancel_order(order.order_id)
             
             # 2. 停止 WebSocket
-            self._stop_event.set()
-            if self._prices_ws:
-                self._prices_ws.close()
-            if self._portfolio_ws:
-                self._portfolio_ws.close()
+            # self._stop_event.set()
+            # if self._prices_ws:
+            #     self._prices_ws.close()
+            # if self._portfolio_ws:
+            #     self._portfolio_ws.close()
             
             # 3. 等待任务完成
             for task in self._tasks:
@@ -274,22 +302,72 @@ class VariationalClient(BaseExchangeClient):
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
         }
-        self.logger.log("【VARIATIONAL】Starting Portfolio WebSocket...", "INFO")
-        self._portfolio_ws = websocket.WebSocketApp(
-            self.ws_portfolio_url,
-            header=headers,
-            on_open=self._on_portfolio_open,
-            on_message=self._on_portfolio_message,
-            on_error=self._on_portfolio_error,
-            on_close=self._on_portfolio_close
-        )
+        # self.logger.log("【VARIATIONAL】Starting Portfolio WebSocket...", "INFO")
+        # self._portfolio_ws = websocket.WebSocketApp(
+        #     self.ws_portfolio_url,
+        #     header=headers,
+        #     on_open=self._on_portfolio_open,
+        #     on_message=self._on_portfolio_message,
+        #     on_error=self._on_portfolio_error,
+        #     on_close=self._on_portfolio_close
+        # )
         
         while not self._stop_event.is_set():
             try:
+                # ✅ 检查是否已连接
+                with self._portfolio_ws_lock:
+                    if self._portfolio_ws_connected:
+                        self.logger.log("【VARIATIONAL】Portfolio WebSocket already connected, skipping", "WARNING")
+                        time.sleep(3)
+                        continue
+                    
+                    # ✅ 标记为连接中
+                    self._portfolio_ws_connected = True
+                
+                self.logger.log("【VARIATIONAL】Starting Portfolio WebSocket...", "INFO")
+                # ✅ 关闭旧连接
+                if self._portfolio_ws is not None:
+                    try:
+                        self._portfolio_ws.close()
+                        time.sleep(1)
+                    except:
+                        pass
+                
+                # ✅ 标记为连接中
+                with self._portfolio_ws_lock:
+                    self._portfolio_ws_connected = True
+
+                # ✅ 创建新连接
+                self._portfolio_ws = websocket.WebSocketApp(
+                    self.ws_portfolio_url,
+                    header=headers,
+                    on_open=self._on_portfolio_open,
+                    on_message=self._on_portfolio_message,
+                    on_error=self._on_portfolio_error,
+                    on_close=self._on_portfolio_close
+                )
+                
+                # ✅ 运行 WebSocket（会阻塞）
                 self._portfolio_ws.run_forever()
+                
             except Exception as e:
-                self.logger.log(f"【VARIATIONAL】Portfolio WebSocket error: {e}", "ERROR")
-                time.sleep(3)
+                error_msg = str(e).lower()
+                
+                # ✅ 捕获 "already opened" 错误
+                if 'already opened' in error_msg or 'already connected' in error_msg:
+                    self.logger.log("【VARIATIONAL】Portfolio WebSocket already opened, waiting...", "WARNING")
+                    time.sleep(5)  # 等待旧连接关闭
+                else:
+                    self.logger.log(f"【VARIATIONAL】Portfolio WebSocket error: {e}", "ERROR")
+                    time.sleep(3)
+            
+            finally:
+                # ✅ 连接关闭后重置状态
+                with self._portfolio_ws_lock:
+                    self._portfolio_ws_connected = False
+                
+                self.logger.log("【VARIATIONAL】Portfolio WebSocket disconnected", "INFO")
+    
 
     def _on_prices_open(self, ws):
         """价格 WebSocket 连接建立"""
@@ -359,7 +437,9 @@ class VariationalClient(BaseExchangeClient):
     def _on_portfolio_close(self, ws, close_status_code, close_msg):
         """投资组合 WebSocket 关闭"""
         self.logger.log(f"【VARIATIONAL】Portfolio WebSocket closed: {close_status_code} - {close_msg}", "INFO")
-
+        # ✅ 重置连接状态
+        with self._portfolio_ws_lock:
+            self._portfolio_ws_connected = False
     async def fetch_bbo_prices(self, contract_id: str, quantity: Decimal = None) -> Tuple[Decimal, Decimal]:
         """从订单簿获取最佳买卖价格"""
         try:

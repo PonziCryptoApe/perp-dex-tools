@@ -243,9 +243,9 @@ class ExtendedAdapter(ExchangeAdapter):
             order_side = OrderSide.BUY if side.upper() == 'BUY' else OrderSide.SELL
             if retry_mode == 'aggressive':
                 if side.upper() == 'BUY':
-                    order_price = price * Decimal('0.9998')  # 确保买入
+                    order_price = price * Decimal('0.9995')  # 确保买入
                 else:
-                    order_price = price * Decimal('1.0002')  # 确保卖出
+                    order_price = price * Decimal('1.0005')  # 确保卖出
                 order_price = self.client.round_to_tick(order_price)
                 print(f"Adjusted order price for aggressive mode: {order_price}")
             else:
@@ -255,7 +255,6 @@ class ExtendedAdapter(ExchangeAdapter):
                 f"📤 {self.exchange_name} 下单: {side} {quantity} @ ${price} ({retry_mode})"
             )
             order_start_time = time.time()
-            logger.info(f"📤 {self.exchange_name} 下单: {side} {quantity} @ ${price} ({retry_mode})")
             # ✅ 调用 ExtendedClient 的下单方法
             order_result = await self.client.perpetual_trading_client.place_order(
                 market_name=self.contract_id,
@@ -330,21 +329,50 @@ class ExtendedAdapter(ExchangeAdapter):
                 return {
                     'success': False,
                     'order_id': order_id,
-                    'error': f'Order {status}'
+                    'error': f'Order {status}',
+                    'filled_price': Decimal('0'),
+                    'filled_quantity': Decimal('0'),
                 }
             
             if status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED']:
-                logger.info(f"✅ {self.exchange_name} 下单成功: {order_id} ({status})")
+                # ✅ 调用 get_order_info 获取实际成交价
+                order_info = await self.client.get_order_info(order_id)
+                
+                if order_info:
+                    filled_price = order_info.price  # ✅ 实际成交价
+                    filled_quantity = order_info.filled_size
+                    
+                    logger.info(
+                        f"✅ Extended 市价单成交:\n"
+                        f"   订单 ID: {order_id}\n"
+                        f"   成交价: ${filled_price}\n"
+                        f"   成交量: {filled_quantity}"
+                    )
+                else:
+                    # ✅ 后备：使用信号价格
+                    filled_price = price or Decimal('0')
+                    filled_quantity = quantity
+                    
+                    logger.warning(
+                        f"⚠️ 无法获取订单详情，使用信号价格:\n"
+                        f"   订单 ID: {order_id}\n"
+                        f"   成交价（信号）: ${filled_price}"
+                    )
+                
                 return {
                     'success': True,
                     'order_id': order_id,
+                    'filled_price': filled_price,
+                    'filled_quantity': filled_quantity,
                     'error': None
                 }
             
             return {
                 'success': False,
                 'order_id': order_id,
-                'error': f'Unknown status: {status}'
+                'error': f'Unknown status: {status}',
+                'filled_price': Decimal('0'),
+                'filled_quantity': Decimal('0'),
             }
         
         except Exception as e:
@@ -354,13 +382,15 @@ class ExtendedAdapter(ExchangeAdapter):
 
             if retry_mode == 'aggressive':
                 logger.info("🔄 激进模式：重试下单...")
-                await asyncio.sleep(0.5)
+                # await asyncio.sleep(0.5)
                 return await self.place_market_order(side, quantity, price, retry_mode='opportunistic')
 
             return {
                 'success': False,
                 'order_id': None,
-                'error': str(e)
+                'error': str(e),
+                'filled_price': Decimal('0'),
+                'filled_quantity': Decimal('0'),
             }
     
     def get_latest_orderbook(self) -> Optional[Dict]:

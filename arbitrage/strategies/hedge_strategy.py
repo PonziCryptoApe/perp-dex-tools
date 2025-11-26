@@ -8,6 +8,7 @@ from typing import Optional
 from .base_strategy import BaseStrategy
 from ..models.prices import PriceSnapshot
 from ..services.price_monitor import PriceMonitorService
+from ..services.position_manager import PositionManagerService
 from ..services.order_executor_parallel import OrderExecutor
 from ..models.position import Position
 
@@ -26,7 +27,8 @@ class HedgeStrategy(BaseStrategy):
         exchange_b,
         lark_bot=None,
         monitor_only: bool = False,
-        trade_logger=None
+        trade_logger=None,
+        max_signal_delay_ms: int = 500,
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -40,8 +42,11 @@ class HedgeStrategy(BaseStrategy):
         self.exchange_b = exchange_b
         self.lark_bot = lark_bot
         self.monitor_only = monitor_only
-        self.trade_logger = trade_logger
-        
+        self.max_signal_delay_ms = max_signal_delay_ms
+
+        # ✅ 使用 PositionManagerService 管理持仓
+        self.position_manager = PositionManagerService(trade_logger=trade_logger)
+
         # 价格监控服务
         self.monitor = PriceMonitorService(
             symbol=symbol,
@@ -57,7 +62,6 @@ class HedgeStrategy(BaseStrategy):
         )
         
         # 持仓管理
-        self.position: Optional[Position] = None
         self.open_signal_count = 0
         self.close_signal_count = 0
 
@@ -129,7 +133,7 @@ class HedgeStrategy(BaseStrategy):
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
             
             # ✅ 根据持仓状态决定检查哪种信号
-            if self.position is None: 
+            if not self.position_manager.has_position():
                 # 无持仓，检查开仓信号
                 await self._check_open_signal(prices, spread_pct, price_update_time)
             else:
@@ -148,7 +152,7 @@ class HedgeStrategy(BaseStrategy):
         ✅ 监控模式下，会创建虚拟持仓（不实际下单）
         """
         # ✅ 如果已有持仓，不再开仓
-        if self.position is not None:
+        if self.position_manager.has_position():
             return
         
         # ✅ 检查冷却期
@@ -168,43 +172,51 @@ class HedgeStrategy(BaseStrategy):
         if spread_pct >= Decimal(str(self.open_threshold_pct)):
             # 记录信号触发时间
             signal_trigger_time = time.time()
+            signal_delay_ms = (signal_trigger_time - price_update_time) * 1000
 
+            # ✅ 过滤延迟过大的信号
+            if signal_delay_ms > self.max_signal_delay_ms:
+                logger.warning(
+                    f"⚠️ 开仓信号延迟过大，已过滤:\n"
+                    f"   延迟: {signal_delay_ms:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                    f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
+                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
+                )
+                return  # ✅ 丢弃该信号
             self.open_signal_count += 1
-            
-            logger.info(
-                f"🔔 开仓信号 #{self.open_signal_count}:\n"
-                f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
-                f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
-                f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
-                f"   ⏱️ 价格更新 → 信号触发: {(signal_trigger_time - price_update_time) * 1000:.2f} ms"
-            )
-            
+
             # ✅ 检查是否为监控模式
             if self.monitor_only:
                 # logger.info("📊 监控模式：不执行开仓，创建虚拟持仓以监控平仓信号")
                 
                 # ✅ 创建虚拟持仓（用于模拟）
-                self.position = Position(
+                virtual_position = Position(
                     symbol=self.symbol,
                     quantity=self.quantity,
                     exchange_a_name=self.exchange_a.exchange_name,
                     exchange_b_name=self.exchange_b.exchange_name,
-                    exchange_a_entry_price=prices.exchange_a_bid,  # ✅ 改为 entry_price
-                    exchange_b_entry_price=prices.exchange_b_ask,  # ✅ 改为 entry_price
+                    exchange_a_signal_entry_price=prices.exchange_a_bid,
+                    exchange_b_signal_entry_price=prices.exchange_b_ask,
+                    exchange_a_entry_price=prices.exchange_a_bid,
+                    exchange_b_entry_price=prices.exchange_b_ask,
                     exchange_a_order_id='MONITOR_A',
                     exchange_b_order_id='MONITOR_B',
-                    spread_pct=spread_pct
+                    spread_pct=spread_pct,
+                    signal_entry_time=signal_trigger_time
                 )
+
+                self.position_manager.set_position(virtual_position)
                 self._last_open_time = time.time()
                 await asyncio.sleep(0.06)  # 模拟异步行为
                 
                 # 发送飞书通知（可选）
                 if self.lark_bot:
-                    await self._send_open_notification(self.position, prices)
-                
+                    await self._send_open_notification(virtual_position, prices)
+
                 return
             async with self._executing_lock:
-                if self.position is not None:
+                if self.position_manager.has_position():
                     logger.warning("⏳ 开仓操作期间已有持仓，跳过本次开仓")
                     return
                 self._is_executing = True
@@ -220,22 +232,9 @@ class HedgeStrategy(BaseStrategy):
                     )
                     
                     if success:
-                        self.position = position
+                        self.position_manager.set_position(position)
                         self._last_open_time = time.time()
                         logger.info(f"✅ 开仓成功: {position}，等待平仓...")
-                        if self.trade_logger:
-                            self.trade_logger.log_open_position(
-                                exchange_a_name=self.exchange_a.exchange_name,
-                                exchange_a_side='sell',
-                                exchange_a_price=str(position.exchange_a_entry_price),
-                                exchange_a_order_id=position.exchange_a_order_id,
-                                exchange_b_name=self.exchange_b.exchange_name,
-                                exchange_b_side='buy',
-                                exchange_b_price=str(position.exchange_b_entry_price),
-                                exchange_b_order_id=position.exchange_b_order_id,
-                                quantity=str(self.quantity),
-                                spread_pct=str(spread_pct)
-                            )
                         # 发送飞书通知
                         if self.lark_bot:
                             await self._send_open_notification(position, prices)
@@ -256,8 +255,9 @@ class HedgeStrategy(BaseStrategy):
         
         ✅ 监控模式下，会清除虚拟持仓（不实际下单）
         """
-        
-        if self.position is None:
+        position = self.position_manager.get_position()
+
+        if position is None:
             return
         
         # ✅ 如果正在执行平仓，跳过
@@ -271,10 +271,32 @@ class HedgeStrategy(BaseStrategy):
         if spread_pct >= Decimal(str(self.close_threshold_pct)):
             # 记录信号触发时间
             signal_trigger_time = time.time()
+
+            # ✅ 计算延迟（价格更新 → 信号触发）
+            signal_delay_ms = (signal_trigger_time - price_update_time) * 1000
+
+            # ✅ 过滤延迟过大的信号
+            if signal_delay_ms > self.max_signal_delay_ms:
+                # 计算当前盈亏（仅用于日志）
+                pnl_pct = self.position.calculate_pnl_pct(
+                    exchange_a_price=prices.exchange_a_ask,
+                    exchange_b_price=prices.exchange_b_bid
+                )
+                
+                logger.warning(
+                    f"⚠️ 平仓信号延迟过大，已过滤:\n"
+                    f"   延迟: {signal_delay_ms:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                    f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
+                    f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)\n"
+                    f"   当前盈亏: {pnl_pct:.4f}%\n"
+                    f"   持仓时长: {position.get_holding_duration()}"
+                )
+                return  # ✅ 丢弃该信号
             self.close_signal_count += 1
 
             # 计算当前盈亏
-            pnl_pct = self.position.calculate_pnl_pct(
+            pnl_pct = position.calculate_pnl_pct(
                 exchange_a_price=prices.exchange_a_ask,
                 exchange_b_price=prices.exchange_b_bid
             )
@@ -284,26 +306,27 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
                 f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)\n"
                 f"   盈亏: {pnl_pct:.4f}%\n"
-                f"   持仓时长: {self.position.get_holding_duration()}\n"
+                f"   持仓时长: {position.get_holding_duration()}\n"
                 f"   ⏱️ 价格更新 → 信号触发: {(signal_trigger_time - price_update_time) * 1000:.2f} ms"
             )
             
             # ✅ 检查是否为监控模式
             if self.monitor_only:
-                position_snapshot = self.position
-                # ✅ 清除虚拟持仓
-                self.position = None
+                self.position_manager.close_position(
+                    exchange_a_exit_price=prices.exchange_a_ask,
+                    exchange_b_exit_price=prices.exchange_b_bid
+                )
 
                 self._last_close_time = time.time()
                 # 发送飞书通知（可选）
                 if self.lark_bot:
-                    await self._send_close_notification(position_snapshot, pnl_pct, prices)
+                    await self._send_close_notification(position, pnl_pct, prices)
 
                 # logger.info("✅ 虚拟持仓已清除，切换到开仓监控模式")
                 return
             
             async with self._executing_lock:
-                if self.position is None:
+                if not self.position_manager.has_position():
                     logger.warning(" 获取锁后发现持仓已清空，取消平仓")
                     return
                 self._is_executing = True
@@ -311,7 +334,7 @@ class HedgeStrategy(BaseStrategy):
                 try:
                     # 实际交易模式：执行平仓
                     success = await self.executor.execute_close(
-                        position=self.position,
+                        position=position,
                         exchange_a_price=prices.exchange_a_ask,
                         exchange_b_price=prices.exchange_b_bid,
                         exchange_a_quote_id=prices.exchange_a_quote_id,
@@ -322,21 +345,13 @@ class HedgeStrategy(BaseStrategy):
                     if success:
                         logger.info(f"✅ 平仓成功，切换到开仓监控模式")
                         # ✅ 记录实际平仓到 CSV
-                        if self.trade_logger:
-                            self.trade_logger.log_close_position(
-                                exchange_a_name=self.exchange_a.exchange_name,
-                                exchange_a_side='buy',
-                                exchange_a_price=str(prices.exchange_a_ask),
-                                exchange_b_name=self.exchange_b.exchange_name,
-                                exchange_b_side='sell',
-                                exchange_b_price=str(prices.exchange_b_bid),
-                                quantity=str(self.quantity),
-                                spread_pct=str(spread_pct),
-                                pnl_pct=str(pnl_pct)
-                            )
+                        self.position_manager.close_position(
+                            exchange_a_exit_price=prices.exchange_a_ask,
+                            exchange_b_exit_price=prices.exchange_b_bid
+                        )
                         # 发送飞书通知
                         if self.lark_bot:
-                            await self._send_close_notification(self.position, pnl_pct, prices)
+                            await self._send_close_notification(position, pnl_pct, prices)
                         
                         # 清除持仓
                         self.position = None
@@ -370,7 +385,7 @@ class HedgeStrategy(BaseStrategy):
                 f"{self.exchange_b.exchange_name} 开多:\n"
                 f"  价格: ${position.exchange_b_entry_price}\n"
                 f"  订单ID: {position.exchange_b_order_id}\n\n"
-                f"开仓时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(position.open_time))}"
+                f"开仓时间: {position.entry_time.strftime('%Y-%m-%d %H:%M:%S')}"  # ✅ 修复
             )
             await self.lark_bot.send_text(message)
         except Exception as e:

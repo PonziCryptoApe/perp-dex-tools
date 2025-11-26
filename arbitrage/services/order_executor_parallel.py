@@ -1,6 +1,7 @@
-"""订单执行服务"""
+"""订单执行服务（并行 + 重试）"""
 
 import asyncio
+from datetime import datetime
 import logging
 from decimal import Decimal
 import time
@@ -17,27 +18,167 @@ class OrderExecutor:
         self,
         exchange_a: ExchangeAdapter,
         exchange_b: ExchangeAdapter,
-        quantity: Decimal
+        quantity: Decimal,
+        max_retries: int = 3,
+        retry_delay: float = 0.3
     ):
         """
         初始化订单执行器
         
-        Args:
+        Args:w
             exchange_a: 交易所 A（开空）
             exchange_b: 交易所 B（开多）
             quantity: 交易数量
+            max_retries: 最大重试次数（默认 3）
+            retry_delay: 重试延迟（秒，默认 0.3 秒）
         """
         self.exchange_a = exchange_a
         self.exchange_b = exchange_b
         self.quantity = quantity
-        
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+
         logger.info(
             f"📦 订单执行器已初始化:\n"
             f"   Exchange A: {exchange_a.exchange_name}\n"
             f"   Exchange B: {exchange_b.exchange_name}\n"
-            f"   Quantity: {quantity}"
+            f"   Quantity: {quantity}\n"
+            f"   Max Retries: {max_retries}\n"
+            f"   Retry Delay: {retry_delay}s"
         )
     
+    async def _retry_place_order(
+        self,
+        exchange: ExchangeAdapter,
+        order_type: str, # 'open' or 'close'
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        retry_mode: str = 'opportunistic',
+        quote_id: Optional[str] = None,
+        max_retries: Optional[int] = None
+    ) -> dict:
+        """
+        重试下单逻辑
+        
+        Args:
+            exchange: 交易所适配器
+            order_type: 订单类型（'open' 或 'close'）
+            side: 订单方向（'buy' 或 'sell'）
+            quantity: 订单数量
+            price: 订单价格
+            retry_mode: 重试模式
+            quote_id: 报价 ID（可选）
+            max_retries: 最大重试次数（可选）   
+        Returns:
+            {''success': bool, 'order_id': Optional[str], 'error': Optional[str]}
+        """
+        if max_retries is None:
+            max_retries = self.max_retries
+        # ✅ 保存初始价格
+        initial_price = price
+        current_quote_id = quote_id
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    logger.info(
+                        f"🔄 重试下单: {exchange.exchange_name} | "
+                        f"类型: {order_type} | 方向: {side} | "
+                        f"尝试次数: {attempt}/{max_retries}"
+                    )
+                    await asyncio.sleep(self.retry_delay)
+                    # ✅ 从第 2 次重试开始，获取最新价格和 quote_id
+                    try:
+                        orderbook = exchange.get_latest_orderbook()
+                        
+                        if orderbook:
+                            # ✅ 更新 quote_id（如果有）
+                            if orderbook.get('quote_id'):
+                                current_quote_id = orderbook['quote_id']
+                                logger.info(f"💡 获取最新 quote_id: {current_quote_id[:8]}...")
+                            
+                            # ✅ 根据订单方向获取最优价格
+                            if side.lower() == 'buy':
+                                # 买入：使用卖一价（asks）
+                                if orderbook.get('asks') and len(orderbook['asks']) > 0:
+                                    new_price = Decimal(str(orderbook['asks'][0][0]))
+                                    logger.info(
+                                        f"💡 获取最新卖一价: ${initial_price} → ${new_price} "
+                                        f"(变化: {((new_price - initial_price) / initial_price * 100):+.4f}%)"
+                                    )
+                                    price = new_price
+                            else:
+                                # 卖出：使用买一价（bids）
+                                if orderbook.get('bids') and len(orderbook['bids']) > 0:
+                                    new_price = Decimal(str(orderbook['bids'][0][0]))
+                                    logger.info(
+                                        f"💡 获取最新买一价: ${initial_price} → ${new_price} "
+                                        f"(变化: {((new_price - initial_price) / initial_price * 100):+.4f}%)"
+                                    )
+                                    price = new_price
+                        else:
+                            logger.warning(f"⚠️ 无法获取最新订单簿，使用初始价格 ${initial_price}")
+                    
+                    except Exception as e:
+                        logger.warning(f"⚠️ 获取最新价格失败: {e}，使用初始价格 ${initial_price}")
+                # ✅ 从第 3 次重试开始，强制使用 aggressive 模式
+                if attempt >= 3:
+                    current_retry_mode = 'aggressive'
+                    logger.info(f"💡 第 {attempt} 次重试，切换为 aggressive 模式")
+                else:
+                    current_retry_mode = retry_mode
+                if order_type == 'open':
+                    result = await exchange.place_open_order(
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        retry_mode=current_retry_mode,
+                        quote_id=current_quote_id
+                    )
+                else:  # 'close'
+                    result = await exchange.place_close_order(
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        retry_mode=current_retry_mode,
+                        quote_id=current_quote_id
+                    )
+                if result.get('success'):
+                    if attempt > 1:
+                        logger.info(
+                            f"✅ 下单成功: {exchange.exchange_name} | "
+                            f"类型: {order_type} | 方向: {side} | "
+                            f"尝试次数: {attempt}/{max_retries}"
+                        )
+                    return result
+                else:
+                    logger.warning(
+                        f"⚠️ 下单失败: {exchange.exchange_name} | "
+                        f"类型: {order_type} | 方向: {side} | "
+                        f"尝试次数: {attempt}/{max_retries} | "
+                        f"错误: {result.get('error')}"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"❌ 下单异常: {exchange.exchange_name} | "
+                    f"类型: {order_type} | 方向: {side} | "
+                    f"尝试次数: {attempt}/{max_retries} | "
+                    f"异常: {str(e)}"
+                )
+        logger.error(f"❌ 下单失败: {exchange.exchange_name} | "
+                      f"类型: {order_type} | 方向: {side} | "
+                      f"尝试次数: {attempt}/{max_retries} | "
+                      f"错误: {result.get('error')}"
+        )
+        return {
+            'success': False,
+            'order_id': None,
+            'filled_price': Decimal('0'),
+            'filled_quantity': Decimal('0'),
+            'error': 'Max retries exceeded'
+        }
+
     async def execute_open(
         self,
         exchange_a_price: Decimal,
@@ -54,6 +195,11 @@ class OrderExecutor:
             exchange_a_price: Exchange A 价格（开空价格）
             exchange_b_price: Exchange B 价格（开多价格）
             spread_pct: 价差百分比
+        逻辑：
+            1. 两所同时下单
+            2. 如果都失败 → 跳过
+            3. 如果都成功 → 创建持仓
+            4. 如果一方失败 → 重试失败方
         
         Returns:
             (success: bool, position: Optional[Position])
@@ -73,9 +219,9 @@ class OrderExecutor:
         )
         
         try:
-            # ✅ 记录 A 所下单开始时间
-            exchange_a_start_time = time.time()
-        
+            # ✅ 1. 并行下单（首次尝试）
+            logger.info("🚀 开始并行下单（首次尝试）...")
+
             task_a = asyncio.create_task(
                 self.exchange_a.place_open_order(
                     side='sell',
@@ -98,148 +244,219 @@ class OrderExecutor:
             # ✅ Exchange A 开空（卖出）
             order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
 
-            # ✅ 记录 A 所下单完成时间
-            exchange_a_end_time = time.time()
-            exchange_a_duration = (exchange_a_end_time - exchange_a_start_time) * 1000
+            success_a = order_a_result.get('success', False)
+            success_b = order_b_result.get('success', False)
 
-            logger.info(
-                f"⏱️ {self.exchange_a.exchange_name} 下单耗时: {exchange_a_duration:.2f} ms\n"
-                f"   开始时间: {exchange_a_start_time:.3f}\n"
-                f"   结束时间: {exchange_a_end_time:.3f}"
-            )
-            
-            if not order_a_result.get('success'):
-                logger.error(
-                    f"❌ {self.exchange_a.exchange_name} 开空失败: "
-                    f"{order_a_result.get('error')}"
+            # 情况 1️⃣: 两所都失败 → 跳过
+            if not success_a and not success_b:
+                logger.warning(
+                    f"⚠️ 开仓失败（两所都失败）:\n"
+                    f"   {self.exchange_a.exchange_name}: {order_a_result.get('error')}\n"
+                    f"   {self.exchange_b.exchange_name}: {order_b_result.get('error')}\n"
+                    f"   ⏱️ 耗时: {(time.time() - execution_start_time) * 1000:.2f} ms\n"
+                    f"   🔄 等待下次机会..."
                 )
                 return False, None
-            # ✅ 记录 B 所下单开始时间
-            exchange_b_start_time = time.time()
-            # ✅ 计算 A 所完成 → B 所开始的间隔
-            a_to_b_gap = (exchange_b_start_time - exchange_a_end_time) * 1000
-            logger.info(f"⏱️ A 所完成 → B 所开始间隔: {a_to_b_gap:.2f} ms")
-        
-            # ✅ Exchange B 开多（买入）
-            order_b_result = await self.exchange_b.place_open_order(
-                side='buy',
-                quantity=self.quantity,
-                price=exchange_b_price,
-                retry_mode='aggressive',
-                quote_id=exchange_b_quote_id
-            )
-            # ✅ 记录 B 所下单完成时间
-            exchange_b_end_time = time.time()
-            exchange_b_duration = (exchange_b_end_time - exchange_b_start_time) * 1000
-            
-            logger.info(
-                f"⏱️ {self.exchange_b.exchange_name} 下单耗时: {exchange_b_duration:.2f} ms\n"
-                f"   开始时间: {exchange_b_start_time:.3f}\n"
-                f"   结束时间: {exchange_b_end_time:.3f}"
-            )
-            if not order_b_result.get('success'):
-                logger.error(
-                    f"❌ {self.exchange_b.exchange_name} 开多失败: "
-                    f"{order_b_result.get('error')}"
+            # 情况 2️⃣: 两所都成功 → 创建持仓
+            if success_a and success_b:
+                logger.info(
+                    f"✅ 两所均下单成功:\n"
+                    f"   {self.exchange_a.exchange_name} 订单: {order_a_result.get('order_id')}\n"
+                    f"   {self.exchange_b.exchange_name} 订单: {order_b_result.get('order_id')}\n"
+                    f"   ⏱️ 耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
                 )
-                
-                # TODO: 回滚 Exchange A 的订单
+                actual_price_a = order_a_result.get('filled_price', exchange_a_price)
+                actual_price_b = order_b_result.get('filled_price', exchange_b_price)
 
+                execution_end_time = time.time()
+                execution_delay_ms = (execution_end_time - execution_start_time) * 1000
+
+                if signal_trigger_time:
+                    total_delay_ms = (execution_end_time - signal_trigger_time) * 1000
+                    logger.info(f"⏱️ 信号触发 → 完成开仓: {total_delay_ms:.2f} ms")
+                else:
+                    total_delay_ms = None
+                    logger.info(f"⏱️ 完成开仓总耗时: {execution_delay_ms:.2f} ms")
+
+                slippage_a = ((actual_price_a - exchange_a_price) / exchange_a_price * 100).quantize(Decimal('0.0001'))
+                slippage_b = ((actual_price_b - exchange_b_price) / exchange_b_price * 100).quantize(Decimal('0.0001'))
+                
+                logger.info(
+                    f"✅ 开仓成功:\n"
+                    f"   {self.exchange_a.exchange_name}:\n"
+                    f"      订单 ID: {order_a_result.get('order_id')}\n"
+                    f"      信号价格: ${exchange_a_price}\n"
+                    f"      成交价格: ${actual_price_a}\n"
+                    f"      滑点: {slippage_a:+.4f}%\n"
+                    f"   {self.exchange_b.exchange_name}:\n"
+                    f"      订单 ID: {order_b_result.get('order_id')}\n"
+                    f"      信号价格: ${exchange_b_price}\n"
+                    f"      成交价格: ${actual_price_b}\n"
+                    f"      滑点: {slippage_b:+.4f}%\n"
+                    f"   ⏱️ 执行耗时: {execution_delay_ms:.2f} ms"
+                )
+
+                if total_delay_ms:
+                    logger.info(f"   ⏱️ 信号 → 完成: {total_delay_ms:.2f} ms")
+                
+                position = Position(
+                    symbol=self.exchange_a.symbol,
+                    quantity=self.quantity,
+                    exchange_a_name=self.exchange_a.exchange_name,
+                    exchange_b_name=self.exchange_b.exchange_name,
+                    # ✅ 信号触发价格
+                    exchange_a_signal_entry_price=exchange_a_price,
+                    exchange_b_signal_entry_price=exchange_b_price,
+                    #✅ 实际成交价格
+                    exchange_a_entry_price=actual_price_a,
+                    exchange_b_entry_price=actual_price_b,
+
+                    exchange_a_order_id=order_a_result.get('order_id', 'unknown'),
+                    exchange_b_order_id=order_b_result.get('order_id', 'unknown'),
+                    spread_pct=spread_pct,
+                    signal_entry_time=signal_trigger_time,
+                    entry_execution_delay_ms=total_delay_ms,
+                )
+                return True, position
+            
+            # 情况 3️⃣: A失败，B成功 → 重试A
+            if not success_a and success_b:
                 logger.warning(
-                    f"⚠️ {self.exchange_a.exchange_name} 订单已成功，"
-                    f"但 {self.exchange_b.exchange_name} 订单失败，需要手动处理！"
+                    f"⚠️ {self.exchange_b.exchange_name} 成功，"
+                    f"⚠️ {self.exchange_a.exchange_name} 下单失败，"
+                    f"正在重试...\n"
+                    f"   错误: {order_a_result.get('error')}"
                 )
-                # ✅ 记录异常情况
-                logger.critical(
-                    f"\n"
-                    f"{'='*60}\n"
-                    f"🚨 严重错误：开仓失败（仓位不平衡）\n"
-                    f"{'='*60}\n"
-                    f"❌ {self.exchange_a.exchange_name} 订单已成交: {order_a_result.get('order_id')}\n"
-                    f"❌ {self.exchange_b.exchange_name} 订单失败: {order_b_result.get('error')}\n"
-                    f"\n"
-                    f"⚠️ 需要手动处理以下仓位:\n"
-                    f"   交易所: {self.exchange_a.exchange_name}\n"
-                    f"   方向: 空头\n"
-                    f"   数量: {self.quantity}\n"
-                    f"   价格: ${exchange_a_price}\n"
-                    f"   订单ID: {order_a_result.get('order_id')}\n"
-                    f"\n"
-                    f"{'='*60}\n"
-                    f"程序将立即退出...\n"
-                    f"{'='*60}\n"
+                # ✅ 重试 Exchange A 下单
+                retry_result_a = await self._retry_place_order(
+                    exchange=self.exchange_a,
+                    order_type='open',
+                    side='sell',
+                    quantity=self.quantity,
+                    price=exchange_a_price,
+                    retry_mode='aggressive',
+                    quote_id=exchange_a_quote_id
                 )
-                
-                # ✅ 抛出致命异常，触发程序退出
-                raise RuntimeError(
-                    f"开仓失败：{self.exchange_a.exchange_name} 已成交但 "
-                    f"{self.exchange_b.exchange_name} 失败，需要手动处理仓位！"
+                if retry_result_a.get('success'):
+                    # ✅ 获取实际成交价格
+                    actual_price_a = retry_result_a.get('filled_price') or exchange_a_price
+                    actual_price_b = order_b_result.get('filled_price') or exchange_b_price
+                    
+                    execution_end_time = time.time()
+                    total_delay_ms = (execution_end_time - signal_trigger_time) * 1000 if signal_trigger_time else None
+                    
+                    logger.info(
+                        f"✅ 开仓成功（A 所重试成功）:\n"
+                        f"   {self.exchange_a.exchange_name}: {retry_result_a.get('order_id')}\n"
+                        f"   {self.exchange_b.exchange_name}: {order_b_result.get('order_id')}\n"
+                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
+                    )
+
+                    position = Position(
+                        symbol=self.exchange_a.symbol,
+                        quantity=self.quantity,
+                        exchange_a_name=self.exchange_a.exchange_name,
+                        exchange_b_name=self.exchange_b.exchange_name,
+                        # ✅ 信号触发价格
+                        exchange_a_signal_entry_price=exchange_a_price,
+                        exchange_b_signal_entry_price=exchange_b_price,
+                        
+                        # ✅ 实际成交价格
+                        exchange_a_entry_price=actual_price_a,
+                        exchange_b_entry_price=actual_price_b,
+                        exchange_a_order_id=retry_result_a.get('order_id', 'unknown'),
+                        exchange_b_order_id=order_b_result.get('order_id', 'unknown'),
+                        spread_pct=spread_pct,
+                        # ✅ 时间信息
+                        signal_entry_time=signal_trigger_time,
+                        entry_execution_delay_ms=total_delay_ms
+                    )
+
+                    return True, position
+                else:
+                    # ✅ A 所重试失败 → 需要平掉 B 所的仓位
+                    logger.error(
+                        f"❌ {self.exchange_a.exchange_name} 重试失败，"
+                        f"需要平掉 {self.exchange_b.exchange_name} 的单边持仓"
+                    )
+                    
+                    await self._emergency_close_b(
+                        order_id=order_b_result.get('order_id'),
+                        quantity=self.quantity
+                    )
+                    
+                    return False, None
+            # 情况 4️⃣: A成功，B失败 → 重试 B
+            if success_a and not success_b:
+                logger.warning(
+                    f"⚠️ {self.exchange_a.exchange_name} 成功，"
+                    f"{self.exchange_b.exchange_name} 失败 → 重试 {self.exchange_b.exchange_name}..."
                 )
-                # return False, None
-            
-            # ✅ 创建持仓记录
-            position = Position(
-                symbol=self.exchange_a.symbol,
-                quantity=self.quantity,
-                exchange_a_name=self.exchange_a.exchange_name,
-                exchange_b_name=self.exchange_b.exchange_name,
-                exchange_a_entry_price=exchange_a_price,
-                exchange_b_entry_price=exchange_b_price,
-                exchange_a_order_id=order_a_result.get('order_id', 'unknown'),
-                exchange_b_order_id=order_b_result.get('order_id', 'unknown'),
-                spread_pct=spread_pct
-            )
-            
-            logger.info(
-                f"✅ 开仓成功:\n"
-                f"   {self.exchange_a.exchange_name} 订单: {position.exchange_a_order_id}\n"
-                f"   {self.exchange_b.exchange_name} 订单: {position.exchange_b_order_id}\n"
-                f"   价差: {spread_pct:.4f}%"
-            )
-            
-            # ✅ 记录总执行时间
-            total_execution_time = (exchange_b_end_time - execution_start_time) * 1000
-            
-            # ✅ 打印完整时间链
-            logger.info(
-                f"\n{'='*60}\n"
-                f"⏱️ 开仓时间链路分析\n"
-                f"{'='*60}\n"
-            )
-            
-            if signal_trigger_time:
-                signal_to_execution = (execution_start_time - signal_trigger_time) * 1000
-                signal_to_a_complete = (exchange_a_end_time - signal_trigger_time) * 1000
-                signal_to_b_start = (exchange_b_start_time - signal_trigger_time) * 1000
-                signal_to_b_complete = (exchange_b_end_time - signal_trigger_time) * 1000
-                
-                logger.info(
-                    f"1️⃣ 信号触发 → 开始执行:        {signal_to_execution:.2f} ms\n"
-                    f"2️⃣ 开始执行 → A 所下单完成:   {exchange_a_duration:.2f} ms\n"
-                    f"3️⃣ A 所完成 → B 所开始:       {a_to_b_gap:.2f} ms\n"
-                    f"4️⃣ B 所开始 → B 所下单完成:   {exchange_b_duration:.2f} ms\n"
-                    f"\n"
-                    f"📊 累计时间:\n"
-                    f"   信号 → A 所完成:           {signal_to_a_complete:.2f} ms\n"
-                    f"   信号 → B 所开始:           {signal_to_b_start:.2f} ms\n"
-                    f"   信号 → B 所完成:           {signal_to_b_complete:.2f} ms\n"
-                    f"\n"
-                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
-                    f"{'='*60}\n"
+
+                retry_result_b = await self._retry_place_order(
+                    exchange=self.exchange_b,
+                    order_type='open',
+                    side='buy',
+                    quantity=self.quantity,
+                    price=exchange_b_price,
+                    retry_mode='aggressive',
+                    quote_id=exchange_b_quote_id
                 )
-            else:
-                logger.info(
-                    f"1️⃣ A 所下单耗时:             {exchange_a_duration:.2f} ms\n"
-                    f"2️⃣ A 所完成 → B 所开始:      {a_to_b_gap:.2f} ms\n"
-                    f"3️⃣ B 所下单耗时:             {exchange_b_duration:.2f} ms\n"
-                    f"\n"
-                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
-                    f"{'='*60}\n"
-                )
-            return True, position
-        
+                if retry_result_b.get('success'):
+                    # ✅ 获取实际成交价格
+                    actual_price_a = order_a_result.get('filled_price') or exchange_a_price
+                    actual_price_b = retry_result_b.get('filled_price') or exchange_b_price
+                    
+                    execution_end_time = time.time()
+                    total_delay_ms = (execution_end_time - signal_trigger_time) * 1000 if signal_trigger_time else None
+                    
+                    logger.info(
+                        f"✅ 开仓成功（B 所重试成功）:\n"
+                        f"   {self.exchange_a.exchange_name}: {order_a_result.get('order_id')}\n"
+                        f"   {self.exchange_b.exchange_name}: {retry_result_b.get('order_id')}\n"
+                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
+                    )
+
+                    position = Position(
+                        symbol=self.exchange_a.symbol,
+                        quantity=self.quantity,
+                        exchange_a_name=self.exchange_a.exchange_name,
+                        exchange_b_name=self.exchange_b.exchange_name,
+                        # ✅ 信号触发价格
+                        exchange_a_signal_entry_price=exchange_a_price,
+                        exchange_b_signal_entry_price=exchange_b_price,
+                        
+                        # ✅ 实际成交价格
+                        exchange_a_entry_price=actual_price_a,
+                        exchange_b_entry_price=actual_price_b,
+                        
+                        exchange_a_order_id=order_a_result.get('order_id', 'unknown'),
+                        exchange_b_order_id=retry_result_b.get('order_id', 'unknown'),
+                        spread_pct=spread_pct,
+                        
+                        # ✅ 时间信息
+                        signal_entry_time=signal_trigger_time,
+                        entry_execution_delay_ms=total_delay_ms
+                    )
+
+                    return True, position
+                else:
+                    # ✅ B 所重试失败 → 需要平掉 A 所的仓位
+                    logger.error(
+                        f"❌ {self.exchange_b.exchange_name} 重试失败，"
+                        f"需要平掉 {self.exchange_a.exchange_name} 的单边持仓"
+                    )
+                    
+                    await self._emergency_close_a(
+                        order_id=order_a_result.get('order_id'),
+                        quantity=self.quantity
+                    )
+                    
+                    return False, None
         except Exception as e:
-            logger.error(f"❌ 开仓执行异常: {e}")
+            logger.critical(
+                f"🚨 开仓执行异常: {str(e)}"
+            )
             import traceback
             traceback.print_exc()
             return False, None
@@ -260,7 +477,11 @@ class OrderExecutor:
             position: 持仓信息
             exchange_a_price: Exchange A 平仓价格（买入价格）
             exchange_b_price: Exchange B 平仓价格（卖出价格）
-        
+        逻辑：
+            1. 两所同时下单
+            2. 如果都成功 → 完成
+            3. 如果一方失败 → 重试失败方（必须成功）
+            4. 如果都失败 → 两所都重试
         Returns:
             success: bool
         """
@@ -279,8 +500,8 @@ class OrderExecutor:
         )
         
         try:
-            # ✅ 记录 A 所下单开始时间
-            exchange_a_start_time = time.time()
+            # ✅ 1. 并行下单（首次尝试）
+            logger.info("🚀 开始并行平仓（首次尝试）...")
 
             task_a = asyncio.create_task(
                 self.exchange_a.place_close_order(
@@ -305,135 +526,214 @@ class OrderExecutor:
             # ✅ Exchange A 平空（买入）
             order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
 
-            # ✅ 记录 A 所下单完成时间
-            exchange_a_end_time = time.time()
-            exchange_a_duration = (exchange_a_end_time - exchange_a_start_time) * 1000
+            success_a = order_a_result.get('success', False)
+            success_b = order_b_result.get('success', False)
             
-            logger.info(f"⏱️ {self.exchange_a.exchange_name} 平仓耗时: {exchange_a_duration:.2f} ms")
-            
-            if not order_a_result.get('success'):
-                logger.error(
-                    f"❌ {self.exchange_a.exchange_name} 平空失败: "
-                    f"{order_a_result.get('error')}"
-                )
-                return False
-            
-            # ✅ 记录 B 所下单开始时间
-            exchange_b_start_time = time.time()
-
-            # ✅ 计算 A 所完成 → B 所开始的间隔
-            a_to_b_gap = (exchange_b_start_time - exchange_a_end_time) * 1000
-            logger.info(f"⏱️ A 所完成 → B 所开始间隔: {a_to_b_gap:.2f} ms")
-        
-            # ✅ Exchange B 平多（卖出）
-            order_b_result = await self.exchange_b.place_close_order(
-                side='sell',
-                quantity=self.quantity,
-                price=exchange_b_price,
-                retry_mode='aggressive',
-                quote_id=exchange_b_quote_id
-            )
-            
-            # ✅ 记录 B 所下单完成时间
-            exchange_b_end_time = time.time()
-            exchange_b_duration = (exchange_b_end_time - exchange_b_start_time) * 1000
-            
-            logger.info(f"⏱️ {self.exchange_b.exchange_name} 平仓耗时: {exchange_b_duration:.2f} ms")
-            
-            if not order_b_result.get('success'):
-                logger.error(
-                    f"❌ {self.exchange_b.exchange_name} 平多失败: "
-                    f"{order_b_result.get('error')}"
-                )
-                
-                # TODO: 回滚 Exchange A 的订单
+            # ✅ 2. 根据结果处理
+            # 情况 1️⃣: 两所都失败 → 跳过
+            if not success_a and not success_b:
                 logger.warning(
-                    f"⚠️ {self.exchange_a.exchange_name} 订单已成功，"
-                    f"但 {self.exchange_b.exchange_name} 订单失败，需要手动处理！"
+                    f"⚠️ 平仓失败（两所都失败）→ 跳过...\n"
+                    f"   {self.exchange_a.exchange_name}: {order_a_result.get('error')}\n"
+                    f"   {self.exchange_b.exchange_name}: {order_b_result.get('error')}"
                 )
-                logger.critical(
+
+                return False
+            # 情况 2️⃣: 两所都成功 → 完成
+            if success_a and success_b:
+                actual_price_a = order_a_result.get('filled_price')
+                actual_price_b = order_b_result.get('filled_price')
+
+                # 记录执行完成时间
+                execution_end_time = time.time()
+
+                # 更新Position
+                position.exchange_a_signal_exit_price = exchange_a_price
+                position.exchange_b_signal_exit_price = exchange_b_price
+
+                position.exchange_a_exit_price = actual_price_a
+                position.exchange_b_exit_price = actual_price_b
+
+                position.exchange_a_exit_order_id = order_a_result.get('order_id')
+                position.exchange_b_exit_order_id = order_b_result.get('order_id')
+
+                position.exit_time = datetime.now()
+                position.signal_exit_time = signal_trigger_time
+
+                execution_delay_ms = (execution_end_time - execution_start_time) * 1000
+
+                if signal_trigger_time:
+                    total_delay_ms = (execution_end_time - signal_trigger_time) * 1000
+                    logger.info(f"⏱️ 信号触发 → 完成平仓: {total_delay_ms:.2f} ms")
+                    position.exit_execution_delay_ms = total_delay_ms
+                else:
+                    total_delay_ms = None
+
+                quality_report = position.get_execution_quality_report()
+
+                logger.info(
+                    f"✅ 平仓成功:\n"
+                    f"   {self.exchange_a.exchange_name}:\n"
+                    f"      订单 ID: {order_a_result.get('order_id')}\n"
+                    f"      信号价格: ${exchange_a_price}\n"
+                    f"      成交价格: ${actual_price_a}\n"
+                    f"      滑点: {quality_report['exit_slippage']['exchange_a']:+.4f}%\n"
+                    f"   {self.exchange_b.exchange_name}:\n"
+                    f"      订单 ID: {order_b_result.get('order_id')}\n"
+                    f"      信号价格: ${exchange_b_price}\n"
+                    f"      成交价格: ${actual_price_b}\n"
+                    f"      滑点: {quality_report['exit_slippage']['exchange_b']:+.4f}%\n"
                     f"\n"
-                    f"{'='*60}\n"
-                    f"🚨 严重错误：平仓失败（仓位不平衡）\n"
-                    f"{'='*60}\n"
-                    f"✅ {self.exchange_a.exchange_name} 订单已成交: {order_a_result.get('order_id')}\n"
-                    f"❌ {self.exchange_b.exchange_name} 订单失败: {order_b_result.get('error')}\n"
-                    f"\n"
-                    f"⚠️ 需要手动处理以下仓位:\n"
-                    f"   原持仓: {self.exchange_b.exchange_name} 多头 {self.quantity}\n"
-                    f"   现持仓: {self.exchange_b.exchange_name} 多头 {self.quantity}\n"
-                    f"   {self.exchange_a.exchange_name} 已平仓\n"
-                    f"\n"
-                    f"{'='*60}\n"
-                    f"程序将立即退出...\n"
-                    f"{'='*60}\n"
+                    f"   📊 执行质量分析:\n"
+                    f"      理论盈亏: {quality_report['theoretical_pnl_pct']:+.4f}%\n"
+                    f"      实际盈亏: {quality_report['actual_pnl_pct']:+.4f}%\n"
+                    f"      盈亏损失: {quality_report['pnl_loss_pct']:+.4f}% (由于滑点)\n"
+                    f"      开仓滑点: {quality_report['entry_slippage']['total']:+.4f}%\n"
+                    f"      平仓滑点: {quality_report['exit_slippage']['total']:+.4f}%\n"
+                    f"      开仓延迟: {quality_report['entry_delay_ms']:.2f} ms\n"
+                    f"      平仓延迟: {quality_report['exit_delay_ms']:.2f} ms\n"
+                    f"   持仓时长: {position.get_holding_duration()}"
+                )
+
+                return True
+            # 情况 3️⃣: A失败，B成功 → 重试A
+            if not success_a and success_b:
+                logger.warning(
+                    f"⚠️ {self.exchange_b.exchange_name} 成功，"
+                    f"⚠️ {self.exchange_a.exchange_name} 下单失败，"
+                    f"正在重试...\n"
+                    f"   错误: {order_a_result.get('error')}"
                 )
                 
-                # ✅ 抛出致命异常
-                raise RuntimeError(
-                    f"平仓失败：{self.exchange_a.exchange_name} 已平仓但 "
-                    f"{self.exchange_b.exchange_name} 失败，需要手动处理仓位！"
+                # ✅ 重试 Exchange A 下单
+                retry_result_a = await self._retry_place_order(
+                    exchange=self.exchange_a,
+                    order_type='close',
+                    side='buy',
+                    quantity=self.quantity,
+                    price=exchange_a_price,
+                    retry_mode='opportunistic',
+                    quote_id=exchange_a_quote_id,
+                    max_retries=self.max_retries + 2  # 增加重试次数
                 )
-            logger.info(
-                f"✅ {self.exchange_b.exchange_name} 平多成功: "
-                f"{order_b_result.get('order_id')}"
-            )
-            # ✅ 记录总执行时间
-            total_execution_time = (exchange_b_end_time - execution_start_time) * 1000
-            
-            # ✅ 打印完整时间链
-            logger.info(
-                f"\n{'='*60}\n"
-                f"⏱️ 平仓时间链路分析\n"
-                f"{'='*60}\n"
-            )
-            
-            if signal_trigger_time:
-                signal_to_execution = (execution_start_time - signal_trigger_time) * 1000
-                signal_to_a_complete = (exchange_a_end_time - signal_trigger_time) * 1000
-                signal_to_b_complete = (exchange_b_end_time - signal_trigger_time) * 1000
+
+                if retry_result_a.get('success'):
+                    logger.info(
+                        f"✅ 平仓成功（A 所重试成功）:\n"
+                        f"   {self.exchange_a.exchange_name}: {retry_result_a.get('order_id')}\n"
+                        f"   {self.exchange_b.exchange_name}: {order_b_result.get('order_id')}\n"
+                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
+                    )
+                    return True
+                else:
+                    logger.error(
+                        f"❌ {self.exchange_a.exchange_name} 重试失败，"
+                        f"需要手动处理仓位！"
+                    )
+                    return False
                 
-                logger.info(
-                    f"1️⃣ 信号触发 → 开始执行:        {signal_to_execution:.2f} ms\n"
-                    f"2️⃣ 开始执行 → A 所平仓完成:   {exchange_a_duration:.2f} ms\n"
-                    f"3️⃣ A 所完成 → B 所开始:       {a_to_b_gap:.2f} ms\n"
-                    f"4️⃣ B 所开始 → B 所平仓完成:   {exchange_b_duration:.2f} ms\n"
-                    f"\n"
-                    f"📊 累计时间:\n"
-                    f"   信号 → A 所完成:           {signal_to_a_complete:.2f} ms\n"
-                    f"   信号 → B 所完成:           {signal_to_b_complete:.2f} ms\n"
-                    f"\n"
-                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
-                    f"{'='*60}\n"
+            # 情况 4️⃣: A成功，B失败 → 重试 B
+            if success_a and not success_b:
+                logger.warning(
+                    f"⚠️ {self.exchange_a.exchange_name} 成功，"
+                    f"{self.exchange_b.exchange_name} 失败 → 重试 {self.exchange_b.exchange_name}..."
                 )
-            else:
-                logger.info(
-                    f"1️⃣ A 所平仓耗时:             {exchange_a_duration:.2f} ms\n"
-                    f"2️⃣ A 所完成 → B 所开始:      {a_to_b_gap:.2f} ms\n"
-                    f"3️⃣ B 所平仓耗时:             {exchange_b_duration:.2f} ms\n"
-                    f"\n"
-                    f"🎯 总执行时间:                {total_execution_time:.2f} ms\n"
-                    f"{'='*60}\n"
+                
+                retry_result_b = await self._retry_place_order(
+                    exchange=self.exchange_b,
+                    order_type='close',
+                    side='sell',
+                    quantity=self.quantity,
+                    price=exchange_b_price,
+                    retry_mode='aggressive',
+                    quote_id=exchange_b_quote_id,
+                    max_retries=5
                 )
-        
-            # ✅ 计算盈亏
-            pnl_pct = position.calculate_pnl_pct(
-                exchange_a_price=exchange_a_price,
-                exchange_b_price=exchange_b_price
-            )
-            
-            logger.info(
-                f"✅ 平仓成功:\n"
-                f"   {self.exchange_a.exchange_name} 订单: {order_a_result.get('order_id')}\n"
-                f"   {self.exchange_b.exchange_name} 订单: {order_b_result.get('order_id')}\n"
-                f"   盈亏: {pnl_pct:.4f}%\n"
-                f"   持仓时长: {position.get_holding_duration()}"
-            )
-            
-            return True
-        
+                
+                if retry_result_b.get('success'):
+                    logger.info(
+                        f"✅ 平仓成功（B 所重试成功）:\n"
+                        f"   {self.exchange_a.exchange_name}: {order_a_result.get('order_id')}\n"
+                        f"   {self.exchange_b.exchange_name}: {retry_result_b.get('order_id')}"
+                    )
+                    return True
+                else:
+                    logger.critical(
+                        f"🚨 {self.exchange_b.exchange_name} 平仓失败（重试后仍失败），"
+                        f"需要手动处理！"
+                    )
+                    return False
         except Exception as e:
-            logger.error(f"❌ 平仓执行异常: {e}")
+            logger.critical(
+                f"🚨 平仓执行异常: {str(e)}"
+            )
             import traceback
             traceback.print_exc()
             return False
+        
+    # ✅ 紧急平仓方法
+    async def _emergency_close_a(self, order_id: str, quantity: Decimal):
+        """紧急平仓 A 所（单边持仓风险处理）"""
+        try:
+            logger.warning(f"🚨 紧急平仓 {self.exchange_a.exchange_name}: {order_id}")
+            
+            # ✅ 获取最新价格
+            orderbook = self.exchange_a.get_latest_orderbook()
+            if not orderbook or not orderbook.get('asks'):
+                logger.error("❌ 无法获取价格，紧急平仓失败")
+                return
+            
+            close_price = Decimal(str(orderbook['asks'][0][0]))
+            
+            # ✅ 下平仓单（买入平空）
+            result = await self._retry_place_order(
+                exchange=self.exchange_a,
+                order_type='close',
+                side='buy',
+                quantity=quantity,
+                price=close_price,
+                retry_mode='aggressive',
+                quote_id=orderbook.get('quote_id'),
+                max_retries=5
+            )
+            
+            if result.get('success'):
+                logger.info(f"✅ 紧急平仓成功: {result.get('order_id')}")
+            else:
+                logger.critical(f"🚨 紧急平仓失败，需要手动处理！")
+        
+        except Exception as e:
+            logger.error(f"❌ 紧急平仓异常: {e}")
+    
+    async def _emergency_close_b(self, order_id: str, quantity: Decimal):
+        """紧急平仓 B 所（单边持仓风险处理）"""
+        try:
+            logger.warning(f"🚨 紧急平仓 {self.exchange_b.exchange_name}: {order_id}")
+            
+            # ✅ 获取最新价格
+            orderbook = self.exchange_b.get_latest_orderbook()
+            if not orderbook or not orderbook.get('bids'):
+                logger.error("❌ 无法获取价格，紧急平仓失败")
+                return
+            quote_id = orderbook.get('quote_id')
+            close_price = Decimal(str(orderbook['bids'][0][0]))
+            
+            # ✅ 下平仓单（卖出平多）
+            result = await self._retry_place_order(
+                exchange=self.exchange_b,
+                order_type='close',
+                side='sell',
+                quantity=quantity,
+                price=close_price,
+                retry_mode='aggressive',
+                quote_id=quote_id,
+                max_retries=5
+            )
+            
+            if result.get('success'):
+                logger.info(f"✅ 紧急平仓成功: {result.get('order_id')}")
+            else:
+                logger.critical(f"🚨 紧急平仓失败，需要手动处理！")
+        
+        except Exception as e:
+            logger.error(f"❌ 紧急平仓异常: {e}")
