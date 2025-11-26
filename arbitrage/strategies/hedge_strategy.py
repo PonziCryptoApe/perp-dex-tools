@@ -316,6 +316,9 @@ class HedgeStrategy(BaseStrategy):
                 exchange_a_price=prices.exchange_a_ask,
                 exchange_b_price=prices.exchange_b_bid
             )
+            # 计算最大延迟
+            max_delay_ms = max(signal_delay_ms_a, signal_delay_ms_b)
+
             logger.info(
                 f"🔔 平仓信号 #{self.close_signal_count}:\n"
                 f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
@@ -323,7 +326,10 @@ class HedgeStrategy(BaseStrategy):
                 f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)\n"
                 f"   盈亏: {pnl_pct:.4f}%\n"
                 f"   持仓时长: {position.get_holding_duration()}\n"
-                f"   ⏱️ 价格更新 → 信号触发: {(signal_trigger_time - price_update_time) * 1000:.2f} ms"
+                f"   ⏱️ 延迟分析:\n"
+                f"      Exchange A: {signal_delay_ms_a:.2f} ms\n"
+                f"      Exchange B: {signal_delay_ms_b:.2f} ms\n"
+                f"      最大延迟: {max_delay_ms:.2f} ms"
             )
             
             # ✅ 检查是否为监控模式
