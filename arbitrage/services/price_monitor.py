@@ -144,6 +144,8 @@ class PriceMonitorService:
             asks_a = self.orderbook_a.get('asks', [])
             bids_b = self.orderbook_b.get('bids', [])
             asks_b = self.orderbook_b.get('asks', [])
+            timestamp_a = self.orderbook_a.get('timestamp', time.time())
+            timestamp_b = self.orderbook_b.get('timestamp', time.time())
             
             if not (bids_a and asks_a and bids_b and asks_b):
                 return None
@@ -169,7 +171,9 @@ class PriceMonitorService:
                 exchange_a_name=self.exchange_a.exchange_name,
                 exchange_b_name=self.exchange_b.exchange_name,
                 exchange_a_quote_id=getattr(self.exchange_a, '_quote_id', None),
-                exchange_b_quote_id=getattr(self.exchange_b, '_quote_id', None)
+                exchange_b_quote_id=getattr(self.exchange_b, '_quote_id', None),
+                exchange_a_timestamp=timestamp_a,
+                exchange_b_timestamp=timestamp_b
             )
             
             # ✅ 添加深度信息（扩展属性）

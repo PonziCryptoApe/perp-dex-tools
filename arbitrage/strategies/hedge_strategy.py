@@ -126,7 +126,7 @@ class HedgeStrategy(BaseStrategy):
         
         try:
             # ✅ 记录价格更新的时间
-            price_update_time = time.time()
+            price_update_time = min(prices.exchange_a_timestamp, prices.exchange_b_timestamp)
 
             # 计算价差
             spread_pct = prices.calculate_spread_pct()

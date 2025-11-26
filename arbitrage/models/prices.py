@@ -19,6 +19,8 @@ class PriceSnapshot:
     exchange_b_ask: Decimal  # Exchange B 卖一价
     exchange_a_name: str     # Exchange A 名称
     exchange_b_name: str     # Exchange B 名称
+    exchange_a_timestamp: float = None # Exchange A 时间戳（extended 拿到订单簿的时间戳）
+    exchange_b_timestamp: float = None # Exchange B 时间戳(VAR 包含拉取时间)
     timestamp: float = None
     
     # ✅ 深度信息（可选）

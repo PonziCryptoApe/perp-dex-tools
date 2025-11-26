@@ -228,7 +228,7 @@ class VariationalAdapter(ExchangeAdapter):
             orderbook = {
                 'bids': [[float(bid_price), float(self.query_quantity)]],  # [price, size]
                 'asks': [[float(ask_price), float(self.query_quantity)]],
-                'timestamp': asyncio.get_event_loop().time() * 1000,  # 毫秒时间戳
+                'timestamp': fetch_start,  # 秒时间戳
                 'quote_id': quote_data.get('quote_id', None),
                 'fetch_duration': fetch_duration_ms
             }

@@ -104,7 +104,7 @@ class ExtendedAdapter(ExchangeAdapter):
                         self._orderbook = {
                             'bids': [[bid, bid_size]],
                             'asks': [[ask, ask_size]],
-                            'timestamp': asyncio.get_event_loop().time()
+                            'timestamp': time.time()
                         }
                         
                         # 触发回调
