@@ -419,7 +419,7 @@ class VariationalAdapter(ExchangeAdapter):
                     )
 
                     if attempt < max_attempts - 1:
-                        # await asyncio.sleep(1)  # 等待 1 秒后重试
+                        await asyncio.sleep(0.1)  # 等待 0.1 秒后重试
                         continue
 
                     logger.error(f"❌ 市价单最终失败: {error_msg}(已重试 {max_attempts} 次)")

@@ -28,7 +28,7 @@ class HedgeStrategy(BaseStrategy):
         lark_bot=None,
         monitor_only: bool = False,
         trade_logger=None,
-        max_signal_delay_ms: int = 500,
+        max_signal_delay_ms: int = 100,
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
