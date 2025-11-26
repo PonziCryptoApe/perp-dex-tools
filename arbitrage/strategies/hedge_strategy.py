@@ -43,6 +43,8 @@ class HedgeStrategy(BaseStrategy):
         self.lark_bot = lark_bot
         self.monitor_only = monitor_only
         self.max_signal_delay_ms = max_signal_delay_ms
+        self.max_signal_delay_ms_a = 200
+        self.max_signal_delay_ms_b = 60
 
         # ✅ 使用 PositionManagerService 管理持仓
         self.position_manager = PositionManagerService(trade_logger=trade_logger)
@@ -187,6 +189,15 @@ class HedgeStrategy(BaseStrategy):
                     f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
                 )
                 return  # ✅ 丢弃该信号
+            else:
+                logger.info(
+                    f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                    f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                    f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
+                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
+                )
+
             self.open_signal_count += 1
 
             # ✅ 检查是否为监控模式

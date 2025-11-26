@@ -21,8 +21,7 @@ class ExtendedAdapter(ExchangeAdapter):
         self._order_status_events: Dict[str, asyncio.Event] = {}
         self._order_status_data: Dict[str, str] = {}  # ← 添加这一行！
         self._order_status_futures: Dict[str, asyncio.Future] = {}
-
-
+        self._extended_orderbook_handler = None
     
     async def connect(self):
         """连接 Extended（使用 ExtendedClient 自带的 WebSocket）"""
@@ -52,36 +51,126 @@ class ExtendedAdapter(ExchangeAdapter):
                 self.client.config.stop_loss_percentage = None
 
             logger.info(f"✅ {self.exchange_name} 已连接: {self.contract_id}")
+            # ✅ 注册订单更新回调
             self.client.setup_order_update_handler(self._on_order_update)
+            
+            # ✅ 新增：注册订单簿更新回调（如果支持）
+            if hasattr(self.client, 'setup_orderbook_handler'):
+                logger.info(f"📡 {self.exchange_name} 使用 WebSocket 订单簿回调")
+                self.client.setup_orderbook_handler(self._on_extended_orderbook_update)
+            else:
+                logger.info(f"📡 {self.exchange_name} 将使用轮询订单簿（WebSocket 回调不支持）")
+                self._orderbook_update_task = asyncio.create_task(
+                    self._poll_orderbook()
+                )
 
-        
         except Exception as e:
             logger.error(f"❌ {self.exchange_name} 连接失败: {e}")
             raise
     
     async def disconnect(self):
         """断开连接"""
+        # ✅ 1. 取消订单簿轮询任务（如果在运行）
         if self._orderbook_update_task:
+            logger.info(f"⏹️ 停止 {self.exchange_name} 订单簿轮询...")
             self._orderbook_update_task.cancel()
             try:
                 await self._orderbook_update_task
             except asyncio.CancelledError:
-                pass
+                logger.debug(f"✅ {self.exchange_name} 订单簿轮询已取消")
         
-        # ✅ 不主动断开 ExtendedClient 的连接（由调用方管理）
-        logger.info(f"⏹️ {self.exchange_name} 已断开: {self.contract_id}")
+        # ✅ 2. 移除订单簿回调（如果在使用 WebSocket）
+        if self._extended_orderbook_handler and hasattr(self.client, 'setup_orderbook_handler'):
+            logger.info(f"⏹️ 移除 {self.exchange_name} 订单簿回调...")
+            self.client.setup_orderbook_handler(None)  # 移除回调
+            self._extended_orderbook_handler = None
+        
+        # ✅ 3. 移除订单更新回调
+        if hasattr(self.client, 'setup_order_update_handler'):
+            self.client.setup_order_update_handler(None)
+        
+        # ✅ 4. 清理订单状态缓存
+        self._order_status_futures.clear()
+        self._order_status_data.clear()
+        self._orderbook = None
+        self._orderbook_callback = None
+        
+        # ✅ 5. 不主动断开 ExtendedClient 的连接（由调用方管理）
+        # 但可以添加一个标志位
+        logger.info(f"✅ {self.exchange_name} 适配器已断开: {self.contract_id}")
+    
     
     async def subscribe_orderbook(self, callback: Callable):
         """订阅订单簿（通过轮询 Extended API）"""
         self._orderbook_callback = callback
         
         # ✅ Extended 没有订单簿 WebSocket，使用轮询方式
-        self._orderbook_update_task = asyncio.create_task(
-            self._poll_orderbook()
-        )
-        
+        # self._orderbook_update_task = asyncio.create_task(
+        #     self._poll_orderbook()
+        # )
+
+        self._extended_orderbook_handler = self._on_extended_orderbook_update
+
+        if hasattr(self.client, 'setup_orderbook_handler'):
+            self.client.setup_orderbook_handler(self._extended_orderbook_handler)
+        else:
+            # ✅ 回退到轮询（如果 ExtendedClient 不支持自定义回调）
+            logger.warning(f"⚠️ {self.exchange_name} 不支持 WebSocket 回调，使用轮询")
+            self._orderbook_update_task = asyncio.create_task(
+                self._poll_orderbook()
+            )
         logger.info(f"📡 {self.exchange_name} 订阅订单簿: {self.contract_id}")
-    
+
+    async def _on_extended_orderbook_update(self, orderbook_data: dict):
+        """
+        处理 Extended WebSocket 订单簿更新
+        
+        Args:
+            orderbook_data: Extended WebSocket 推送的订单簿数据
+                {
+                    'ts': 1732611639000,  # 时间戳（毫秒）
+                    'market': 'ETH-USD',
+                    'bid': [{"p": 2945.9, "q": 10.0}],
+                    'ask': [{"p": 2946.1, "q": 10.0}]
+                }
+        """
+        try:
+            # ✅ 提取数据
+            bids = orderbook_data.get('bid', [])
+            asks = orderbook_data.get('ask', [])
+            ts_ms = orderbook_data.get('ts', time.time() * 1000)
+            
+            if not bids or not asks:
+                return
+            
+            # ✅ 转换为标准格式
+            bid_price = float(bids[0]['p'])
+            bid_size = float(bids[0]['q'])
+            ask_price = float(asks[0]['p'])
+            ask_size = float(asks[0]['q'])
+            
+            # ✅ 创建订单簿（使用 Extended 原始时间戳）
+            self._orderbook = {
+                'bids': [[bid_price, bid_size]],
+                'asks': [[ask_price, ask_size]],
+                'timestamp': ts_ms / 1000,  # ← 使用 WebSocket 推送的时间戳（毫秒转秒）
+                'poll_duration_ms': 0  # WebSocket 无 API 调用延迟
+            }
+            
+            # ✅ 触发回调
+            if self._orderbook_callback:
+                await self._orderbook_callback(self._orderbook)
+            
+            logger.debug(
+                f"📊 Extended WebSocket 订单簿更新:\n"
+                f"   买一: ${bid_price}\n"
+                f"   卖一: ${ask_price}\n"
+                f"   时间戳: {ts_ms / 1000:.6f}"
+            )
+        
+        except Exception as e:
+            logger.error(f"❌ 处理 Extended 订单簿更新失败: {e}")
+
     async def _poll_orderbook(self):
         """轮询订单簿数据"""
         try:
