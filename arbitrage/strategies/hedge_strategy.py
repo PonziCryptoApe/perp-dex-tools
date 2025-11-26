@@ -293,7 +293,7 @@ class HedgeStrategy(BaseStrategy):
             # ✅ 过滤延迟过大的信号
             if signal_delay_ms_a > self.max_signal_delay_ms or signal_delay_ms_b > self.max_signal_delay_ms:
                 # 计算当前盈亏（仅用于日志）
-                pnl_pct = self.position.calculate_pnl_pct(
+                pnl_pct = position.calculate_pnl_pct(
                     exchange_a_price=prices.exchange_a_ask,
                     exchange_b_price=prices.exchange_b_bid
                 )
@@ -370,7 +370,7 @@ class HedgeStrategy(BaseStrategy):
                             await self._send_close_notification(position, pnl_pct, prices)
                         
                         # 清除持仓
-                        self.position = None
+                        # self.position = None
 
                         self._last_close_time = time.time()
                     else:
