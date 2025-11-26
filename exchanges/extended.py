@@ -90,6 +90,7 @@ class ExtendedClient(BaseExchangeClient):
         # Initialize logger using the same format as helpers
         self.logger = TradingLogger(exchange="extended", ticker=self.config.ticker, log_to_console=True)
         self._order_update_handler = None
+        self._orderbook_handler = None
 
         self.orderbook = None
         
@@ -304,7 +305,7 @@ class ExtendedClient(BaseExchangeClient):
                     price=rounded_price,
                     side=side,
                     time_in_force=TimeInForce.IOC,
-                    post_only=False,  # Ensure MAKER orders
+                    post_only=False,  # Ensure TAKER orders
                     expire_time = utc_now() + timedelta(days=1), # SDK 1 hour default
                 )
 
@@ -845,7 +846,12 @@ class ExtendedClient(BaseExchangeClient):
     def setup_order_update_handler(self, handler) -> None:
         """Setup order update handler for WebSocket."""
         self._order_update_handler = handler
-                
+        
+    def setup_orderbook_handler(self, handler) -> None:
+        """设置订单簿更新回调（供适配器使用）"""
+        self._orderbook_handler = handler
+        self.logger.log("Orderbook handler registered", "INFO")
+           
     async def handle_orderbook(self, message):
         """Handle orderbook updates from WebSocket using correct pattern."""
         try:
@@ -871,7 +877,9 @@ class ExtendedClient(BaseExchangeClient):
                     'bid': bids,  # should be list of [{"p": price, "q": quantity}] with a length of 1 
                     'ask': asks   # should be list of [{"p": price, "q": quantity}] with a length of 1
                 }
-
+                if self._orderbook_handler:
+                    await self._orderbook_handler(self.orderbook)
+                
                 self.logger.log(f"Orderbook updated for {market}: bid={bids[0] if bids else 'N/A'}, ask={asks[0] if asks else 'N/A'}", "DEBUG")
                 
         except asyncio.CancelledError:
