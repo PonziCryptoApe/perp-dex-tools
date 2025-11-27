@@ -25,7 +25,7 @@ def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     
     # 创建日志格式
     log_format = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        '%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     

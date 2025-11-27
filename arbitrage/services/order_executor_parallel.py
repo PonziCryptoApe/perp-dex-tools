@@ -46,6 +46,183 @@ class OrderExecutor:
             f"   Max Retries: {max_retries}\n"
             f"   Retry Delay: {retry_delay}s"
         )
+
+    
+    async def _balance_positions(
+        self,
+        target_quantity: Decimal,
+        filled_qty_a: Decimal,
+        filled_qty_b: Decimal,
+        side_a: str,
+        side_b: str,
+        price_a: Decimal,
+        price_b: Decimal,
+        operation_type: str  # 'open' 或 'close'
+    ) -> Tuple[Decimal, Decimal]:
+        """
+        平衡仓位（处理部分成交不匹配）
+        
+        Args:
+            target_quantity: 目标数量
+            filled_qty_a: Exchange A 实际成交量
+            filled_qty_b: Exchange B 实际成交量
+            side_a: Exchange A 方向
+            side_b: Exchange B 方向
+            price_a: Exchange A 价格
+            price_b: Exchange B 价格
+            operation_type: 操作类型
+        
+        Returns:
+            (最终 Exchange A 数量, 最终 Exchange B 数量)
+        """
+        # ✅ 计算差异
+        diff_a = target_quantity - filled_qty_a
+        diff_b = target_quantity - filled_qty_b
+        
+        # ✅ 如果完全匹配，直接返回
+        if diff_a == 0 and diff_b == 0:
+            logger.info(f"✅ 仓位平衡，无需调整")
+            return filled_qty_a, filled_qty_b
+        
+        logger.warning(
+            f"⚠️ 检测到仓位不平衡:\n"
+            f"   目标数量: {target_quantity}\n"
+            f"   {self.exchange_a.exchange_name}: {filled_qty_a} (差异: {diff_a:+})\n"
+            f"   {self.exchange_b.exchange_name}: {filled_qty_b} (差异: {diff_b:+})"
+        )
+        
+        # ✅ 策略 1: 补齐未成交部分（优先）
+        balanced_qty_a = filled_qty_a
+        balanced_qty_b = filled_qty_b
+        
+        # ✅ Exchange A 需要补单
+        if diff_a > 0:
+            logger.info(f"🔄 补单 {self.exchange_a.exchange_name}: {diff_a}")
+            
+            try:
+                result_a = await self._retry_place_order(
+                    exchange=self.exchange_a,
+                    side=side_a,
+                    quantity=diff_a,
+                    price=price_a,
+                    order_type=operation_type,
+                    retry_mode='aggressive'  # ✅ 激进模式，提高成交率
+                )
+
+                if result_a['success']:
+                    balanced_qty_a += result_a.get('filled_quantity', Decimal('0'))
+                    logger.info(
+                        f"✅ 补单成功: {self.exchange_a.exchange_name} "
+                        f"+{result_a['filled_quantity']} → 总计 {balanced_qty_a}"
+                    )
+                else:
+                    logger.error(f"❌ 补单失败: {self.exchange_a.exchange_name}")
+            
+            except Exception as e:
+                logger.error(f"❌ 补单异常: {self.exchange_a.exchange_name} - {e}")
+        
+        # ✅ Exchange B 需要补单
+        if diff_b > 0:
+            logger.info(f"🔄 补单 {self.exchange_b.exchange_name}: {diff_b}")
+            
+            try:
+                result_b = await self._retry_place_order(
+                    exchange=self.exchange_b,
+                    side=side_b,
+                    quantity=diff_b,
+                    price=price_b,
+                    order_type=operation_type,
+                    retry_mode='aggressive'
+                )
+
+                if result_b['success']:
+                    balanced_qty_b += result_b.get('filled_quantity', Decimal('0'))
+                    logger.info(
+                        f"✅ 补单成功: {self.exchange_b.exchange_name} "
+                        f"+{result_b['filled_quantity']} → 总计 {balanced_qty_b}"
+                    )
+                else:
+                    logger.error(f"❌ 补单失败: {self.exchange_b.exchange_name}")
+            
+            except Exception as e:
+                logger.error(f"❌ 补单异常: {self.exchange_b.exchange_name} - {e}")
+        
+        # ✅ 策略 2: 如果补单后仍不匹配，平掉多余部分
+        final_diff = balanced_qty_a - balanced_qty_b
+        
+        if abs(final_diff) > Decimal('0.001'):  # 容差 0.001
+            logger.warning(
+                f"⚠️ 补单后仍不平衡:\n"
+                f"   {self.exchange_a.exchange_name}: {balanced_qty_a}\n"
+                f"   {self.exchange_b.exchange_name}: {balanced_qty_b}\n"
+                f"   差异: {final_diff:+}"
+            )
+            
+            # ✅ 平掉多余部分
+            if final_diff > 0:
+                # Exchange A 多了，平掉多余部分
+                excess = final_diff
+                logger.info(f"🔄 平掉 {self.exchange_a.exchange_name} 多余部分: {excess}")
+                
+                # 反向操作（开仓 → 平仓，平仓 → 开仓）
+                reverse_side = 'sell' if side_a == 'buy' else 'buy'
+                
+                try:
+                    result_a = await self._retry_place_order(
+                        exchange=self.exchange_a,
+                        side=reverse_side,
+                        quantity=excess,
+                        price=price_a,
+                        order_type='balance',  # ✅ 标记为平衡操作
+                        retry_mode='aggressive'
+                    )
+
+                    if result_a['success']:
+                        balanced_qty_a -= result_a.get('filled_quantity', Decimal('0'))
+                        logger.info(
+                            f"✅ 平仓成功: {self.exchange_a.exchange_name} "
+                            f"-{result_a['filled_quantity']} → 剩余 {balanced_qty_a}"
+                        )
+                
+                except Exception as e:
+                    logger.error(f"❌ 平仓异常: {self.exchange_a.exchange_name} - {e}")
+            
+            elif final_diff < 0:
+                # Exchange B 多了，平掉多余部分
+                excess = abs(final_diff)
+                logger.info(f"🔄 平掉 {self.exchange_b.exchange_name} 多余部分: {excess}")
+                
+                reverse_side = 'sell' if side_b == 'buy' else 'buy'
+                
+                try:
+                    result_b = await self._retry_place_order(
+                        exchange=self.exchange_b,
+                        side=reverse_side,
+                        quantity=excess,
+                        price=price_b,
+                        order_type='balance',
+                        retry_mode='aggressive'
+                    )
+
+                    if result_b['success']:
+                        balanced_qty_b -= result_b.get('filled_quantity', Decimal('0'))
+                        logger.info(
+                            f"✅ 平仓成功: {self.exchange_b.exchange_name} "
+                            f"-{result_b['filled_quantity']} → 剩余 {balanced_qty_b}"
+                        )
+                
+                except Exception as e:
+                    logger.error(f"❌ 平仓异常: {self.exchange_b.exchange_name} - {e}")
+        
+        # ✅ 返回最终平衡后的数量
+        logger.info(
+            f"✅ 仓位平衡完成:\n"
+            f"   {self.exchange_a.exchange_name}: {filled_qty_a} → {balanced_qty_a}\n"
+            f"   {self.exchange_b.exchange_name}: {filled_qty_b} → {balanced_qty_b}\n"
+            f"   最终差异: {abs(balanced_qty_a - balanced_qty_b)}"
+        )
+        
+        return balanced_qty_a, balanced_qty_b
     
     async def _retry_place_order(
         self,
@@ -144,6 +321,23 @@ class OrderExecutor:
                         retry_mode=current_retry_mode,
                         quote_id=current_quote_id
                     )
+                # ✅ 检查部分成交
+                if not result.get('success') and result.get('partial_fill'):
+                    # ✅ 部分成交也返回（由上层处理）
+                    logger.warning(
+                        f"⚠️ 部分成交: {exchange.exchange_name} | "
+                        f"已成交: {result.get('filled_quantity')} / {quantity}"
+                    )
+                    
+                    return {
+                        'success': True,  # ✅ 标记为成功（有成交）
+                        'order_id': result.get('order_id'),
+                        'filled_quantity': result.get('filled_quantity', Decimal('0')),
+                        'filled_price': result.get('filled_price', price),
+                        'error': None,
+                        'partial_fill': True  # ✅ 传递部分成交标志
+                    }
+            
                 if result.get('success'):
                     if attempt > 1:
                         logger.info(
@@ -265,6 +459,36 @@ class OrderExecutor:
                     f"   {self.exchange_b.exchange_name} 订单: {order_b_result.get('order_id')}\n"
                     f"   ⏱️ 耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
                 )
+
+                # ✅ 3. 到这里两所都成功了，检查成交数量
+                filled_qty_a = order_a_result.get('filled_quantity', self.quantity)
+                filled_qty_b = order_b_result.get('filled_quantity', self.quantity)
+                
+                logger.info(
+                    f"📊 初始成交结果:\n"
+                    f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {self.quantity}\n"
+                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {self.quantity}"
+                )
+                
+                # ✅ 4. 平衡仓位（关键！）
+                balanced_qty_a, balanced_qty_b = await self._balance_positions(
+                    target_quantity=self.quantity,
+                    filled_qty_a=filled_qty_a,
+                    filled_qty_b=filled_qty_b,
+                    side_a='sell',
+                    side_b='buy',
+                    price_a=exchange_a_price,
+                    price_b=exchange_b_price,
+                    operation_type='open'
+                )
+                
+                # ✅ 5. 使用平衡后的数量（取较小值）
+                final_quantity = min(balanced_qty_a, balanced_qty_b)
+                
+                if final_quantity == 0:
+                    logger.error("❌ 平衡后仓位为 0")
+                    return False, None
+                
                 actual_price_a = order_a_result.get('filled_price', exchange_a_price)
                 actual_price_b = order_b_result.get('filled_price', exchange_b_price)
 
@@ -301,7 +525,7 @@ class OrderExecutor:
                 
                 position = Position(
                     symbol=self.exchange_a.symbol,
-                    quantity=self.quantity,
+                    quantity=final_quantity,
                     exchange_a_name=self.exchange_a.exchange_name,
                     exchange_b_name=self.exchange_b.exchange_name,
                     # ✅ 信号触发价格
@@ -382,7 +606,7 @@ class OrderExecutor:
                     
                     await self._emergency_close_b(
                         order_id=order_b_result.get('order_id'),
-                        quantity=self.quantity
+                        quantity=order_b_result.get('filled_quantity', self.quantity)
                     )
                     
                     return False, None
@@ -449,7 +673,7 @@ class OrderExecutor:
                     
                     await self._emergency_close_a(
                         order_id=order_a_result.get('order_id'),
-                        quantity=self.quantity
+                        quantity=order_a_result.get('filled_quantity', self.quantity)
                     )
                     
                     return False, None
@@ -544,6 +768,28 @@ class OrderExecutor:
                 return False, None
             # 情况 2️⃣: 两所都成功 → 完成
             if success_a and success_b:
+
+                # ✅ 3. 到这里两所都成功了，检查成交数量
+                filled_qty_a = order_a_result.get('filled_quantity', position.quantity)
+                filled_qty_b = order_b_result.get('filled_quantity', position.quantity)
+                
+                logger.info(
+                    f"📊 初始平仓结果:\n"
+                    f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {position.quantity}\n"
+                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {position.quantity}"
+                )
+                
+                # ✅ 4. 平衡仓位（关键！）
+                balanced_qty_a, balanced_qty_b = await self._balance_positions(
+                    target_quantity=position.quantity,
+                    filled_qty_a=filled_qty_a,
+                    filled_qty_b=filled_qty_b,
+                    side_a='buy',
+                    side_b='sell',
+                    price_a=exchange_a_price,
+                    price_b=exchange_b_price,
+                    operation_type='close'
+                )
                 actual_price_a = order_a_result.get('filled_price')
                 actual_price_b = order_b_result.get('filled_price')
 

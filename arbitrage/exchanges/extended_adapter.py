@@ -18,8 +18,7 @@ class ExtendedAdapter(ExchangeAdapter):
         self.contract_id = f"{symbol}-USD"
         self._orderbook_update_task = None
         # ✅ 订单状态事件
-        self._order_status_events: Dict[str, asyncio.Event] = {}
-        self._order_status_data: Dict[str, str] = {}  # ← 添加这一行！
+        self._order_status_data: Dict[str, dict] = {}  # ← 添加这一行！
         self._order_status_futures: Dict[str, asyncio.Future] = {}
         self._extended_orderbook_handler = None
     
@@ -215,28 +214,50 @@ class ExtendedAdapter(ExchangeAdapter):
         """处理 WebSocket 订单更新"""
         order_id = order_data.get('order_id')
         status = order_data.get('status')
-        logger.info(f"📨 收到订单更新: order_id={order_id}, status={status}")
+        filled_size = order_data.get('filled_size', 0)
+        price = order_data.get('price', 0)
+        logger.info(f"📨 收到订单更新: order_id={order_id}, status={status}, "
+                    f"filled_size={filled_size}, price={price}")
 
         if order_id in self._order_status_futures:
             future = self._order_status_futures[order_id]
             if not future.done():
                 logger.info(f"✅ 设置 Future 结果: {order_id} -> {status}")
-                future.set_result(status)
+                future.set_result({
+                    'status': status,
+                    'filled_size': filled_size,
+                    'price': price
+                })
         else:
             # ✅ 没有等待者，缓存状态
             logger.debug(f"📦 缓存订单状态: {order_id} -> {status}")
-            self._order_status_data[order_id] = status    
+            self._order_status_data[order_id] = {
+                'status': status,
+                'filled_size': filled_size,
+                'price': price
+            }
 
     async def _wait_for_order_status(
         self,
         order_id: str,
         timeout: float = 1.0
     ):
+        """
+        等待订单状态（包含 filled_size）
+        
+        Returns:
+            {
+                'status': str,
+                'filled_size': Decimal,
+                'price': Decimal
+            }
+        """
         # ✅ 1. 先检查是否已经有状态（可能在下单时就已推送）
         if order_id in self._order_status_data:
-            status = self._order_status_data.pop(order_id)
-            logger.info(f"✅ 订单状态已存在（无需等待）: {order_id} -> {status}")
-            return status
+            data = self._order_status_data.pop(order_id)
+            logger.info(f"✅ 订单状态已存在（无需等待）: {order_id} -> "
+                        f"{data['status']}, {data['filled_size']}, {data['price']}")
+            return data
 
         # ✅ 2. 创建 Future 并等待
         loop = asyncio.get_event_loop()
@@ -249,21 +270,31 @@ class ExtendedAdapter(ExchangeAdapter):
     
         try:
             # ✅ 直接等待 Future（不循环！）
-            status = await asyncio.wait_for(future, timeout=timeout)
+            data = await asyncio.wait_for(future, timeout=timeout)
 
             wait_duration = (time.time() - wait_start) * 1000
-            logger.info(f"✅ 收到状态: {order_id} -> {status} (耗时 {wait_duration:.2f} ms)")
-            
-            return status
-        
+            logger.info(
+                f"✅ 收到状态: {order_id} -> {data['status']},"
+                f" filled_size={data['filled_size']}, price={data['price']} (耗时 {wait_duration:.2f} ms)"
+            )
+            return data
+
         except asyncio.TimeoutError:
             wait_duration = (time.time() - wait_start) * 1000
             logger.warning(f"⚠️ 等待订单状态超时: {order_id} ({wait_duration:.2f} ms)")
-            return None
-            
+            return {
+                'status': None,
+                'filled_size': Decimal('0'),
+                'price': Decimal('0')
+            }
+
         except Exception as e:
             logger.error(f"❌ 等待订单状态异常: {e}")
-            return None
+            return {
+                'status': None,
+                'filled_size': Decimal('0'),
+                'price': Decimal('0')
+            }
         
         finally:
             # ✅ 清理
@@ -364,7 +395,9 @@ class ExtendedAdapter(ExchangeAdapter):
                 return {
                     'success': False,
                     'order_id': None,
-                    'error': error_msg
+                    'error': error_msg,
+                    'filled_price': Decimal('0'),
+                    'filled_quantity': Decimal('0'),
                 }
             
             order_id = order_result.data.id
@@ -372,7 +405,9 @@ class ExtendedAdapter(ExchangeAdapter):
                 return {
                     'success': False,
                     'order_id': None,
-                    'error': 'No order ID returned'
+                    'error': 'No order ID returned',
+                    'filled_price': Decimal('0'),
+                    'filled_quantity': Decimal('0'),
                 }
             
             # 等待订单执行
@@ -394,7 +429,11 @@ class ExtendedAdapter(ExchangeAdapter):
             wait_start_time = time.time()
             logger.info(f"⏳ 开始等待订单状态: {order_id}")
             
-            status = await self._wait_for_order_status(order_id, timeout=1.0)
+            status_data = await self._wait_for_order_status(order_id, timeout=1.0)
+            status = status_data.get('status')
+            filled_size_from_ws = Decimal(str(status_data.get('filled_size', 0)))
+            price_from_ws = Decimal(str(status_data.get('price', 0)))
+        
             logger.info(f"订单状态: {order_id} -> {status}")
             wait_end_time = time.time()
             wait_duration = (wait_end_time - wait_start_time) * 1000
@@ -407,8 +446,25 @@ class ExtendedAdapter(ExchangeAdapter):
                 status = 'OPEN'
             elif status == 'CANCELLED':
                 status = 'CANCELED'
-
-            if status in ['CANCELED', 'REJECTED']:
+            if status in ['CANCELED']:
+                # ✅ 使用 WebSocket 数据
+                if filled_size_from_ws > 0:
+                    logger.warning(
+                        f"⚠️ 部分成交后取消（WebSocket 数据）:\n"
+                        f"   订单 ID: {order_id}\n"
+                        f"   已成交: {filled_size_from_ws} / {quantity}\n"
+                        f"   成交价: ${price_from_ws}"
+                    )
+                    
+                    return {
+                        'success': False,  # ✅ 部分成交也标记为失败（需要上层处理）
+                        'order_id': order_id,
+                        'error': 'Order CANCELED (partial fill)',
+                        'filled_price': price_from_ws,
+                        'filled_quantity': filled_size_from_ws,
+                        'partial_fill': True  # ✅ 标记为部分成交
+                    }
+            if status in ['REJECTED']:
                 # ✅ 激进模式：重试
                 # if retry_mode == 'aggressive':
                 #     logger.info("🔄 激进模式：订单被拒绝，重试...")

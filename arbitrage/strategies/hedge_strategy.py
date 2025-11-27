@@ -53,7 +53,8 @@ class HedgeStrategy(BaseStrategy):
         self.monitor = PriceMonitorService(
             symbol=symbol,
             exchange_a=exchange_a,
-            exchange_b=exchange_b
+            exchange_b=exchange_b,
+            trigger_exchange='exchange_b'
         )
         
         # 订单执行服务
@@ -366,7 +367,7 @@ class HedgeStrategy(BaseStrategy):
                     
                     if success:
                         logger.info(f"✅ 平仓成功，切换到开仓监控模式")
-                        
+
                         self.position_manager.position = updated_position
 
                         # ✅ 记录实际平仓到 CSV

@@ -28,7 +28,8 @@ class PriceMonitorService:
         symbol: str,
         exchange_a: ExchangeAdapter,
         exchange_b: ExchangeAdapter,
-        min_depth_multiplier: float = 1.0  # 最小深度倍数
+        min_depth_multiplier: float = 1.0,  # 最小深度倍数
+        trigger_exchange: str = 'exchange_b'  # 触发信号的交易所
     ):
         """
         Args:
@@ -41,6 +42,7 @@ class PriceMonitorService:
         self.exchange_a = exchange_a
         self.exchange_b = exchange_b
         self.min_depth_multiplier = min_depth_multiplier
+        self.trigger_exchange = trigger_exchange
         
         # ✅ 订阅者列表
         self._subscribers: List[Callable] = []
@@ -67,7 +69,8 @@ class PriceMonitorService:
             f"   Symbol: {symbol}\n"
             f"   Exchange A: {exchange_a.exchange_name}\n"
             f"   Exchange B: {exchange_b.exchange_name}\n"
-            f"   Min Depth Multiplier: {min_depth_multiplier}x"
+            f"   Min Depth Multiplier: {min_depth_multiplier}x\n"
+            f"   Trigger Exchange: {trigger_exchange}"
         )
     
     def subscribe(self, callback: Callable):
@@ -260,8 +263,8 @@ class PriceMonitorService:
                     f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
                     f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
                 )
-        
-        await self._notify_price_update()
+        if self.trigger_exchange == 'exchange_a':
+            await self._notify_price_update()
     
     async def _on_orderbook_b_update(self, orderbook: dict):
         """交易所 B 订单簿更新"""
@@ -279,12 +282,17 @@ class PriceMonitorService:
                     f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
                     f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
                 )
-        
-        await self._notify_price_update()
-    
+        if self.trigger_exchange == 'exchange_b':
+            await self._notify_price_update()
+
     async def _notify_price_update(self):
         """通知所有订阅者（带限流）"""
         if not self._subscribers:
+            return
+        
+        # ✅ 检查订单簿是否都已就绪
+        if not self.orderbook_a or not self.orderbook_b:
+            logger.debug("⏳ 等待两个交易所的订单簿数据...")
             return
         
         # ✅ 限流：避免过于频繁触发回调
