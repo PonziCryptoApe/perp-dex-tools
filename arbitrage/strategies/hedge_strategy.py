@@ -355,7 +355,7 @@ class HedgeStrategy(BaseStrategy):
 
                 try:
                     # 实际交易模式：执行平仓
-                    success = await self.executor.execute_close(
+                    success, updated_position = await self.executor.execute_close(
                         position=position,
                         exchange_a_price=prices.exchange_a_ask,
                         exchange_b_price=prices.exchange_b_bid,
@@ -366,15 +366,15 @@ class HedgeStrategy(BaseStrategy):
                     
                     if success:
                         logger.info(f"✅ 平仓成功，切换到开仓监控模式")
+                        
+                        self.position_manager.position = updated_position
+
                         # ✅ 记录实际平仓到 CSV
-                        self.position_manager.close_position(
-                            exchange_a_exit_price=prices.exchange_a_ask,
-                            exchange_b_exit_price=prices.exchange_b_bid
-                        )
+                        pnl_pct = self.position_manager.close_position()
                         # 发送飞书通知
                         if self.lark_bot:
                             await self._send_close_notification(position, pnl_pct, prices)
-                        
+
                         # 清除持仓
                         # self.position = None
 

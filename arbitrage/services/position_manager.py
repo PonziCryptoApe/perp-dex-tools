@@ -62,16 +62,20 @@ class PositionManagerService:
     
     def close_position(
         self,
-        exchange_a_exit_price: Decimal,
-        exchange_b_exit_price: Decimal
+        # exchange_a_signal_exit_price: Decimal,
+        # exchange_b_signal_exit_price: Decimal,
+        # exchange_a_filled_exit_price: Decimal,
+        # exchange_b_filled_exit_price: Decimal
     ) -> Decimal:
         """
         平仓并计算盈亏
         
         Args:
-            exchange_a_exit_price: Exchange A 平仓价格
-            exchange_b_exit_price: Exchange B 平仓价格
-        
+            exchange_a_signal_exit_price: Exchange A 平仓信号价格
+            exchange_b_signal_exit_price: Exchange B 平仓信号价格
+            exchange_a_filled_exit_price: Exchange A 实际成交价格
+            exchange_b_filled_exit_price: Exchange B 实际成交价格
+
         Returns:
             盈亏百分比
         
@@ -81,13 +85,19 @@ class PositionManagerService:
         if not self.position:
             raise ValueError("没有持仓记录")
         
-        # ✅ 更新平仓价格（这些应该在 executor 中已经设置了）
-        # self.position.exchange_a_exit_price = exchange_a_exit_price
-        # self.position.exchange_b_exit_price = exchange_b_exit_price
-        # self.position.exit_time = datetime.now()
-        
+        # if exchange_a_exit_price:
+        #     self.position.exchange_a_exit_price = exchange_a_exit_price
+        # if exchange_b_exit_price:
+        #     self.position.exchange_b_exit_price = exchange_b_exit_price
+        # if exchange_a_filled_exit_price:
+        #     self.position.exchange_a_filled_exit_price = exchange_a_filled_exit_price
+        # if exchange_b_filled_exit_price:
+        #     self.position.exchange_b_filled_exit_price = exchange_b_filled_exit_price
         # ✅ 计算盈亏
-        pnl_pct = self.position.calculate_pnl_pct()
+        pnl_pct = self.position.calculate_pnl_pct(
+            exchange_a_exit_price=self.position.exchange_a_exit_price,
+            exchange_b_exit_price=self.position.exchange_b_exit_price
+        )
         
         # ✅ 记录平仓交易到 CSV
         self._log_close_trade(self.position, pnl_pct)
