@@ -61,11 +61,7 @@ class PositionManagerService:
         )
     
     def close_position(
-        self,
-        # exchange_a_signal_exit_price: Decimal,
-        # exchange_b_signal_exit_price: Decimal,
-        # exchange_a_filled_exit_price: Decimal,
-        # exchange_b_filled_exit_price: Decimal
+        self
     ) -> Decimal:
         """
         平仓并计算盈亏
@@ -95,8 +91,8 @@ class PositionManagerService:
         #     self.position.exchange_b_filled_exit_price = exchange_b_filled_exit_price
         # ✅ 计算盈亏
         pnl_pct = self.position.calculate_pnl_pct(
-            exchange_a_exit_price=self.position.exchange_a_exit_price,
-            exchange_b_exit_price=self.position.exchange_b_exit_price
+            exchange_a_price=self.position.exchange_a_exit_price,
+            exchange_b_price=self.position.exchange_b_exit_price
         )
         
         # ✅ 记录平仓交易到 CSV
