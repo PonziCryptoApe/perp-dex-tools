@@ -296,11 +296,11 @@ class PriceMonitorService:
             return
         
         # ✅ 限流：避免过于频繁触发回调
-        current_time = time.time()
-        if current_time - self.last_callback_time < self.min_callback_interval:
-            return
+        # current_time = time.time()
+        # if current_time - self.last_callback_time < self.min_callback_interval:
+        #     return
         
-        self.last_callback_time = current_time
+        # self.last_callback_time = current_time
         
         prices = self.get_latest_prices()
         if prices:

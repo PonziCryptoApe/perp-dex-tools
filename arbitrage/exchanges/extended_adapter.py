@@ -464,6 +464,18 @@ class ExtendedAdapter(ExchangeAdapter):
                         'filled_quantity': filled_size_from_ws,
                         'partial_fill': True  # ✅ 标记为部分成交
                     }
+                else:
+                    logger.info(
+                        f"✅ 订单已取消，未成交:\n"
+                        f"   订单 ID: {order_id}"
+                    )
+                    return {
+                        'success': False,
+                        'order_id': order_id,
+                        'error': 'Order CANCELED (no fill)',
+                        'filled_price': Decimal('0'),
+                        'filled_quantity': Decimal('0'),
+                    }
             if status in ['REJECTED']:
                 # ✅ 激进模式：重试
                 # if retry_mode == 'aggressive':
