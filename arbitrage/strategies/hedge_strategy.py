@@ -186,6 +186,7 @@ class HedgeStrategy(BaseStrategy):
                     f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                    f"   数量: {self.quantity}\n"
                     f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
                     f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
                 )
@@ -195,6 +196,7 @@ class HedgeStrategy(BaseStrategy):
                     f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                    f"   数量: {self.quantity}\n"
                     f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
                     f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
                 )
@@ -306,6 +308,7 @@ class HedgeStrategy(BaseStrategy):
                     f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
                     f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
                     f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)\n"
+                    f"   数量: {self.quantity}\n"
                     f"   当前盈亏: {pnl_pct:.4f}%\n"
                     f"   持仓时长: {position.get_holding_duration()}"
                 )
@@ -325,6 +328,7 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
                 f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)\n"
+                f"   数量: {self.quantity}\n"
                 f"   盈亏: {pnl_pct:.4f}%\n"
                 f"   持仓时长: {position.get_holding_duration()}\n"
                 f"   ⏱️ 延迟分析:\n"
