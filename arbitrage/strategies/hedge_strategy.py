@@ -185,20 +185,25 @@ class HedgeStrategy(BaseStrategy):
                     f"⚠️ 开仓信号延迟过大，已过滤:\n"
                     f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
-                    f"   数量: {self.quantity}\n"
                     f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
-                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
+                    f"   {self.exchange_a.exchange_name}_bid_size: ${prices.exchange_a_bid_size}\n"
+                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
+                    f"   {self.exchange_b.exchange_name}_ask_size: ${prices.exchange_b_ask_size}\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                    f"   数量: {self.quantity}"
                 )
                 return  # ✅ 丢弃该信号
             else:
                 logger.info(
+                    f"🔔 检测到开仓信号:\n"
                     f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
-                    f"   数量: {self.quantity}\n"
                     f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
-                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}"
+                    f"   {self.exchange_a.exchange_name}_bid_size: ${prices.exchange_a_bid_size}\n"
+                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
+                    f"   {self.exchange_b.exchange_name}_ask_size: ${prices.exchange_b_ask_size}\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                    f"   数量: {self.quantity}"
                 )
 
             self.open_signal_count += 1
@@ -306,7 +311,9 @@ class HedgeStrategy(BaseStrategy):
                     f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                     f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
+                    f"   {self.exchange_a.exchange_name}_ask_size: ${prices.exchange_a_ask_size}\n"
                     f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
+                    f"   {self.exchange_b.exchange_name}_bid_size: ${prices.exchange_b_bid_size}\n"
                     f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)\n"
                     f"   数量: {self.quantity}\n"
                     f"   当前盈亏: {pnl_pct:.4f}%\n"
@@ -326,7 +333,9 @@ class HedgeStrategy(BaseStrategy):
             logger.info(
                 f"🔔 平仓信号 #{self.close_signal_count}:\n"
                 f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
+                f"   {self.exchange_a.exchange_name}_ask_size: ${prices.exchange_a_ask_size}\n"
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
+                f"   {self.exchange_b.exchange_name}_bid_size: ${prices.exchange_b_bid_size}\n"
                 f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)\n"
                 f"   数量: {self.quantity}\n"
                 f"   盈亏: {pnl_pct:.4f}%\n"
