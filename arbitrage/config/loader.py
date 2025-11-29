@@ -17,6 +17,8 @@ class PairConfig:
     quantity: Decimal         # 交易数量
     open_threshold: float     # 开仓阈值（%）
     close_threshold: float    # 平仓阈值（%）
+    min_depth_quantity: Decimal  # ✅ 新增：最小深度阈值
+
 
 def load_pair_config(pair_id: str) -> PairConfig:
     """
@@ -54,7 +56,16 @@ def load_pair_config(pair_id: str) -> PairConfig:
     
     if not pair_data.get('enabled', False):
         raise ValueError(f"交易对未启用: {pair_id}，请在配置文件中设置 enabled: true")
+     # ✅ 解析基础配置
+    quantity = Decimal(str(pair_data['quantity']))
     
+    # ✅ 解析 min_depth_quantity（可选，默认为 quantity 的 10%，最小为 0.001）
+    if 'min_depth_quantity' in pair_data:
+        min_depth_quantity = Decimal(str(pair_data['min_depth_quantity']))
+    else:
+        # 默认为交易量的 10%，但最小为 0.001
+        default_min_depth = max(quantity * Decimal('0.1'), Decimal('0.0001'))
+        min_depth_quantity = default_min_depth
     return PairConfig(
         pair_id=pair_id,
         enabled=pair_data['enabled'],
@@ -63,7 +74,8 @@ def load_pair_config(pair_id: str) -> PairConfig:
         exchange_b=pair_data['exchange_b'],
         quantity=Decimal(str(pair_data['quantity'])),
         open_threshold=float(pair_data['open_threshold']),
-        close_threshold=float(pair_data['close_threshold'])
+        close_threshold=float(pair_data['close_threshold']),
+        min_depth_quantity=min_depth_quantity
     )
 
 def list_all_pairs() -> list:

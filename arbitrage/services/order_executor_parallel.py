@@ -380,7 +380,8 @@ class OrderExecutor:
         spread_pct: Decimal,
         exchange_a_quote_id: Optional[str] = None,
         exchange_b_quote_id: Optional[str] = None,
-        signal_trigger_time: Optional[float] = None
+        signal_trigger_time: Optional[float] = None,
+        actual_quantity: Optional[Decimal] = None
     ) -> Tuple[bool, Optional[Position]]:
         """
         执行开仓
@@ -398,6 +399,7 @@ class OrderExecutor:
         Returns:
             (success: bool, position: Optional[Position])
         """
+        order_quantity = actual_quantity if actual_quantity is not None else self.quantity
         # ✅ 记录开始执行时间
         execution_start_time = time.time()
         
@@ -419,7 +421,7 @@ class OrderExecutor:
             task_a = asyncio.create_task(
                 self.exchange_a.place_open_order(
                     side='sell',
-                    quantity=self.quantity,
+                    quantity=order_quantity,
                     price=exchange_a_price,
                     retry_mode='opportunistic',
                     quote_id=exchange_a_quote_id
@@ -429,7 +431,7 @@ class OrderExecutor:
             task_b = asyncio.create_task(
                 self.exchange_b.place_open_order(
                     side='buy',
-                    quantity=self.quantity,
+                    quantity=order_quantity,
                     price=exchange_b_price,
                     retry_mode='aggressive',
                     quote_id=exchange_b_quote_id
@@ -465,7 +467,7 @@ class OrderExecutor:
                     exchange=self.exchange_a,
                     order_type='open',
                     side='sell',
-                    quantity=self.quantity,
+                    quantity=order_quantity,
                     price=exchange_a_price,
                     retry_mode='aggressive',
                     quote_id=exchange_a_quote_id
@@ -525,7 +527,7 @@ class OrderExecutor:
                     
                     await self._emergency_close_b(
                         order_id=order_b_result.get('order_id'),
-                        quantity=order_b_result.get('filled_quantity', self.quantity)
+                        quantity=order_b_result.get('filled_quantity', actual_quantity)
                     )
                     
                     return False, None
@@ -540,7 +542,7 @@ class OrderExecutor:
                     exchange=self.exchange_b,
                     order_type='open',
                     side='buy',
-                    quantity=self.quantity,
+                    quantity=order_quantity,
                     price=exchange_b_price,
                     retry_mode='aggressive',
                     quote_id=exchange_b_quote_id
@@ -602,7 +604,7 @@ class OrderExecutor:
                     
                     await self._emergency_close_a(
                         order_id=order_a_result.get('order_id'),
-                        quantity=order_a_result.get('filled_quantity', self.quantity)
+                        quantity=order_a_result.get('filled_quantity', order_quantity)
                     )
                     
                     return False, None
@@ -617,18 +619,18 @@ class OrderExecutor:
                 )
 
                 # ✅ 3. 到这里两所都成功了，检查成交数量
-                filled_qty_a = order_a_result.get('filled_quantity', self.quantity)
-                filled_qty_b = order_b_result.get('filled_quantity', self.quantity)
-                
+                filled_qty_a = order_a_result.get('filled_quantity', order_quantity)
+                filled_qty_b = order_b_result.get('filled_quantity', order_quantity)
+
                 logger.info(
                     f"📊 初始成交结果:\n"
-                    f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {self.quantity}\n"
-                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {self.quantity}"
+                    f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {order_quantity}\n"
+                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {order_quantity}"
                 )
                 
                 # ✅ 4. 平衡仓位（关键！）
                 balanced_qty_a, balanced_qty_b = await self._balance_positions(
-                    target_quantity=self.quantity,
+                    target_quantity=order_quantity,
                     filled_qty_a=filled_qty_a,
                     filled_qty_b=filled_qty_b,
                     side_a='sell',
@@ -668,11 +670,13 @@ class OrderExecutor:
                     f"      信号价格: ${exchange_a_price}\n"
                     f"      成交价格: ${actual_price_a}\n"
                     f"      滑点: {slippage_a:+.4f}%\n"
+                    f"      成交数量: {balanced_qty_a} / {order_quantity}\n"
                     f"   {self.exchange_b.exchange_name}:\n"
                     f"      订单 ID: {order_b_result.get('order_id')}\n"
                     f"      信号价格: ${exchange_b_price}\n"
                     f"      成交价格: ${actual_price_b}\n"
                     f"      滑点: {slippage_b:+.4f}%\n"
+                    f"      成交数量: {balanced_qty_b} / {order_quantity}\n"
                     f"   ⏱️ 执行耗时: {execution_delay_ms:.2f} ms"
                 )
 

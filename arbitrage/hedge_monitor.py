@@ -26,9 +26,11 @@ from decimal import Decimal
 from datetime import datetime
 from typing import Optional, Dict, Tuple
 from dataclasses import dataclass
+from x10.perpetual.orders import TimeInForce, OrderSide
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from  exchanges.base import OrderResult, OrderInfo, query_retry
 
 from exchanges.extended import ExtendedClient
 from exchanges.lighter import LighterClient
@@ -69,17 +71,17 @@ class Position:
         )
 
 
-class SimpleConfig:
-    """简单配置对象"""
-    def __init__(self, ticker: str, quantity: Decimal):
-        self.ticker = ticker
-        self.contract_id = f"{ticker}-USD"
-        self.tick_size = Decimal('0.01')
-        self.quantity = quantity
-        self.close_order_side = 'sell'
-        self.leverage = 1
-        self.order_type = 'market'
-        self.size = quantity
+# class SimpleConfig:
+#     """简单配置对象"""
+#     def __init__(self, ticker: str, quantity: Decimal):
+#         self.ticker = ticker
+#         self.contract_id = f"{ticker}-USD"
+#         self.tick_size = Decimal('0.1')
+#         self.quantity = quantity
+#         self.close_order_side = 'sell'
+#         self.leverage = 1
+#         self.order_type = 'market'
+#         self.size = quantity
 
 
 class HedgeMonitor:
@@ -89,7 +91,7 @@ class HedgeMonitor:
         self,
         symbol: str,
         quantity: Decimal,
-        open_threshold_pct: float = 0.05,
+        open_threshold_pct: float = 0.06,
         close_threshold_pct: float = 0.0,
         check_interval: float = 1.0,
         lark_token: Optional[str] = None
@@ -112,6 +114,7 @@ class HedgeMonitor:
         # 交易所客户端
         self.extended_client: Optional[ExtendedClient] = None
         self.lighter_client: Optional[LighterClient] = None
+        self.extended_contract_id = None
         
         # 持仓状态
         self.position: Optional[Position] = None
@@ -145,18 +148,57 @@ class HedgeMonitor:
     async def initialize(self):
         """初始化交易所连接"""
         try:
-            config = SimpleConfig(self.symbol, self.quantity)
+            config_dict = {
+                'exchange': 'extended',
+                'ticker': self.symbol,
+                'quantity': self.quantity,
+                'iterations': 1,  # hedge_monitor 不需要迭代
+                'tick_size': Decimal('0.1'),  # 初始值，会被覆盖
+                'contract_id': '',  # 空字符串，会被覆盖
+                # 'side': 'sell',  # hedge 策略开仓方向
+                'take_profit': 0,
+                'close_order_side': 'sell',
+                'order_type': 'market',
+            }
+            config = Config(config_dict)
             
-            # 初始化 Extended
-            logger.info(f"🔌 连接 Extended ({self.symbol})...")
+            # ========== Extended 初始化 ==========
+            logger.info(f"🔌 初始化 Extended ({self.symbol})...")
+            
+            # 1. 创建 client(可增加一个更新config的方法，以便后续更新tick_size等)
             self.extended_client = ExtendedClient(config)
+            
+            # 2. 获取合约信息（在 connect 之前调用）
+            logger.info("📋 获取 Extended 合约信息...")
+            ext_contract_id, ext_tick_size = await self.extended_client.get_contract_attributes()
+            # print(f"Extended 合约信息: contract_id={ext_contract_id}, tick_size={ext_tick_size}")
+            self.extended_contract_id = ext_contract_id
+            self.extended_client.config.contract_id = ext_contract_id
+            self.extended_client.config.tick_size = ext_tick_size
+            print(f"Extended 合约信息: contract_id={self.extended_client.config.contract_id}, tick_size={self.extended_client.config.tick_size}")
+            # return
+            # 3. 验证最小下单量
+            if hasattr(self.extended_client, 'min_order_size'):
+                min_size = self.extended_client.min_order_size
+                if self.quantity < min_size:
+                    raise ValueError(f"下单量不足: {self.quantity} < {min_size}")
+            
+            logger.info(
+                f"✅ Extended 合约信息:\n"
+                f"   contract_id: {ext_contract_id}\n"
+                f"   tick_size: {ext_tick_size}\n"
+                f"   min_order_size: {getattr(self.extended_client, 'min_order_size', 'N/A')}"
+            )
+            
+            # 4. 连接 WebSocket
+            logger.info("🔌 连接 Extended WebSocket...")
             await self.extended_client.connect()
             
-            # ✅ 等待 WebSocket 完全启动（关键！）
-            logger.info("⏳ 等待 Extended WebSocket 预热...")
+            # 5. 等待 WebSocket 启动
+            logger.info("⏳ 等待 Extended WebSocket 预热（3秒）...")
             await asyncio.sleep(3)
             
-            # ✅ 检查订单簿就绪
+            # 6. 等待订单簿就绪
             logger.info("🔍 等待 Extended 订单簿数据...")
             if not await self._wait_for_extended_orderbook(max_wait=30):
                 raise Exception("Extended 订单簿初始化超时")
@@ -167,6 +209,7 @@ class HedgeMonitor:
             self.lighter_client = LighterClient(config)
             await self.lighter_client.connect()
             
+            # ✅ 获取 Lighter 合约信息
             contract_id, tick_size = await self.lighter_client.get_contract_attributes()
             self.lighter_client.config.contract_id = contract_id
             self.lighter_client.config.tick_size = tick_size
@@ -190,7 +233,7 @@ class HedgeMonitor:
             import traceback
             traceback.print_exc()
             raise
-
+    
     async def _wait_for_extended_orderbook(self, max_wait: int = 30):
         """等待 Extended 订单簿就绪"""
         start = time.time()
@@ -466,10 +509,10 @@ class HedgeMonitor:
             logger.error(f"获取价格失败: {e}")
             return None
     
-    def calculate_spread(self, prices: Dict) -> Tuple[float, float]:
+    def calculate_spread_open(self, prices: Dict) -> Tuple[float, float]:
         """
-        计算价差
-        
+        计算开仓价差
+
         Returns:
             (spread_value, spread_pct)
             spread_value: ext_bid - lighter_ask
@@ -486,6 +529,26 @@ class HedgeMonitor:
 
         return spread_value, spread_pct
     
+    def calculate_spread_close(self, prices: Dict) -> Tuple[float, float]:
+        """
+        计算平仓价差
+
+        Returns:
+            (spread_value, spread_pct)
+            spread_value: ext_bid - lighter_ask
+            spread_pct: spread / avg_bid * 100
+        """
+        ext_bid = prices['ext_bid']
+        lighter_ask = prices['lighter_ask']
+        lighter_bid = prices['lighter_bid']
+        ext_ask = prices["ext_ask"]
+        
+        spread_value = lighter_bid - ext_ask
+        avg_mid = (ext_bid + ext_ask + lighter_ask + lighter_bid) / 4
+        spread_pct = (spread_value / avg_mid) * 100
+
+        return spread_value, spread_pct
+
     def check_depth(self, prices: Dict) -> bool:
         """
         检查订单簿深度是否足够
@@ -521,9 +584,11 @@ class HedgeMonitor:
             
             # Extended 开空 (卖出)
             logger.info(f"📤 Extended 开空 {self.quantity}...")
-            ext_result = await self.extended_client.place_market_order(
-                self.extended_client.config.contract_id,
+            logger.info(f"   合约: {self.extended_client.config.contract_id}")
+            ext_result = await self.place_extended_market_order(
+                self.extended_contract_id,
                 self.quantity,
+                prices,
                 'sell'
             )
             
@@ -536,12 +601,14 @@ class HedgeMonitor:
             
             # Lighter 开多 (买入)
             logger.info(f"📥 Lighter 开多 {self.quantity}...")
-            lighter_result = await self.lighter_client.place_market_order(
+            logger.info(f"   合约: {self.lighter_client.config.contract_id}")
+            lighter_result = await self.place_lighter_market_order(
                 self.lighter_client.config.contract_id,
                 self.quantity,
+                prices,
                 'buy'
             )
-            
+            logger.info("Lighter_result.success:", lighter_result.success)
             if not lighter_result.success:
                 logger.error(f"❌ Lighter 开多失败: {lighter_result.error_message}")
                 # TODO: 回滚 Extended 订单
@@ -584,9 +651,10 @@ class HedgeMonitor:
             
             # Extended 平空 (买入)
             logger.info(f"📥 Extended 平空 {self.quantity}...")
-            ext_result = await self.extended_client.place_market_order(
-                self.extended_client.config.contract_id,
+            ext_result = await self.place_extended_market_order(
+                self.extended_contract_id,
                 self.quantity,
+                prices,
                 'buy'
             )
             
@@ -599,9 +667,10 @@ class HedgeMonitor:
             
             # Lighter 平多 (卖出)
             logger.info(f"📤 Lighter 平多 {self.quantity}...")
-            lighter_result = await self.lighter_client.place_market_order(
+            lighter_result = await self.place_lighter_market_order(
                 self.lighter_client.config.contract_id,
                 self.quantity,
+                prices,
                 'sell'
             )
             
@@ -638,12 +707,209 @@ class HedgeMonitor:
             import traceback
             traceback.print_exc()
             return False
-    
+
+    async def place_extended_market_order(self, contract_id: str, quantity: Decimal, prices: Dict, side: str) -> OrderResult:
+        """下市价单"""
+        # BUY or SELL
+        side = side.upper()
+        # 或者可以加减tick_size
+        order_price = prices['ext_ask'] if side == 'BUY' else prices['ext_bid']
+        # rounded_price = self.round_to_tick(order_price)
+        if side == 'BUY':
+            order_price = Decimal(str(prices['ext_ask']))
+        else:
+            order_price = Decimal(str(prices['ext_bid']))
+        
+        logger.info(
+            f"📤 Extended 下单:\n"
+            f"   合约: {contract_id}\n"
+            f"   方向: {side}\n"
+            f"   数量: {quantity}\n"
+            f"   价格: {order_price}"
+        )
+        try:
+            order_result = await self.extended_client.perpetual_trading_client.place_order(
+                market_name=contract_id,
+                amount_of_synthetic=quantity,
+                price=order_price,
+                side=OrderSide.BUY if side == 'BUY' else OrderSide.SELL,
+                time_in_force=TimeInForce.IOC,
+                post_only=False,  # Ensure TAKER orders
+            )
+
+            if not order_result or not order_result.data or order_result.status != 'OK':
+                error_msg = getattr(order_result, 'message', 'Unknown error')
+                logger.error(f"❌ 下单失败: {error_msg}")
+                return OrderResult(success=False, error_message=f'Failed to place order: {error_msg}')
+
+            # Extract order ID from response
+            order_id = order_result.data.id
+
+            if not order_id:
+                return OrderResult(success=False, error_message='No order ID in response')
+            logger.info(f"🚀 订单已发送: order_id={order_id}")
+
+            # Check order status after a short delay to see if it was rejected
+            await asyncio.sleep(0.01)
+
+            order_info = await self.extended_client.get_order_info(order_id)
+            if not order_info:
+                # 无法获取订单信息，假设成功
+                logger.warning(f"⚠️ 无法获取订单状态，假设已成交")
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    side=side,
+                    size=quantity,
+                    price=order_price,
+                    status='ASSUMED_FILLED'
+                )
+            # ✅ 检查订单状态（统一使用字符串比较）
+            status = str(order_info.status).upper()
+        
+            
+            if status in ['CANCELED', 'REJECTED']:
+                    return OrderResult(success=False, error_message=f'Order rejected or canceled: {status}')
+            if status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED']:
+                    # Order successfully placed
+                    return OrderResult(
+                        success=True,
+                        order_id=order_id,
+                        side=side,
+                        size=quantity,
+                        price=order_price,
+                        status=status
+                    )
+            return OrderResult(success=False, error_message=f'Unknown order status: {status}')
+        except Exception as e:
+            logger.error(f"下单失败: {e}")
+            return OrderResult({
+                'success': False,
+                'error_message': str(e)
+            })
+
+    async def place_lighter_market_order(self, contract_id: str, quantity: Decimal, prices: Dict, side: str) -> OrderResult:
+        """下市价单"""
+        side_upper = side.upper()
+        
+        # 计算订单价格
+        if side_upper == 'BUY':
+            order_price = Decimal(str(prices['lighter_ask']))
+        else:
+            order_price = Decimal(str(prices['lighter_bid']))
+        
+        logger.info(
+            f"📤 Lighter 下单:\n"
+            f"   市场: {contract_id}\n"
+            f"   方向: {side_upper}\n"
+            f"   数量: {quantity}\n"
+            f"   价格: {order_price}"
+        )
+        # ✅ 验证必要属性
+        if not hasattr(self.lighter_client, 'base_amount_multiplier'):
+            logger.error("❌ lighter_client 缺少 base_amount_multiplier")
+            return OrderResult(
+                success=False,
+                error_message='lighter_client.base_amount_multiplier not initialized'
+            )
+        
+        if not hasattr(self.lighter_client, 'price_multiplier'):
+            logger.error("❌ lighter_client 缺少 price_multiplier")
+            return OrderResult(
+                success=False,
+                error_message='lighter_client.price_multiplier not initialized'
+            )
+        
+        if not hasattr(self.lighter_client, 'lighter_client'):
+            logger.error("❌ lighter_client 缺少 lighter_client (SignerClient)")
+            return OrderResult(
+                success=False,
+                error_message='lighter_client.lighter_client not initialized'
+            )
+        
+        # ✅ 确保 contract_id 是整数
+        try:
+            market_index = int(contract_id)
+        except (ValueError, TypeError):
+            logger.error(f"❌ 无效的 market_index: {contract_id}")
+            return OrderResult(
+                success=False,
+                error_message=f'Invalid market_index: {contract_id}'
+            )
+        
+        order_params = {
+            'market_index': market_index,
+            'client_order_index': int(time.time() * 1000) % 1000000,
+            'base_amount': int(quantity * self.lighter_client.base_amount_multiplier),  # assuming 6 decimals
+            'price': int(order_price * self.lighter_client.price_multiplier),  # assuming 2 decimals
+            'is_ask': side_upper == 'SELL',
+            'order_type': self.lighter_client.lighter_client.ORDER_TYPE_LIMIT,
+            'time_in_force': self.lighter_client.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            'reduce_only': False,
+            'trigger_price': 0,
+        }
+
+        logger.info(
+            f"📋 Lighter 订单参数:\n"
+            f"   market_index: {order_params['market_index']}\n"
+            f"   client_order_index: {order_params['client_order_index']}\n"
+            f"   base_amount: {order_params['base_amount']}\n"
+            f"   price: {order_params['price']}\n"
+            f"   is_ask: {order_params['is_ask']}\n"
+            f"   order_type: {order_params['order_type']}\n"
+            f"   time_in_force: {order_params['time_in_force']}"
+        )
+        try:
+            tx_info, error = self.lighter_client.lighter_client.sign_create_order(
+                **order_params
+            )
+            if error is not None:
+                raise Exception(f"Sign error: {error}")
+
+            # Prepare the form data
+            tx_hash = await self.lighter_client.lighter_client.send_tx(
+                tx_type=self.lighter_client.lighter_client.TX_TYPE_CREATE_ORDER,
+                tx_info=tx_info
+            )
+            logger.info(f"🚀 Lighter limit order sent: {side_upper} {quantity}")
+            # timestamp2 = time.perf_counter()
+            # self.logger.info(f"⏱️ Lighter order placement time: {(timestamp2 - timestamp1) * 1000:.2f} ms")
+            # await self.monitor_lighter_order(client_order_index)
+            # logger.info(f"🚀 订单已发送，等待结果...{order_result}")
+             # ✅ 处理返回结果
+            if tx_hash is None:
+                logger.error("❌ _submit_order_with_retry 返回 None")
+                return OrderResult(
+                    success=False,
+                    error_message='Order submission returned None'
+                )
+            # order_result = await self.lighter_client.lighter_client.(
+            #     market_index=market_index,
+            #     client_order_index=order_params['client_order_index']
+            # )
+            # if isinstance(order_result, OrderResult):
+            #     return order_result # 直接返回 OrderResult
+            else:
+                logger.error(f"🚀 订单已发送: tx_hash={tx_hash}")
+                return OrderResult(
+                    success=True,
+                    order_id=tx_hash,
+                    side=side_upper,
+                    size=quantity,
+                    price=order_price,
+                    status='SUBMITTED'
+                )
+        except Exception as e:
+            logger.error(f"下单失败: {e}")
+            return OrderResult({
+                'success': False,
+                'error_message': str(e)
+            })
+
     async def _send_open_notification(self, prices: Dict, spread_pct: float):
         """发送开仓通知"""
         if not self.lark_bot:
             return
-        
         try:
             msg = (
                 f"🔓 开仓通知（extended卖 lighter买）\n"
@@ -652,17 +918,17 @@ class HedgeMonitor:
                 f"数量: {self.quantity}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"Extended:\n"
-                # f"  开空价格: ${self.position.ext_entry_price:.2f}\n"
+                f"  开空价格: ${self.position.ext_entry_price:.2f}\n"
                 f"  Bid: ${prices['ext_bid']:.2f}\n"
                 f"  Bid Size: {prices['ext_bid_size']}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"Lighter:\n"
-                # f"  开多价格: ${self.position.lighter_entry_price:.2f}\n"
+                f"  开多价格: ${self.position.lighter_entry_price:.2f}\n"
                 f"  Ask: ${prices['lighter_ask']:.2f}\n"
                 f"  Ask Size: {prices['lighter_ask_size']}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"价差: {spread_pct:.4f}%\n"
-                # f"时间: {self.position.open_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"时间: {self.position.open_time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
             await self.lark_bot.send_text(msg)
             logger.info("📨 开仓通知已发送")
@@ -682,8 +948,8 @@ class HedgeMonitor:
             return
         
         try:
-            # duration = datetime.now() - self.position.open_time
-            # duration_str = str(duration).split('.')[0]  # 去掉微秒
+            duration = datetime.now() - self.position.open_time
+            duration_str = str(duration).split('.')[0]  # 去掉微秒
             
             pnl_emoji = "📈" if total_pnl > 0 else "📉"
             
@@ -692,25 +958,25 @@ class HedgeMonitor:
                 f"━━━━━━━━━━━━━━━\n"
                 f"币种: {self.symbol}\n"
                 f"数量: {self.quantity}\n"
-                # f"持仓时长: {duration_str}\n"
+                f"持仓时长: {duration_str}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"Extended:\n"
-                # f"  开仓: ${self.position.ext_entry_price:.2f}\n"
-                # f"  平仓: ${ext_close_price:.2f}\n"
+                f"  开仓: ${self.position.ext_entry_price:.2f}\n"
+                f"  平仓: ${ext_close_price:.2f}\n"
                 f"  ext Ask: ${prices['ext_ask']:.2f}\n"
                 f"  ext Ask Size: {prices['ext_ask_size']}\n"
-                # f"  盈亏: ${(self.position.ext_entry_price - ext_close_price) * self.quantity:.2f}\n"
+                f"  盈亏: ${(self.position.ext_entry_price - ext_close_price) * self.quantity:.2f}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"Lighter:\n"
-                # f"  开仓: ${self.position.lighter_entry_price:.2f}\n"
-                # f"  平仓: ${lighter_close_price:.2f}\n"
+                f"  开仓: ${self.position.lighter_entry_price:.2f}\n"
+                f"  平仓: ${lighter_close_price:.2f}\n"
                 f"  lighter Bid: ${prices['lighter_bid']:.2f}\n"
                 f"  lighter Bid Size: {prices['lighter_bid_size']}\n"
-                # f"  盈亏: ${(lighter_close_price - self.position.lighter_entry_price) * self.quantity:.2f}\n"
+                f"  盈亏: ${(lighter_close_price - self.position.lighter_entry_price) * self.quantity:.2f}\n"
                 f"━━━━━━━━━━━━━━━\n"
-                # f"{pnl_emoji} 总盈亏: ${total_pnl:.2f}\n"
+                f"{pnl_emoji} 总盈亏: ${total_pnl:.2f}\n"
                 f"平仓价差: {spread_pct:.4f}%\n"
-                # f"开仓价差: {self.position.open_spread_pct:.4f}%"
+                f"开仓价差: {self.position.open_spread_pct:.4f}%"
             )
             await self.lark_bot.send_text(msg)
             logger.info("📨 平仓通知已发送")
@@ -735,16 +1001,26 @@ class HedgeMonitor:
                         await asyncio.sleep(self.check_interval)
                         continue
                     
-                    spread_value, spread_pct = self.calculate_spread(prices)
+                    spread_value, spread_pct = self.calculate_spread_open(prices)
+                    spread_value_close, spread_pct_close = self.calculate_spread_close(prices)
                     
                     # 显示当前状态
                     status = "🟢 持仓中" if self.position else "🔵 空仓"
-                    logger.info(
-                        f"{status} | "
-                        f"ExtBid: ${prices['ext_bid']:.2f} | "
-                        f"LgtAsk: ${prices['lighter_ask']:.2f} | "
-                        f"价差: {spread_pct:.4f}%"
-                    )
+                    if self.position:
+                        logger.info(
+                            f"{status} | "
+                            f"LgtBid: ${prices['lighter_bid']:.2f} | "
+                            f"ExtAsk: ${prices['ext_ask']:.2f} | "
+                            f"开仓价差: {self.position.open_spread_pct:.4f}% | "
+                            f"当前价差: {spread_pct_close:.4f}%"
+                        )
+                    else:
+                        logger.info(
+                            f"{status} | "
+                            f"ExtBid: ${prices['ext_bid']:.2f} | "
+                            f"LgtAsk: ${prices['lighter_ask']:.2f} | "
+                            f"价差: {spread_pct:.4f}%"
+                        )
                     
                     # 检查开仓信号
                     if not self.position and spread_pct > self.open_threshold_pct:
@@ -754,27 +1030,34 @@ class HedgeMonitor:
                         ))
                         if self.check_depth(prices) and self.buy_notified is False:
                             logger.info(f"🚨 检测到开仓信号！价差 {spread_pct:.4f}% > {self.open_threshold_pct}%")
-                            # await self.open_position(prices, spread_pct)
+                            # 增加一个标志位，如果开仓失败等待下一次机会
+                            res = await self.open_position(prices, spread_pct)
                             await self._send_open_notification(prices, spread_pct)
-                            self.buy_notified = True
-                            self.sell_notified = False
+                            if res:
+                                self.buy_notified = True
+                                self.sell_notified = False
 
                     
                     # 检查平仓信号
-                    elif not self.position and spread_pct < self.close_threshold_pct and self.sell_notified is False and self.buy_notified is True:
-                        logger.info(f"🚨 检测到平仓信号！价差 {spread_pct:.4f}% < {self.close_threshold_pct}%")
-                        # await self.close_position(prices, spread_pct)
-                        # ext_pnl = (self.position.ext_entry_price - ext_close_price) * self.quantity
-                        # lighter_pnl = (lighter_close_price - self.position.lighter_entry_price) * self.quantity
-                        # total_pnl = ext_pnl + lighter_pnl
-                        await self._send_close_notification(
-                            prices, spread_pct,
-                            ext_close_price=Decimal(prices['ext_ask']),
-                            lighter_close_price=Decimal(prices['lighter_bid']),
-                            total_pnl=Decimal('0')
-                        )
-                        self.sell_notified = True
-                        self.buy_notified = False
+                    elif self.position and spread_pct_close > self.close_threshold_pct and self.sell_notified is False and self.buy_notified is True:
+                        logger.info(f"🚨 检测到平仓信号！价差 {spread_pct_close:.4f}% > {self.close_threshold_pct}%")
+                        res = await self.close_position(prices, spread_pct)
+                        if res:
+                            self.sell_notified = True
+                            self.buy_notified = False
+                            ext_close_price = Decimal(prices['ext_ask'])
+                            lighter_close_price = Decimal(prices['lighter_bid'])
+                            ext_pnl = (self.position.ext_entry_price - ext_close_price) * self.quantity
+                            lighter_pnl = (lighter_close_price - self.position.lighter_entry_price) * self.quantity
+                            total_pnl = ext_pnl + lighter_pnl
+                            await self._send_close_notification(
+                                prices, spread_pct,
+                                ext_close_price=ext_close_price,
+                                lighter_close_price=lighter_close_price,
+                                total_pnl=total_pnl
+                            )
+                        # self.sell_notified = True
+                        # self.buy_notified = False
                 
                 except Exception as e:
                     logger.error(f"监控循环错误: {e}")
@@ -851,7 +1134,7 @@ async def main():
     parser.add_argument('--quantity', '-q', type=str, required=True,
                        help='开仓数量 (如 0.01)')
     parser.add_argument('--open-threshold', type=float, default=0.05,
-                       help='开仓阈值百分比 (默认 0.05%%)')
+                       help='开仓阈值百分比 (默认 0.06%%)')
     parser.add_argument('--close-threshold', type=float, default=0.0,
                        help='平仓阈值百分比 (默认 0.0%%)')
     parser.add_argument('--check-interval', type=float, default=1.0,

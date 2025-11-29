@@ -289,6 +289,7 @@ async def main():
     open_threshold = args.open_threshold if args.open_threshold is not None else config.open_threshold
     close_threshold = args.close_threshold if args.close_threshold is not None else config.close_threshold
     monitor_only = args.monitor_only  # ✅ 获取 monitor_only 参数
+    min_depth_quantity = config.min_depth_quantity if hasattr(config, 'min_depth_quantity') else Decimal('0')
     
     logger.info(
         f"\n"
@@ -302,6 +303,7 @@ async def main():
         f"  数量:         {quantity}\n"
         f"  开仓阈值:     {open_threshold}%\n"
         f"  平仓阈值:     {close_threshold}%\n"
+        f"  最小深度:     {min_depth_quantity}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"{'='*60}\n"
     )
@@ -367,7 +369,8 @@ async def main():
         exchange_b=exchange_b,
         lark_bot=lark_bot,
         monitor_only=monitor_only,  # ✅ 传递 monitor_only 参数
-        trade_logger=trade_logger  # ✅ 传递交易日志记录器
+        trade_logger=trade_logger,  # ✅ 传递交易日志记录器
+        min_depth_quantity=min_depth_quantity  # ✅ 传递最小深度数量
     )
     logger.info("✅ 策略创建成功\n")
 

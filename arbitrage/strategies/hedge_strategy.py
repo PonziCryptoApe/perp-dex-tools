@@ -29,6 +29,7 @@ class HedgeStrategy(BaseStrategy):
         monitor_only: bool = False,
         trade_logger=None,
         max_signal_delay_ms: int = 150,
+        min_depth_quantity: Decimal = Decimal('0.01')
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -45,6 +46,7 @@ class HedgeStrategy(BaseStrategy):
         self.max_signal_delay_ms = max_signal_delay_ms
         self.max_signal_delay_ms_a = 200
         self.max_signal_delay_ms_b = 60
+        self.min_depth_quantity = min_depth_quantity
 
         # ✅ 使用 PositionManagerService 管理持仓
         self.position_manager = PositionManagerService(trade_logger=trade_logger)
@@ -193,18 +195,61 @@ class HedgeStrategy(BaseStrategy):
                     f"   数量: {self.quantity}"
                 )
                 return  # ✅ 丢弃该信号
-            else:
-                logger.info(
-                    f"🔔 检测到开仓信号:\n"
-                    f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
-                    f"   {self.exchange_a.exchange_name}_bid_size: {prices.exchange_a_bid_size}\n"
-                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
-                    f"   {self.exchange_b.exchange_name}_ask_size: {prices.exchange_b_ask_size}\n"
-                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
-                    f"   数量: {self.quantity}"
+            # ========== ✅ 新增：检查深度 ==========
+            # Exchange A: 卖出（使用买一深度）
+            depth_a = prices.exchange_a_bid_size
+            # Exchange B: 买入（使用卖一深度）
+            depth_b = prices.exchange_b_ask_size
+            
+            # ✅ 取最小深度
+            min_depth = min(depth_a, depth_b)
+            
+            # ✅ 检查最小深度阈值
+            if min_depth < self.min_depth_quantity:
+                logger.warning(
+                    f"⚠️ 深度不足，跳过开仓:\n"
+                    f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
+                    f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
+                    f"   最小深度: {min_depth} < 阈值: {self.min_depth_quantity}\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)"
                 )
+                return
+            
+            # ✅ 动态调整数量（取配置数量和深度的最小值）
+            actual_quantity = min(self.quantity, depth_a, depth_b)
+            
+            # ✅ 如果调整后数量小于最小阈值，跳过
+            if actual_quantity < self.min_depth_quantity:
+                logger.warning(
+                    f"⚠️ 调整后数量不足，跳过开仓:\n"
+                    f"   配置数量: {self.quantity}\n"
+                    f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
+                    f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
+                    f"   调整后数量: {actual_quantity} < 阈值: {self.min_depth_quantity}"
+                )
+                return
+            
+            # ✅ 如果数量被调整，记录日志
+            if actual_quantity < self.quantity:
+                logger.info(
+                    f"💡 根据深度调整下单数量:\n"
+                    f"   配置数量: {self.quantity}\n"
+                    f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
+                    f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
+                    f"   实际数量: {actual_quantity} (调整: {((actual_quantity - self.quantity) / self.quantity * 100):+.2f}%)"
+                )
+            
+            logger.info(
+                f"🔔 检测到开仓信号:\n"
+                f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
+                f"   {self.exchange_a.exchange_name}_bid_size: {prices.exchange_a_bid_size}\n"
+                f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
+                f"   {self.exchange_b.exchange_name}_ask_size: {prices.exchange_b_ask_size}\n"
+                f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                f"   数量: {actual_quantity}"
+            )
 
             self.open_signal_count += 1
 
@@ -215,7 +260,7 @@ class HedgeStrategy(BaseStrategy):
                 # ✅ 创建虚拟持仓（用于模拟）
                 virtual_position = Position(
                     symbol=self.symbol,
-                    quantity=self.quantity,
+                    quantity=actual_quantity,
                     exchange_a_name=self.exchange_a.exchange_name,
                     exchange_b_name=self.exchange_b.exchange_name,
                     exchange_a_signal_entry_price=prices.exchange_a_bid,
@@ -250,7 +295,8 @@ class HedgeStrategy(BaseStrategy):
                         spread_pct=spread_pct,
                         exchange_a_quote_id=prices.exchange_a_quote_id,
                         exchange_b_quote_id=prices.exchange_b_quote_id,
-                        signal_trigger_time=signal_trigger_time
+                        signal_trigger_time=signal_trigger_time,
+                        actual_quantity=actual_quantity
                     )
                     
                     if success:
@@ -320,6 +366,44 @@ class HedgeStrategy(BaseStrategy):
                     f"   持仓时长: {position.get_holding_duration()}"
                 )
                 return  # ✅ 丢弃该信号
+            # ========== ✅ 新增：检查平仓深度 ==========
+            # Exchange A: 买入平空（使用卖一深度）
+            depth_a = prices.exchange_a_ask_size
+            # Exchange B: 卖出平多（使用买一深度）
+            depth_b = prices.exchange_b_bid_size
+            
+            # ✅ 取最小深度
+            min_depth = min(depth_a, depth_b)
+            
+            # ✅ 检查深度是否足够（必须 >= 持仓数量）
+            if min_depth < position.quantity:
+                pnl_pct = position.calculate_pnl_pct(
+                    exchange_a_price=prices.exchange_a_ask,
+                    exchange_b_price=prices.exchange_b_bid
+                )
+                
+                logger.warning(
+                    f"⚠️ 平仓深度不足，跳过:\n"
+                    f"   {self.exchange_a.exchange_name} 卖一深度: {depth_a}\n"
+                    f"   {self.exchange_b.exchange_name} 买一深度: {depth_b}\n"
+                    f"   最小深度: {min_depth} < 持仓数量: {position.quantity}\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)\n"
+                    f"   当前盈亏: {pnl_pct:.4f}%\n"
+                    f"   持仓时长: {position.get_holding_duration()}\n"
+                    f"   💡 等待更好的流动性..."
+                )
+                return
+            
+            # ✅ 如果深度远大于持仓数量，记录日志
+            if min_depth >= position.quantity * Decimal('2.0'):
+                logger.info(
+                    f"💡 平仓深度充足:\n"
+                    f"   {self.exchange_a.exchange_name} 卖一深度: {depth_a}\n"
+                    f"   {self.exchange_b.exchange_name} 买一深度: {depth_b}\n"
+                    f"   持仓数量: {position.quantity}\n"
+                    f"   深度/持仓: {(min_depth / position.quantity):.2f}x"
+                )
+        
             self.close_signal_count += 1
 
             # 计算当前盈亏

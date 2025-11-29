@@ -39,6 +39,8 @@ pairs:
     quantity: "0.01"
     open_threshold: 0.11
     close_threshold: -0.03
+    min_depth_quantity: "0.001"  # ✅ 新增：最小深度阈值（可选）
+
     
     # ✅ Variational 特殊配置
     variational_config:
@@ -53,6 +55,7 @@ pairs:
     quantity: "0.0001"
     open_threshold: 0.08
     close_threshold: 0
+    min_depth_quantity: "0.00005"  # ✅ 新增：最小深度阈值（可选）
     
     # ✅ Variational 特殊配置
     variational_config:
@@ -67,6 +70,7 @@ pairs:
     quantity: "0.1"
     open_threshold: 0.1
     close_threshold: -0.1
+    min_depth_quantity: "0.05"  # ✅ 新增：最小深度阈值（可选）
     
     # ✅ Variational 特殊配置
     variational_config:
