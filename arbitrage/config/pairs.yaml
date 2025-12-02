@@ -44,7 +44,7 @@ pairs:
     
     # ✅ Variational 特殊配置
     variational_config:
-      polling_interval: 0.6   # 订单簿轮询间隔（秒）
+      polling_interval: 0.3   # 订单簿轮询间隔（秒）
       query_quantity: 0.05     # 查询数量（可选，默认使用上面的 quantity）
 
   extended_variational_btc:
@@ -59,7 +59,7 @@ pairs:
     
     # ✅ Variational 特殊配置
     variational_config:
-      polling_interval: 0.6   # 订单簿轮询间隔（秒）
+      polling_interval: 0.3   # 订单簿轮询间隔（秒）
       query_quantity: 0.01     # 查询数量（可选，默认使用上面的 quantity）
   
   extended_variational_hype:
@@ -67,12 +67,12 @@ pairs:
     symbol: HYPE
     exchange_a: extended
     exchange_b: variational
-    quantity: "0.1"
-    open_threshold: 0.1
-    close_threshold: -0.1
+    quantity: "0.3"
+    open_threshold: 0.07
+    close_threshold: -0.03
     min_depth_quantity: "0.05"  # ✅ 新增：最小深度阈值（可选）
     
     # ✅ Variational 特殊配置
     variational_config:
       polling_interval: 0.6   # 订单簿轮询间隔（秒）
-      query_quantity: 1       # 查询数量（可选，默认使用上面的 quantity）
+      query_quantity: 0.3       # 查询数量（可选，默认使用上面的 quantity）

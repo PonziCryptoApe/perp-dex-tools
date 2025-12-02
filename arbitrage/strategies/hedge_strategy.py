@@ -82,6 +82,28 @@ class HedgeStrategy(BaseStrategy):
         self._last_open_time = 0
         self._last_close_time = 0
         self._cooldown_seconds = 5  # 开仓/平仓后冷却 5 秒
+
+        self.signal_stats = {
+            # 开仓信号统计
+            'open': {
+                'total': 0,              # 总信号数（满足阈值）
+                'delay_filtered': 0,     # 因延迟过滤
+                'depth_insufficient': 0, # 因深度不足跳过
+                'depth_adjusted': 0,     # 因深度调整数量
+                'executed': 0            # 实际执行
+            },
+            # 平仓信号统计
+            'close': {
+                'total': 0,
+                'delay_filtered': 0,
+                'depth_insufficient': 0,
+                'executed': 0
+            }
+        }
+        # ✅ 定期输出统计（可选）
+        self._last_stats_log_time = 0
+        self._stats_log_interval = 60  # 每 60 秒输出一次统计
+        
         
         logger.info(
             f"🎯 策略配置:\n"
@@ -176,6 +198,7 @@ class HedgeStrategy(BaseStrategy):
         
         # 判断是否满足开仓阈值
         if spread_pct >= Decimal(str(self.open_threshold_pct)):
+            self.signal_stats['open']['total'] += 1
             # 记录信号触发时间
             signal_trigger_time = time.time()
             signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
@@ -183,6 +206,8 @@ class HedgeStrategy(BaseStrategy):
         
             # ✅ 过滤延迟过大的信号
             if signal_delay_ms_a > self.max_signal_delay_ms or signal_delay_ms_b > self.max_signal_delay_ms:
+                self.signal_stats['open']['delay_filtered'] += 1
+
                 logger.warning(
                     f"⚠️ 开仓信号延迟过大，已过滤:\n"
                     f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
@@ -206,6 +231,8 @@ class HedgeStrategy(BaseStrategy):
             
             # ✅ 检查最小深度阈值
             if min_depth < self.min_depth_quantity:
+                self.signal_stats['open']['depth_insufficient'] += 1
+
                 logger.warning(
                     f"⚠️ 深度不足，跳过开仓:\n"
                     f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
@@ -220,6 +247,8 @@ class HedgeStrategy(BaseStrategy):
             
             # ✅ 如果调整后数量小于最小阈值，跳过
             if actual_quantity < self.min_depth_quantity:
+                self.signal_stats['open']['depth_insufficient'] += 1
+
                 logger.warning(
                     f"⚠️ 调整后数量不足，跳过开仓:\n"
                     f"   配置数量: {self.quantity}\n"
@@ -231,6 +260,8 @@ class HedgeStrategy(BaseStrategy):
             
             # ✅ 如果数量被调整，记录日志
             if actual_quantity < self.quantity:
+                self.signal_stats['open']['depth_adjusted'] += 1
+
                 logger.info(
                     f"💡 根据深度调整下单数量:\n"
                     f"   配置数量: {self.quantity}\n"
@@ -238,6 +269,7 @@ class HedgeStrategy(BaseStrategy):
                     f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
                     f"   实际数量: {actual_quantity} (调整: {((actual_quantity - self.quantity) / self.quantity * 100):+.2f}%)"
                 )
+                return
             
             logger.info(
                 f"🔔 检测到开仓信号:\n"
@@ -256,7 +288,8 @@ class HedgeStrategy(BaseStrategy):
             # ✅ 检查是否为监控模式
             if self.monitor_only:
                 # logger.info("📊 监控模式：不执行开仓，创建虚拟持仓以监控平仓信号")
-                
+                self.signal_stats['open']['executed'] += 1
+
                 # ✅ 创建虚拟持仓（用于模拟）
                 virtual_position = Position(
                     symbol=self.symbol,
@@ -300,9 +333,15 @@ class HedgeStrategy(BaseStrategy):
                     )
                     
                     if success:
+                        self.signal_stats['open']['executed'] += 1
+
                         self.position_manager.set_position(position)
                         self._last_open_time = time.time()
-                        logger.info(f"✅ 开仓成功: {position}，等待平仓...")
+                        logger.info(
+                            f"✅ 开仓成功: {position}\n"
+                            f"📊 统计: {self._format_open_stats()}"  # ✅ 新增
+                        )
+                        # logger.info(f"✅ 开仓成功: {position}，等待平仓...")
                         # 发送飞书通知
                         if self.lark_bot:
                             await self._send_open_notification(position, prices)
@@ -316,6 +355,7 @@ class HedgeStrategy(BaseStrategy):
                             self.last_log_time = current_time
                 finally:
                     self._is_executing = False
+            self._log_stats_if_needed()
 
     async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal, price_update_time_a: float, price_update_time_b: float):
         """
@@ -337,6 +377,8 @@ class HedgeStrategy(BaseStrategy):
 
         # 判断是否满足平仓阈值
         if spread_pct >= Decimal(str(self.close_threshold_pct)):
+            self.signal_stats['close']['total'] += 1
+
             # 记录信号触发时间
             signal_trigger_time = time.time()
 
@@ -346,6 +388,8 @@ class HedgeStrategy(BaseStrategy):
 
             # ✅ 过滤延迟过大的信号
             if signal_delay_ms_a > self.max_signal_delay_ms or signal_delay_ms_b > self.max_signal_delay_ms:
+                self.signal_stats['close']['delay_filtered'] += 1
+
                 # 计算当前盈亏（仅用于日志）
                 pnl_pct = position.calculate_pnl_pct(
                     exchange_a_price=prices.exchange_a_ask,
@@ -377,6 +421,8 @@ class HedgeStrategy(BaseStrategy):
             
             # ✅ 检查深度是否足够（必须 >= 持仓数量）
             if min_depth < position.quantity:
+                self.signal_stats['close']['depth_insufficient'] += 1
+
                 pnl_pct = position.calculate_pnl_pct(
                     exchange_a_price=prices.exchange_a_ask,
                     exchange_b_price=prices.exchange_b_bid
@@ -432,6 +478,8 @@ class HedgeStrategy(BaseStrategy):
             
             # ✅ 检查是否为监控模式
             if self.monitor_only:
+                self.signal_stats['close']['executed'] += 1
+
                 self.position_manager.close_position(
                     exchange_a_exit_price=prices.exchange_a_ask,
                     exchange_b_exit_price=prices.exchange_b_bid
@@ -463,8 +511,12 @@ class HedgeStrategy(BaseStrategy):
                     )
                     
                     if success:
-                        logger.info(f"✅ 平仓成功，切换到开仓监控模式")
+                        self.signal_stats['close']['executed'] += 1
 
+                        logger.info(
+                            f"✅ 平仓成功，切换到开仓监控模式\n"
+                            f"📊 统计: {self._format_close_stats()}"  # ✅ 新增
+                        )
                         self.position_manager.position = updated_position
 
                         # ✅ 记录实际平仓到 CSV
@@ -487,6 +539,7 @@ class HedgeStrategy(BaseStrategy):
                             self.last_log_time = current_time
                 finally:
                     self._is_executing = False
+            self._log_stats_if_needed()
     
     async def _send_open_notification(self, position: Position, prices: PriceSnapshot):
         """发送开仓通知"""
@@ -534,3 +587,81 @@ class HedgeStrategy(BaseStrategy):
             await self.lark_bot.send_text(message)
         except Exception as e:
             logger.error(f"发送飞书通知失败: {e}")
+    def _format_open_stats(self) -> str:
+        """格式化开仓统计信息"""
+        stats = self.signal_stats['open']
+        total = stats['total']
+        
+        if total == 0:
+            return "无数据"
+        
+        # 计算比例
+        delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
+        depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
+        adjusted_pct = (stats['depth_adjusted'] / total * 100) if total > 0 else 0
+        exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
+        
+        return (
+            f"总信号 {total} | "
+            f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
+            f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
+            f"数量调整 {stats['depth_adjusted']} ({adjusted_pct:.1f}%) | "
+            f"执行 {stats['executed']} ({exec_pct:.1f}%)"
+        )
+    
+    def _format_close_stats(self) -> str:
+        """格式化平仓统计信息"""
+        stats = self.signal_stats['close']
+        total = stats['total']
+        
+        if total == 0:
+            return "无数据"
+        
+        delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
+        depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
+        exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
+        
+        return (
+            f"总信号 {total} | "
+            f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
+            f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
+            f"执行 {stats['executed']} ({exec_pct:.1f}%)"
+        )
+    
+    def _log_stats_if_needed(self):
+        """定期输出统计信息"""
+        current_time = time.time()
+        
+        if current_time - self._last_stats_log_time >= self._stats_log_interval:
+            logger.info(
+                f"\n"
+                f"{'='*60}\n"
+                f"📊 策略统计报告\n"
+                f"{'='*60}\n"
+                f"🟢 开仓信号:\n"
+                f"   {self._format_open_stats()}\n"
+                f"\n"
+                f"🔴 平仓信号:\n"
+                f"   {self._format_close_stats()}\n"
+                f"{'='*60}"
+            )
+            self._last_stats_log_time = current_time
+    
+    def get_stats_summary(self) -> dict:
+        """获取统计摘要（用于外部调用）"""
+        return {
+            'open': {
+                **self.signal_stats['open'],
+                'success_rate': (
+                    self.signal_stats['open']['executed'] / self.signal_stats['open']['total'] * 100
+                    if self.signal_stats['open']['total'] > 0 else 0
+                )
+            },
+            'close': {
+                **self.signal_stats['close'],
+                'success_rate': (
+                    self.signal_stats['close']['executed'] / self.signal_stats['close']['total'] * 100
+                    if self.signal_stats['close']['total'] > 0 else 0
+                )
+            }
+        }

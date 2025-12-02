@@ -48,7 +48,7 @@ class OrderExecutor:
         )
 
     
-    async def _balance_positions(
+    async def _balance_positions_1(
         self,
         target_quantity: Decimal,
         filled_qty_a: Decimal,
@@ -224,6 +224,117 @@ class OrderExecutor:
         
         return balanced_qty_a, balanced_qty_b
     
+    async def _balance_positions(
+        self,
+        target_quantity: Decimal,
+        filled_qty_a: Decimal,
+        filled_qty_b: Decimal,
+        side_a: str,
+        side_b: str,
+        price_a: Decimal,
+        price_b: Decimal,
+        operation_type: str,
+        order_a_id: Optional[str] = None,  # ✅ 新增：订单 ID
+        order_b_id: Optional[str] = None
+    ) -> Tuple[Decimal, Decimal]:
+        """
+        平衡仓位（简化版：容忍小误差，大误差全部平掉）
+        
+        Args:
+            target_quantity: 目标数量
+            filled_qty_a: Exchange A 实际成交量
+            filled_qty_b: Exchange B 实际成交量
+            side_a: Exchange A 方向
+            side_b: Exchange B 方向
+            price_a: Exchange A 价格
+            price_b: Exchange B 价格
+            operation_type: 操作类型
+            order_a_id: Exchange A 订单 ID
+            order_b_id: Exchange B 订单 ID
+        
+        Returns:
+            (最终 Exchange A 数量, 最终 Exchange B 数量)
+        """
+        # ✅ 1. 检查是否完全匹配
+        diff_a = target_quantity - filled_qty_a
+        diff_b = target_quantity - filled_qty_b
+        
+        if diff_a == 0 and diff_b == 0:
+            logger.info(f"✅ 仓位平衡，无需调整")
+            return filled_qty_a, filled_qty_b
+        
+        logger.warning(
+            f"⚠️ 检测到仓位不平衡:\n"
+            f"   目标数量: {target_quantity}\n"
+            f"   {self.exchange_a.exchange_name}: {filled_qty_a} (差异: {diff_a:+})\n"
+            f"   {self.exchange_b.exchange_name}: {filled_qty_b} (差异: {diff_b:+})"
+        )
+        
+        # ✅ 2. 计算最终差异
+        final_diff = filled_qty_a - filled_qty_b
+        
+        # ✅ 3. 设置容忍阈值
+        # tolerance = min(
+        #     target_quantity * Decimal('0.1'),  # 10% 目标数量
+        #     Decimal('0.1')  # 或固定 0.1（根据币种调整）
+        # )
+
+        tolerance = Decimal('0.01')  # ✅ 固定 0.01（更严格）
+
+        # ✅ 4. 策略 1️⃣：小误差 → 使用小数量
+        if abs(final_diff) <= tolerance:
+            final_quantity = min(filled_qty_a, filled_qty_b)
+            
+            logger.warning(
+                f"⚠️ 仓位差异在容忍范围内:\n"
+                f"   差异: {abs(final_diff)}\n"
+                f"   容忍阈值: {tolerance}\n"
+                f"   使用小数量: {final_quantity}\n"
+                f"   💡 自动平衡，不做额外处理"
+            )
+            
+            return final_quantity, final_quantity
+        
+        # ✅ 5. 策略 2️⃣：大误差 → 全部平掉
+        logger.error(
+            f"❌ 仓位差异超出容忍范围:\n"
+            f"   差异: {abs(final_diff)}\n"
+            f"   容忍阈值: {tolerance}\n"
+            f"   🚨 全部平掉，重新等待开仓机会"
+        )
+        
+        # ✅ 并行平掉两所
+        tasks = []
+        
+        if filled_qty_a > 0:
+            logger.warning(f"🔄 平掉 {self.exchange_a.exchange_name}: {filled_qty_a}")
+            tasks.append(
+                self._emergency_close_a(
+                    order_id=order_a_id,
+                    quantity=filled_qty_a
+                )
+            )
+        
+        if filled_qty_b > 0:
+            logger.warning(f"🔄 平掉 {self.exchange_b.exchange_name}: {filled_qty_b}")
+            tasks.append(
+                self._emergency_close_b(
+                    order_id=order_b_id,
+                    quantity=filled_qty_b
+                )
+            )
+        
+        # ✅ 并行执行平仓
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        
+        logger.info(
+            f"✅ 仓位已清空:\n"
+            f"   {self.exchange_a.exchange_name}: {filled_qty_a} → 0\n"
+            f"   {self.exchange_b.exchange_name}: {filled_qty_b} → 0"
+        )
+        
+        return Decimal('0'), Decimal('0')
     async def _retry_place_order(
         self,
         exchange: ExchangeAdapter,
@@ -637,7 +748,9 @@ class OrderExecutor:
                     side_b='buy',
                     price_a=exchange_a_price,
                     price_b=exchange_b_price,
-                    operation_type='open'
+                    operation_type='open',
+                    order_a_id=order_a_result.get('order_id'),  # ✅ 新增
+                    order_b_id=order_b_result.get('order_id')
                 )
                 
                 # ✅ 5. 使用平衡后的数量（取较小值）
@@ -645,6 +758,13 @@ class OrderExecutor:
                 
                 if final_quantity == 0:
                     logger.error("❌ 平衡后仓位为 0")
+                    return False, None
+                if balanced_qty_a == 0 and balanced_qty_b == 0:
+                    logger.error(
+                        "❌ 平仓不平衡且已清空:\n"
+                        f"   原因: 差异超出容忍范围，已执行紧急平仓\n"
+                        f"   建议: 手动检查两所账户余额"
+                    )
                     return False, None
                 
                 actual_price_a = order_a_result.get('filled_price', exchange_a_price)
@@ -959,7 +1079,9 @@ class OrderExecutor:
                     side_b='sell',
                     price_a=exchange_a_price,
                     price_b=exchange_b_price,
-                    operation_type='close'
+                    operation_type='close',
+                    order_a_id=order_a_result.get('order_id'),  # ✅ 新增
+                    order_b_id=order_b_result.get('order_id')  # ✅ 新增
                 )
                 actual_price_a = order_a_result.get('filled_price')
                 actual_price_b = order_b_result.get('filled_price')

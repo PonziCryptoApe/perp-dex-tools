@@ -4,7 +4,7 @@ import yaml
 from pathlib import Path
 from decimal import Decimal
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 @dataclass
 class PairConfig:
@@ -18,6 +18,7 @@ class PairConfig:
     open_threshold: float     # 开仓阈值（%）
     close_threshold: float    # 平仓阈值（%）
     min_depth_quantity: Decimal  # ✅ 新增：最小深度阈值
+    variational_config: Dict[str, Any]  # ✅ 新增：Variational 特定配置
 
 
 def load_pair_config(pair_id: str) -> PairConfig:
@@ -66,6 +67,9 @@ def load_pair_config(pair_id: str) -> PairConfig:
         # 默认为交易量的 10%，但最小为 0.001
         default_min_depth = max(quantity * Decimal('0.1'), Decimal('0.0001'))
         min_depth_quantity = default_min_depth
+
+    variational_config = pair_data.get('variational_config', {})
+
     return PairConfig(
         pair_id=pair_id,
         enabled=pair_data['enabled'],
@@ -75,7 +79,8 @@ def load_pair_config(pair_id: str) -> PairConfig:
         quantity=Decimal(str(pair_data['quantity'])),
         open_threshold=float(pair_data['open_threshold']),
         close_threshold=float(pair_data['close_threshold']),
-        min_depth_quantity=min_depth_quantity
+        min_depth_quantity=min_depth_quantity,
+        variational_config=variational_config
     )
 
 def list_all_pairs() -> list:

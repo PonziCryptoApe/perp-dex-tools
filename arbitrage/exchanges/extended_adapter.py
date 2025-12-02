@@ -363,9 +363,9 @@ class ExtendedAdapter(ExchangeAdapter):
             order_side = OrderSide.BUY if side.upper() == 'BUY' else OrderSide.SELL
             if retry_mode == 'aggressive':
                 if side.upper() == 'BUY':
-                    order_price = price * Decimal('0.9995')  # 确保买入
+                    order_price = price * Decimal('0.999')  # 确保买入
                 else:
-                    order_price = price * Decimal('1.0005')  # 确保卖出
+                    order_price = price * Decimal('1.001')  # 确保卖出
                 order_price = self.client.round_to_tick(order_price)
                 print(f"Adjusted order price for aggressive mode: {order_price}")
             else:
