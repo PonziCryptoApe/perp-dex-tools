@@ -551,8 +551,13 @@ class OrderExecutor:
             # ✅ Exchange A 开空（卖出）
             order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
 
-            success_a = order_a_result.get('success', False)
-            success_b = order_b_result.get('success', False)
+            # success_a = order_a_result.get('success', False)
+            # success_b = order_b_result.get('success', False)
+            success_a = order_a_result.get('success', False) or (
+                order_a_result.get('partial_fill', False)
+            )
+
+            success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
 
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
@@ -899,9 +904,11 @@ class OrderExecutor:
             # ✅ Exchange A 平空（买入）
             order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
 
-            success_a = order_a_result.get('success', False)
-            success_b = order_b_result.get('success', False)
-            
+            # success_a = order_a_result.get('success', False)
+            # success_b = order_b_result.get('success', False)
+            success_a = order_a_result.get('success', False) or order_a_result.get('partial_fill', False)
+            success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
+
             # ✅ 2. 根据结果处理
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
