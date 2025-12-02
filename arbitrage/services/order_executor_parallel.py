@@ -266,8 +266,8 @@ class OrderExecutor:
         logger.warning(
             f"⚠️ 检测到仓位不平衡:\n"
             f"   目标数量: {target_quantity}\n"
-            f"   {self.exchange_a.exchange_name}: {filled_qty_a} (差异: {diff_a:+})\n"
-            f"   {self.exchange_b.exchange_name}: {filled_qty_b} (差异: {diff_b:+})"
+            f"   {self.exchange_a.exchange_name}: {filled_qty_a} (差异: {diff_a})\n"
+            f"   {self.exchange_b.exchange_name}: {filled_qty_b} (差异: {diff_b})"
         )
         
         # ✅ 2. 计算最终差异
@@ -303,37 +303,200 @@ class OrderExecutor:
             f"   🚨 全部平掉，重新等待开仓机会"
         )
         
-        # ✅ 并行平掉两所
+        # ✅ 并行补单
         tasks = []
+        supplement_results = {'a': None, 'b': None}
+
+        # ✅ A 需要补单
+        if diff_a > tolerance:
+            logger.warning(
+                f"🔄 补单 {self.exchange_a.exchange_name}:\n"
+                f"   已成交: {filled_qty_a}\n"
+                f"   目标: {target_quantity}\n"
+                f"   需补单: {diff_a} ({side_a})"
+            )
+            
+            task_a = self._retry_place_order(
+                exchange=self.exchange_a,
+                order_type=operation_type,  # ✅ 使用相同操作类型
+                side=side_a,  # ✅ 使用相同方向
+                quantity=diff_a,  # ✅ 补单剩余数量
+                price=price_a,
+                retry_mode='aggressive',
+                max_retries=5
+            )
+            tasks.append(('a', task_a))
+        
+        # ✅ B 需要补单
+        if diff_b > tolerance:
+            logger.warning(
+                f"🔄 补单 {self.exchange_b.exchange_name}:\n"
+                f"   已成交: {filled_qty_b}\n"
+                f"   目标: {target_quantity}\n"
+                f"   需补单: {diff_b} ({side_b})"
+            )
+            
+            task_b = self._retry_place_order(
+                exchange=self.exchange_b,
+                order_type=operation_type,
+                side=side_b,
+                quantity=diff_b,
+                price=price_b,
+                retry_mode='aggressive',
+                max_retries=5
+            )
+            tasks.append(('b', task_b))
+        # ✅ 并行执行补单
+        if tasks:
+            results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
+        
+            for i, (exchange_key, _) in enumerate(tasks):
+                result = results[i]
+                
+                if isinstance(result, Exception):
+                    logger.error(f"❌ 补单异常 ({exchange_key}): {result}")
+                    continue
+                
+                supplement_results[exchange_key] = result
+                
+                if result.get('success'):
+                    supplement_qty = result.get('filled_quantity', Decimal('0'))
+                    
+                    if exchange_key == 'a':
+                        filled_qty_a += supplement_qty
+                        logger.info(
+                            f"✅ {self.exchange_a.exchange_name} 补单成功:\n"
+                            f"   补单: {supplement_qty}\n"
+                            f"   总计: {filled_qty_a} / {target_quantity}"
+                        )
+                    else:
+                        filled_qty_b += supplement_qty
+                        logger.info(
+                            f"✅ {self.exchange_b.exchange_name} 补单成功:\n"
+                            f"   补单: {supplement_qty}\n"
+                            f"   总计: {filled_qty_b} / {target_quantity}"
+                        )
+        
+        # ✅ 6. 检查补单后的结果
+        final_diff_after = filled_qty_a - filled_qty_b
+        
+        if abs(final_diff_after) <= tolerance:
+            logger.info(
+                f"✅ 补单后仓位平衡:\n"
+                f"   {self.exchange_a.exchange_name}: {filled_qty_a}\n"
+                f"   {self.exchange_b.exchange_name}: {filled_qty_b}\n"
+                f"   差异: {abs(final_diff_after)}"
+            )
+            
+            final_quantity = min(filled_qty_a, filled_qty_b)
+            return final_quantity, final_quantity
+        
+        # ✅ 7. 补单后仍不平衡 → 全部平掉
+        logger.error(
+            f"❌ 补单后仍不平衡:\n"
+            f"   {self.exchange_a.exchange_name}: {filled_qty_a}\n"
+            f"   {self.exchange_b.exchange_name}: {filled_qty_b}\n"
+            f"   差异: {abs(final_diff_after)}\n"
+            f"   🚨 全部平掉，重新等待机会"
+        )
+        
+        # ✅ 根据 operation_type 决定平仓方向
+        close_tasks = []
         
         if filled_qty_a > 0:
             logger.warning(f"🔄 平掉 {self.exchange_a.exchange_name}: {filled_qty_a}")
-            tasks.append(
-                self._emergency_close_a(
-                    order_id=order_a_id,
-                    quantity=filled_qty_a
+            
+            if operation_type == 'open':
+                # ✅ 开仓失败 → 平掉已开仓部分
+                # side_a = 'sell' (开空) → 需要 'buy' (平空)
+                close_side_a = 'buy' if side_a == 'sell' else 'sell'
+                close_tasks.append(
+                    self._close_position(
+                        exchange=self.exchange_a,
+                        side=close_side_a,
+                        quantity=filled_qty_a,
+                        price=price_a,
+                        order_id=order_a_id
+                    )
                 )
-            )
+            else:
+                # ✅ 平仓失败 → 继续尝试平掉剩余持仓
+                remaining_qty = target_quantity - filled_qty_a
+                
+                logger.critical(
+                    f"🚨 {self.exchange_a.exchange_name} 平仓不完整:\n"
+                    f"   已平仓: {filled_qty_a}\n"
+                    f"   目标数量: {target_quantity}\n"
+                    f"   剩余持仓: {remaining_qty}\n"
+                    f"   🔄 尝试强制平掉剩余部分..."
+                )
+                
+                # ✅ 继续尝试平掉剩余部分（使用相同方向）
+                if remaining_qty > 0:
+                    close_tasks.append(
+                        self._retry_place_order(
+                            exchange=self.exchange_a,
+                            order_type='close',
+                            side=side_a,  # ✅ 使用相同方向
+                            quantity=remaining_qty,
+                            price=price_a,
+                            retry_mode='aggressive',
+                            max_retries=10  # ✅ 增加重试次数
+                        )
+                    )
         
         if filled_qty_b > 0:
             logger.warning(f"🔄 平掉 {self.exchange_b.exchange_name}: {filled_qty_b}")
-            tasks.append(
-                self._emergency_close_b(
-                    order_id=order_b_id,
-                    quantity=filled_qty_b
+            
+            if operation_type == 'open':
+                close_side_b = 'buy' if side_b == 'sell' else 'sell'
+                close_tasks.append(
+                    self._close_position(
+                        exchange=self.exchange_b,
+                        side=close_side_b,
+                        quantity=filled_qty_b,
+                        price=price_b,
+                        order_id=order_b_id
+                    )
                 )
-            )
+            else:
+                # ✅ 平仓失败 → 继续尝试平掉剩余持仓
+                remaining_qty = target_quantity - filled_qty_b
+                
+                logger.critical(
+                    f"🚨 {self.exchange_b.exchange_name} 平仓不完整:\n"
+                    f"   已平仓: {filled_qty_b}\n"
+                    f"   目标数量: {target_quantity}\n"
+                    f"   剩余持仓: {remaining_qty}\n"
+                    f"   🔄 尝试强制平掉剩余部分..."
+                )
+                
+                # ✅ 继续尝试平掉剩余部分
+                if remaining_qty > 0:
+                    close_tasks.append(
+                        self._retry_place_order(
+                            exchange=self.exchange_b,
+                            order_type='close',
+                            side=side_b,  # ✅ 使用相同方向
+                            quantity=remaining_qty,
+                            price=price_b,
+                            retry_mode='aggressive',
+                            max_retries=10
+                        )
+                    )
         
-        # ✅ 并行执行平仓
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        
-        logger.info(
-            f"✅ 仓位已清空:\n"
-            f"   {self.exchange_a.exchange_name}: {filled_qty_a} → 0\n"
-            f"   {self.exchange_b.exchange_name}: {filled_qty_b} → 0"
-        )
-        
+        if close_tasks:
+            # ✅ 并行执行平仓任务
+            close_results = await asyncio.gather(*close_tasks, return_exceptions=True)
+            
+            # ✅ 检查平仓结果
+            for i, result in enumerate(close_results):
+                if isinstance(result, Exception):
+                    logger.critical(f"🚨 平仓任务异常: {result}")
+                elif isinstance(result, dict) and result.get('success'):
+                    logger.info(f"✅ 平仓任务 {i+1} 成功")
+                else:
+                    logger.critical(f"🚨 平仓任务 {i+1} 失败，需要手动处理！")
         return Decimal('0'), Decimal('0')
     async def _retry_place_order(
         self,
@@ -1222,3 +1385,53 @@ class OrderExecutor:
         
         except Exception as e:
             logger.error(f"❌ 紧急平仓异常: {e}")
+
+    async def _close_position(
+        self,
+        exchange: ExchangeAdapter,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        order_id: Optional[str] = None
+    ):
+        """平仓辅助方法"""
+        try:
+            logger.info(
+                f"🔄 执行平仓:\n"
+                f"   交易所: {exchange.exchange_name}\n"
+                f"   方向: {side}\n"
+                f"   数量: {quantity}\n"
+                f"   原订单 ID: {order_id or 'N/A'}"  # ✅ 添加这一行
+            )
+            result = await self._retry_place_order(
+                exchange=exchange,
+                order_type='close',
+                side=side,
+                quantity=quantity,
+                price=price,
+                retry_mode='aggressive',
+                max_retries=5
+            )
+            
+            if result.get('success'):
+                logger.info(
+                    f"✅ 平仓成功:\n"
+                    f"   交易所: {exchange.exchange_name}\n"
+                    f"   原订单: {order_id or 'N/A'}\n"  # ✅ 添加这一行
+                    f"   平仓订单: {result.get('order_id')}"  # ✅ 添加这一行
+                )
+            else:
+                logger.error(
+                    f"❌ 平仓失败:\n"
+                    f"   交易所: {exchange.exchange_name}\n"
+                    f"   原订单: {order_id or 'N/A'}\n"  # ✅ 添加这一行
+                    f"   错误: {result.get('error')}"  # ✅ 添加这一行
+                )
+        
+        except Exception as e:
+            logger.error(
+                f"❌ 平仓异常:\n"
+                f"   交易所: {exchange.exchange_name}\n"
+                f"   原订单: {order_id or 'N/A'}\n"  # ✅ 添加这一行
+                f"   异常: {e}"  # ✅ 添加这一行
+            )
