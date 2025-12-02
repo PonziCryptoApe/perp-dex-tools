@@ -74,5 +74,5 @@ pairs:
     
     # ✅ Variational 特殊配置
     variational_config:
-      polling_interval: 0.6   # 订单簿轮询间隔（秒）
+      polling_interval: 0.3   # 订单簿轮询间隔（秒）
       query_quantity: 0.3       # 查询数量（可选，默认使用上面的 quantity）
