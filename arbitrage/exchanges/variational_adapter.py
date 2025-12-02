@@ -222,7 +222,7 @@ class VariationalAdapter(ExchangeAdapter):
             ask_price = Decimal(str(quote_data['ask']))
             
             fetch_duration_ms = (fetch_end - fetch_start) * 1000  # 毫秒
-            logger.info(f"📊 订单簿获取耗时: {fetch_duration_ms:.2f} ms")
+            # logger.info(f"📊 订单簿获取耗时: {fetch_duration_ms:.2f} ms")
 
             # ✅ 构造订单簿格式（兼容 PriceMonitorService）
             orderbook = {
