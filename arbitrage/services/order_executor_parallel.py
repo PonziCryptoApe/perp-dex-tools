@@ -259,6 +259,13 @@ class OrderExecutor:
         diff_a = target_quantity - filled_qty_a
         diff_b = target_quantity - filled_qty_b
         
+        # ✅ 使用 filled_qty 的精度标准化差异
+        if filled_qty_a != 0:
+            diff_a = diff_a.quantize(filled_qty_a)  # ✅ 你的方案！
+        
+        if filled_qty_b != 0:
+            diff_b = diff_b.quantize(filled_qty_b)  # ✅ 你的方案！
+        
         if diff_a == 0 and diff_b == 0:
             logger.info(f"✅ 仓位平衡，无需调整")
             return filled_qty_a, filled_qty_b
@@ -423,6 +430,10 @@ class OrderExecutor:
                 # ✅ 平仓失败 → 继续尝试平掉剩余持仓
                 remaining_qty = target_quantity - filled_qty_a
                 
+                # ✅ 使用 filled_qty_a 的精度标准化
+                if filled_qty_a != 0:
+                    remaining_qty = remaining_qty.quantize(filled_qty_a)
+                
                 logger.critical(
                     f"🚨 {self.exchange_a.exchange_name} 平仓不完整:\n"
                     f"   已平仓: {filled_qty_a}\n"
@@ -462,7 +473,12 @@ class OrderExecutor:
             else:
                 # ✅ 平仓失败 → 继续尝试平掉剩余持仓
                 remaining_qty = target_quantity - filled_qty_b
+
+                # ✅ 使用 filled_qty_b 的精度标准化
+                if filled_qty_b != 0:
+                    remaining_qty = remaining_qty.quantize(filled_qty_b)
                 
+                        
                 logger.critical(
                     f"🚨 {self.exchange_b.exchange_name} 平仓不完整:\n"
                     f"   已平仓: {filled_qty_b}\n"
