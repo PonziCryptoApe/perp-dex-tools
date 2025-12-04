@@ -286,11 +286,16 @@ async def main():
 
     # 命令行参数覆盖配置
     quantity = Decimal(args.quantity) if args.quantity else config.quantity
+    quantity_precision = config.quantity_precision
     open_threshold = args.open_threshold if args.open_threshold is not None else config.open_threshold
     close_threshold = args.close_threshold if args.close_threshold is not None else config.close_threshold
     monitor_only = args.monitor_only  # ✅ 获取 monitor_only 参数
     min_depth_quantity = config.min_depth_quantity if hasattr(config, 'min_depth_quantity') else Decimal('0')
-    
+    # 读取累计模式配置
+    accumulate_mode = config.accumulate_mode
+    max_position = Decimal(str(config.max_position))
+    position_step = Decimal(str(config.position_step))
+
     logger.info(
         f"\n"
         f"{'='*60}\n"
@@ -301,10 +306,14 @@ async def main():
         f"  交易所 A:     {config.exchange_a} (开空)\n"
         f"  交易所 B:     {config.exchange_b} (开多)\n"
         f"  数量:         {quantity}\n"
+        f"  数量精度:     {quantity_precision}\n"
         f"  开仓阈值:     {open_threshold}%\n"
         f"  平仓阈值:     {close_threshold}%\n"
         f"  最小深度:     {min_depth_quantity}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
+        f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
+        f"  最大持仓:     {max_position}\n"
+        f"  持仓步长:     {position_step}\n"
         f"{'='*60}\n"
     )
     
@@ -363,6 +372,7 @@ async def main():
     strategy = HedgeStrategy(
         symbol=config.symbol,
         quantity=quantity,
+        quantity_precision=quantity_precision,
         open_threshold_pct=open_threshold,
         close_threshold_pct=close_threshold,
         exchange_a=exchange_a,
@@ -370,7 +380,10 @@ async def main():
         lark_bot=lark_bot,
         monitor_only=monitor_only,  # ✅ 传递 monitor_only 参数
         trade_logger=trade_logger,  # ✅ 传递交易日志记录器
-        min_depth_quantity=min_depth_quantity  # ✅ 传递最小深度数量
+        min_depth_quantity=min_depth_quantity,  # ✅ 传递最小深度数量
+        accumulate_mode=accumulate_mode,
+        max_position=max_position,
+        position_step=position_step
     )
     logger.info("✅ 策略创建成功\n")
 

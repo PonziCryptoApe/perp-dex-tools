@@ -14,7 +14,8 @@ class BaseStrategy(ABC):
         self,
         strategy_name: str,
         symbol: str,
-        quantity: Decimal
+        quantity: Decimal,
+        quantity_precision: Decimal
     ):
         """
         初始化策略
@@ -27,6 +28,7 @@ class BaseStrategy(ABC):
         self.strategy_name = strategy_name
         self.symbol = symbol
         self.quantity = quantity
+        self.quantity_precision = quantity_precision
         self.is_running = False
         
         logger.info(f"📋 初始化策略: {strategy_name}")

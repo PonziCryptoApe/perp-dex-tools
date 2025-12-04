@@ -15,10 +15,14 @@ class PairConfig:
     exchange_a: str           # 交易所 A 名称
     exchange_b: str           # 交易所 B 名称
     quantity: Decimal         # 交易数量
+    quantity_precision: Decimal  # 数量精度
     open_threshold: float     # 开仓阈值（%）
     close_threshold: float    # 平仓阈值（%）
     min_depth_quantity: Decimal  # ✅ 新增：最小深度阈值
     variational_config: Dict[str, Any]  # ✅ 新增：Variational 特定配置
+    accumulate_mode: bool = False  # ✅ 新增：是否启用累积模式
+    max_position: Decimal = Decimal('1.0')  # ✅ 新增：最大持仓
+    position_step: Decimal = Decimal('0.1')  # ✅ 新增：持仓步长
 
 
 def load_pair_config(pair_id: str) -> PairConfig:
@@ -59,6 +63,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
         raise ValueError(f"交易对未启用: {pair_id}，请在配置文件中设置 enabled: true")
      # ✅ 解析基础配置
     quantity = Decimal(str(pair_data['quantity']))
+    quantity_precision = Decimal(str(pair_data['quantity_precision']))
     
     # ✅ 解析 min_depth_quantity（可选，默认为 quantity 的 10%，最小为 0.001）
     if 'min_depth_quantity' in pair_data:
@@ -70,17 +75,39 @@ def load_pair_config(pair_id: str) -> PairConfig:
 
     variational_config = pair_data.get('variational_config', {})
 
+    # ✅ 解析累计模式配置
+    accumulate_mode = pair_data.get('accumulate_mode', False)
+    
+    # ✅ 解析 max_position（可选，默认为 quantity）
+    if 'max_position' in pair_data:
+        max_position = Decimal(str(pair_data['max_position']))
+    else:
+        # 默认值：与 quantity 相同
+        max_position = quantity
+    
+    # ✅ 解析 position_step（可选，默认为 quantity）
+    if 'position_step' in pair_data:
+        position_step = Decimal(str(pair_data['position_step']))
+    else:
+        # 默认值：与 quantity 相同
+        position_step = quantity
+    
+
     return PairConfig(
         pair_id=pair_id,
         enabled=pair_data['enabled'],
         symbol=pair_data['symbol'],
         exchange_a=pair_data['exchange_a'],
         exchange_b=pair_data['exchange_b'],
-        quantity=Decimal(str(pair_data['quantity'])),
+        quantity=quantity,
+        quantity_precision=quantity_precision,
         open_threshold=float(pair_data['open_threshold']),
         close_threshold=float(pair_data['close_threshold']),
         min_depth_quantity=min_depth_quantity,
-        variational_config=variational_config
+        variational_config=variational_config,
+        accumulate_mode=accumulate_mode,
+        max_position=max_position,
+        position_step=position_step,
     )
 
 def list_all_pairs() -> list:

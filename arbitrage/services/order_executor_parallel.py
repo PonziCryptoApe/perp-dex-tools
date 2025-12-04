@@ -19,13 +19,14 @@ class OrderExecutor:
         exchange_a: ExchangeAdapter,
         exchange_b: ExchangeAdapter,
         quantity: Decimal,
+        quantity_precision: Decimal,
         max_retries: int = 3,
         retry_delay: float = 0.3
     ):
         """
         初始化订单执行器
         
-        Args:w
+        Args:
             exchange_a: 交易所 A（开空）
             exchange_b: 交易所 B（开多）
             quantity: 交易数量
@@ -35,6 +36,7 @@ class OrderExecutor:
         self.exchange_a = exchange_a
         self.exchange_b = exchange_b
         self.quantity = quantity
+        self.quantity_precision = quantity_precision
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
@@ -43,10 +45,23 @@ class OrderExecutor:
             f"   Exchange A: {exchange_a.exchange_name}\n"
             f"   Exchange B: {exchange_b.exchange_name}\n"
             f"   Quantity: {quantity}\n"
+            f"   Quantity Precision: {quantity_precision}\n"
             f"   Max Retries: {max_retries}\n"
             f"   Retry Delay: {retry_delay}s"
         )
 
+    def _normalize_quantity(self, quantity: Decimal, exchange_name: str = None) -> Decimal:
+        """标准化数量精度"""
+        # ✅ 使用配置的精度
+        normalized = quantity.quantize(self.quantity_precision)
+        
+        if normalized != quantity and exchange_name:
+            logger.debug(
+                f"💡 数量精度标准化: {exchange_name} | "
+                f"{quantity} → {normalized} (精度: {self.quantity_precision})"
+            )
+        
+        return normalized
     
     async def _balance_positions_1(
         self,
@@ -322,7 +337,7 @@ class OrderExecutor:
                 f"   目标: {target_quantity}\n"
                 f"   需补单: {diff_a} ({side_a})"
             )
-            
+            diff_a = self._normalize_quantity(diff_a, self.exchange_a.exchange_name)
             task_a = self._retry_place_order(
                 exchange=self.exchange_a,
                 order_type=operation_type,  # ✅ 使用相同操作类型
@@ -342,7 +357,7 @@ class OrderExecutor:
                 f"   目标: {target_quantity}\n"
                 f"   需补单: {diff_b} ({side_b})"
             )
-            
+            diff_b = self._normalize_quantity(diff_b, self.exchange_b.exchange_name)
             task_b = self._retry_place_order(
                 exchange=self.exchange_b,
                 order_type=operation_type,
@@ -417,11 +432,12 @@ class OrderExecutor:
                 # ✅ 开仓失败 → 平掉已开仓部分
                 # side_a = 'sell' (开空) → 需要 'buy' (平空)
                 close_side_a = 'buy' if side_a == 'sell' else 'sell'
+                close_qty_a = filled_qty_a.quantize(self.quantity_precision)
                 close_tasks.append(
                     self._close_position(
                         exchange=self.exchange_a,
                         side=close_side_a,
-                        quantity=filled_qty_a,
+                        quantity=close_qty_a,
                         price=price_a,
                         order_id=order_a_id
                     )
@@ -432,7 +448,7 @@ class OrderExecutor:
                 
                 # ✅ 使用 filled_qty_a 的精度标准化
                 if filled_qty_a != 0:
-                    remaining_qty = remaining_qty.quantize(filled_qty_a)
+                    remaining_qty = remaining_qty.quantize(self.quantity_precision)
                 
                 logger.critical(
                     f"🚨 {self.exchange_a.exchange_name} 平仓不完整:\n"
@@ -461,11 +477,12 @@ class OrderExecutor:
             
             if operation_type == 'open':
                 close_side_b = 'buy' if side_b == 'sell' else 'sell'
+                close_qty_b = filled_qty_b.quantize(self.quantity_precision)    
                 close_tasks.append(
                     self._close_position(
                         exchange=self.exchange_b,
                         side=close_side_b,
-                        quantity=filled_qty_b,
+                        quantity=close_qty_b,
                         price=price_b,
                         order_id=order_b_id
                     )
@@ -476,7 +493,7 @@ class OrderExecutor:
 
                 # ✅ 使用 filled_qty_b 的精度标准化
                 if filled_qty_b != 0:
-                    remaining_qty = remaining_qty.quantize(filled_qty_b)
+                    remaining_qty = remaining_qty.quantize(self.quantity_precision)
                 
                         
                 logger.critical(
@@ -690,6 +707,9 @@ class OrderExecutor:
             (success: bool, position: Optional[Position])
         """
         order_quantity = actual_quantity if actual_quantity is not None else self.quantity
+
+        order_quantity = self._normalize_quantity(order_quantity, "开仓数量")
+
         # ✅ 记录开始执行时间
         execution_start_time = time.time()
         
@@ -1022,7 +1042,8 @@ class OrderExecutor:
         exchange_b_price: Decimal,
         exchange_a_quote_id: Optional[str] = None,
         exchange_b_quote_id: Optional[str] = None,
-        signal_trigger_time: Optional[float] = None
+        signal_trigger_time: Optional[float] = None,
+        close_quantity: Optional[Decimal] = None
     ) -> Tuple[bool, Optional[Position]]:
         """
         执行平仓
@@ -1044,6 +1065,20 @@ class OrderExecutor:
         """
         # ✅ 记录开始执行时间
         execution_start_time = time.time()
+        # ✅ 确定平仓数量
+        if close_quantity is None:
+            close_quantity = self.quantity  # 默认全部平仓
+        else:
+            # ✅ 部分平仓：检查数量
+            if close_quantity > position.quantity:
+                logger.warning(
+                    f"⚠️ 平仓数量超过持仓:\n"
+                    f"   尝试平仓: {close_quantity}\n"
+                    f"   当前持仓: {position.quantity}\n"
+                    f"   修正为: {position.quantity}"
+                )
+                close_quantity = position.quantity
+        close_quantity = self._normalize_quantity(close_quantity, "平仓数量")
         
         # ✅ 计算信号触发 → 开始执行的延迟
         if signal_trigger_time:
@@ -1052,6 +1087,7 @@ class OrderExecutor:
         
         logger.info(
             f"📤 执行平仓:\n"
+            f"   平仓数量: {close_quantity} / {position.quantity}\n"
             f"   {self.exchange_a.exchange_name} 平空 @ ${exchange_a_price}\n"
             f"   {self.exchange_b.exchange_name} 平多 @ ${exchange_b_price}"
         )
@@ -1063,7 +1099,7 @@ class OrderExecutor:
             task_a = asyncio.create_task(
                 self.exchange_a.place_close_order(
                     side='buy',
-                    quantity=self.quantity,
+                    quantity=close_quantity,
                     price=exchange_a_price,
                     retry_mode='opportunistic',
                     quote_id=exchange_a_quote_id
@@ -1073,7 +1109,7 @@ class OrderExecutor:
             task_b = asyncio.create_task(
                 self.exchange_b.place_close_order(
                     side='sell',
-                    quantity=self.quantity,
+                    quantity=close_quantity,
                     price=exchange_b_price,
                     retry_mode='aggressive',
                     quote_id=exchange_b_quote_id
@@ -1112,7 +1148,7 @@ class OrderExecutor:
                     exchange=self.exchange_a,
                     order_type='close',
                     side='buy',
-                    quantity=self.quantity,
+                    quantity=close_quantity,
                     price=exchange_a_price,
                     retry_mode='opportunistic',
                     quote_id=exchange_a_quote_id,
@@ -1184,7 +1220,7 @@ class OrderExecutor:
                     exchange=self.exchange_b,
                     order_type='close',
                     side='sell',
-                    quantity=self.quantity,
+                    quantity=close_quantity,
                     price=exchange_b_price,
                     retry_mode='aggressive',
                     quote_id=exchange_b_quote_id,
@@ -1258,7 +1294,7 @@ class OrderExecutor:
                 
                 # ✅ 4. 平衡仓位（关键！）
                 balanced_qty_a, balanced_qty_b = await self._balance_positions(
-                    target_quantity=position.quantity,
+                    target_quantity=close_quantity,
                     filled_qty_a=filled_qty_a,
                     filled_qty_b=filled_qty_b,
                     side_a='buy',
@@ -1297,34 +1333,52 @@ class OrderExecutor:
                 else:
                     total_delay_ms = None
 
-                quality_report = position.get_execution_quality_report()
+                # ✅ 只在有效 Position 时计算质量报告
+                if (position.exchange_a_signal_entry_price > 0 and 
+                    position.exchange_b_signal_entry_price > 0 and
+                    position.exchange_a_order_id != 'DUMMY'):
+                    
+                    quality_report = position.get_execution_quality_report()
+                    logger.info(
+                        f"✅ 平仓成功:\n"
+                        f"   {self.exchange_a.exchange_name}:\n"
+                        f"      订单 ID: {order_a_result.get('order_id')}\n"
+                        f"      信号价格: ${exchange_a_price}\n"
+                        f"      成交价格: ${actual_price_a}\n"
+                        f"      滑点: {quality_report['exit_slippage']['exchange_a']:+.4f}%\n"
+                        f"      成交数量: {balanced_qty_a} / {position.quantity}\n"
+                        f"   {self.exchange_b.exchange_name}:\n"
+                        f"      订单 ID: {order_b_result.get('order_id')}\n"
+                        f"      信号价格: ${exchange_b_price}\n"
+                        f"      成交价格: ${actual_price_b}\n"
+                        f"      滑点: {quality_report['exit_slippage']['exchange_b']:+.4f}%\n"
+                        f"      成交数量: {balanced_qty_b} / {position.quantity}\n"
 
-                logger.info(
-                    f"✅ 平仓成功:\n"
-                    f"   {self.exchange_a.exchange_name}:\n"
-                    f"      订单 ID: {order_a_result.get('order_id')}\n"
-                    f"      信号价格: ${exchange_a_price}\n"
-                    f"      成交价格: ${actual_price_a}\n"
-                    f"      滑点: {quality_report['exit_slippage']['exchange_a']:+.4f}%\n"
-                    f"      成交数量: {balanced_qty_a} / {position.quantity}\n"
-                    f"   {self.exchange_b.exchange_name}:\n"
-                    f"      订单 ID: {order_b_result.get('order_id')}\n"
-                    f"      信号价格: ${exchange_b_price}\n"
-                    f"      成交价格: ${actual_price_b}\n"
-                    f"      滑点: {quality_report['exit_slippage']['exchange_b']:+.4f}%\n"
-                    f"      成交数量: {balanced_qty_b} / {position.quantity}\n"
-
-                    f"\n"
-                    f"   📊 执行质量分析:\n"
-                    f"      理论盈亏: {quality_report['theoretical_pnl_pct']:+.4f}%\n"
-                    f"      实际盈亏: {quality_report['actual_pnl_pct']:+.4f}%\n"
-                    f"      盈亏损失: {quality_report['pnl_loss_pct']:+.4f}% (由于滑点)\n"
-                    f"      开仓滑点: {quality_report['entry_slippage']['total']:+.4f}%\n"
-                    f"      平仓滑点: {quality_report['exit_slippage']['total']:+.4f}%\n"
-                    f"      开仓延迟: {quality_report['entry_delay_ms']:.2f} ms\n"
-                    f"      平仓延迟: {quality_report['exit_delay_ms']:.2f} ms\n"
-                    f"   持仓时长: {position.get_holding_duration()}"
-                )
+                        f"\n"
+                        f"   📊 执行质量分析:\n"
+                        f"      理论盈亏: {quality_report['theoretical_pnl_pct']:+.4f}%\n"
+                        f"      实际盈亏: {quality_report['actual_pnl_pct']:+.4f}%\n"
+                        f"      盈亏损失: {quality_report['pnl_loss_pct']:+.4f}% (由于滑点)\n"
+                        f"      开仓滑点: {quality_report['entry_slippage']['total']:+.4f}%\n"
+                        f"      平仓滑点: {quality_report['exit_slippage']['total']:+.4f}%\n"
+                        f"      开仓延迟: {quality_report['entry_delay_ms']:.2f} ms\n"
+                        f"      平仓延迟: {quality_report['exit_delay_ms']:.2f} ms\n"
+                        f"   持仓时长: {position.get_holding_duration()}"
+                    )
+                else:
+                    # ✅ 虚拟 Position：简化日志
+                    logger.info(
+                        f"✅ 平仓成功 (反向开仓):\n"
+                        f"   {self.exchange_a.exchange_name}:\n"
+                        f"      订单 ID: {order_a_result.get('order_id')}\n"
+                        f"      成交价格: ${actual_price_a}\n"
+                        f"      成交数量: {balanced_qty_a} / {position.quantity}\n"
+                        f"   {self.exchange_b.exchange_name}:\n"
+                        f"      订单 ID: {order_b_result.get('order_id')}\n"
+                        f"      成交价格: ${actual_price_b}\n"
+                        f"      成交数量: {balanced_qty_b} / {position.quantity}\n"
+                        f"   ⏱️ 执行耗时: {execution_delay_ms:.2f} ms"
+                    )
 
                 return True, position
         except Exception as e:
