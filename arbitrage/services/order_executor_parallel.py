@@ -4,10 +4,12 @@ import asyncio
 from datetime import datetime
 import logging
 from decimal import Decimal
+import os
 import time
 from typing import Tuple, Optional
 from ..models.position import Position
 from ..exchanges.base import ExchangeAdapter
+from helpers.lark_bot import LarkBot
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,11 @@ class OrderExecutor:
         self.quantity_precision = quantity_precision
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.lark_token = os.getenv("LARK_TOKEN_SERIOUS")
+        if self.lark_token:
+            self.lark_bot = LarkBot(self.lark_token)
+        else:
+            self.lark_bot = None
 
         logger.info(
             f"📦 订单执行器已初始化:\n"
@@ -860,7 +867,8 @@ class OrderExecutor:
                     quantity=order_quantity,
                     price=exchange_b_price,
                     retry_mode='aggressive',
-                    quote_id=exchange_b_quote_id
+                    quote_id=exchange_b_quote_id,
+                    max_retries=5
                 )
                 if retry_result_b.get('success'):
                     # ✅ 更新 order_b_result 和 success_b
@@ -1207,6 +1215,10 @@ class OrderExecutor:
                         f"❌ {self.exchange_a.exchange_name} 重试失败，"
                         f"需要手动处理仓位！"
                     )
+                    if self.lark_bot:
+                        await self.lark_bot.send_text(
+                            f"❌ {self.exchange_a.exchange_name} 重试失败，需要手动处理仓位！"
+                        )
                     return False, None
 
             # 情况 3️⃣: A成功，B失败 → 重试 B
@@ -1279,6 +1291,10 @@ class OrderExecutor:
                         f"🚨 {self.exchange_b.exchange_name} 平仓失败（重试后仍失败），"
                         f"需要手动处理！"
                     )
+                    if self.lark_bot:
+                        await self.lark_bot.send_text(
+                            f"🚨 {self.exchange_b.exchange_name} 平仓失败（重试后仍失败），需要手动处理！"
+                        )
                     return False, None
             # 情况 4️⃣: 两所都成功 → 完成
             if success_a and success_b:
@@ -1419,7 +1435,11 @@ class OrderExecutor:
                 logger.info(f"✅ 紧急平仓成功: {result.get('order_id')}")
             else:
                 logger.critical(f"🚨 紧急平仓失败，需要手动处理！")
-        
+                if self.lark_bot:
+                    await self.lark_bot.send_text(
+                        f"🚨 {self.exchange_a.exchange_name} 紧急平仓失败，需要手动处理！"
+                    )
+
         except Exception as e:
             logger.error(f"❌ 紧急平仓异常: {e}")
     
@@ -1452,6 +1472,10 @@ class OrderExecutor:
                 logger.info(f"✅ 紧急平仓成功: {result.get('order_id')}")
             else:
                 logger.critical(f"🚨 紧急平仓失败，需要手动处理！")
+                if self.lark_bot:
+                    await self.lark_bot.send_text(
+                        f"🚨 {self.exchange_b.exchange_name} 紧急平仓失败，需要手动处理！"
+                    )
         
         except Exception as e:
             logger.error(f"❌ 紧急平仓异常: {e}")

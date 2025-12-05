@@ -41,9 +41,9 @@ pairs:
     close_threshold: -0.03
     min_depth_quantity: "0.001"  # ✅ 新增：最小深度阈值（可选）
     accumulate_mode: true  # 是否启用累计模式
-    max_position: 0.1      # 最大仓位阈值
+    max_position: 0.03      # 最大仓位阈值
     position_step: 0.01     # 单次交易量（应该和 quantity 一致）
-    
+
     # ✅ Variational 特殊配置
     variational_config:
       polling_interval: 0.3   # 订单簿轮询间隔（秒）

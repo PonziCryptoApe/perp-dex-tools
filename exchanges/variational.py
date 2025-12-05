@@ -23,6 +23,7 @@ from helpers.lark_bot import LarkBot
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo
 from helpers.logger import TradingLogger
+from helpers.encryption_helper import EncryptionHelper  # ✅ 新增导入
 
 from dotenv import load_dotenv
 
@@ -37,7 +38,7 @@ class VariationalClient(BaseExchangeClient):
         super().__init__(config)
         
         # Variational 特定的配置
-        self.private_key = os.getenv('VAR_PRIVATE_KEY')
+        self.private_key = self._load_private_key()
         self.wallet_address = os.getenv('VAR_WALLET_ADDRESS')
         
         # API endpoints
@@ -73,7 +74,21 @@ class VariationalClient(BaseExchangeClient):
         self._order_update_handler = None
 
         self.logger.log("【VARIATIONAL】VariationalClient initialized", "INFO")
-    
+    def _load_private_key(self) -> str:
+        """✅ 加载并解密私钥"""
+        encrypted_key = os.getenv('VAR_PRIVATE_KEY_ENCRYPTED')
+        if not encrypted_key:
+            raise ValueError("Missing VAR_PRIVATE_KEY_ENCRYPTED environment variable")
+        
+        # 提示用户输入解密密钥
+        decryption_key = input("请输入 Variational 私钥的解密密钥: ")
+        
+        # 使用 EncryptionHelper 解密私钥
+        encryption_helper = EncryptionHelper()
+        private_key = encryption_helper.decrypt(encrypted_key, decryption_key)
+
+        return private_key
+        
     def _build_instrument(self, ticker: str = None) -> Dict[str, Any]:
         """✅ 动态构建 instrument"""
         underlying = ticker or self.config.ticker

@@ -252,7 +252,7 @@ class TradeLogger:
         )
         
         # ✅ 计算总滑点
-        slippage_a = ((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
+        slippage_a = -((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
         slippage_b = ((exchange_b_filled_price - exchange_b_signal_price) / exchange_b_signal_price * 100)
         total_slippage = slippage_a + slippage_b
         
