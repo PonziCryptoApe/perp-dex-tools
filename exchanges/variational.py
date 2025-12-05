@@ -24,6 +24,8 @@ from helpers.lark_bot import LarkBot
 from .base import BaseExchangeClient, OrderResult, OrderInfo
 from helpers.logger import TradingLogger
 from helpers.encryption_helper import EncryptionHelper  # ✅ 新增导入
+import getpass
+import sys
 
 from dotenv import load_dotenv
 
@@ -81,8 +83,10 @@ class VariationalClient(BaseExchangeClient):
             raise ValueError("Missing VAR_PRIVATE_KEY_ENCRYPTED environment variable")
         
         # 提示用户输入解密密钥
-        decryption_key = input("请输入 Variational 私钥的解密密钥: ")
-        
+        # decryption_key = input("请输入 Variational 私钥的解密密钥: ")
+        if sys.stdin.isatty():
+            print("\n🔐 Variational 私钥已加密，需要解密密钥")
+            decryption_key = getpass.getpass("请输入解密密钥: ")
         # 使用 EncryptionHelper 解密私钥
         encryption_helper = EncryptionHelper()
         private_key = encryption_helper.decrypt(encrypted_key, decryption_key)
