@@ -72,7 +72,7 @@ pairs:
     symbol: HYPE
     exchange_a: extended
     exchange_b: variational
-    quantity: "0.1"
+    quantity: "0.5"
     quantity_precision: "0.01"
     open_threshold: 0.01
     close_threshold: 0.01
