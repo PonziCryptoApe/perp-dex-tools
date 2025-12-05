@@ -84,9 +84,12 @@ class VariationalClient(BaseExchangeClient):
         
         # 提示用户输入解密密钥
         # decryption_key = input("请输入 Variational 私钥的解密密钥: ")
+        decryption_key = ""
         if sys.stdin.isatty():
             print("\n🔐 Variational 私钥已加密，需要解密密钥")
             decryption_key = getpass.getpass("请输入解密密钥: ")
+        else:
+            raise RuntimeError("无法从非交互式环境中输入解密密钥")
         # 使用 EncryptionHelper 解密私钥
         encryption_helper = EncryptionHelper()
         private_key = encryption_helper.decrypt(encrypted_key, decryption_key)
