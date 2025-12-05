@@ -79,8 +79,8 @@ pairs:
     min_depth_quantity: "0.05"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
-    max_position: 1      # 最大仓位阈值
-    position_step: 0.1     # 单次交易量（应该和 quantity 一致）
+    max_position: 10      # 最大仓位阈值
+    position_step: 0.5     # 单次交易量（应该和 quantity 一致）
     
     # ✅ Variational 特殊配置
     variational_config:
