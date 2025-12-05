@@ -113,7 +113,7 @@ class VariationalClient(BaseExchangeClient):
                 raise ValueError(f"Missing required config: {config_key}")
         
         # 验证环境变量
-        required_env_vars = ['VAR_PRIVATE_KEY']
+        required_env_vars = ['VAR_PRIVATE_KEY_ENCRYPTED']
         missing_vars = [var for var in required_env_vars if not os.getenv(var)]
         if missing_vars:
             raise ValueError(f"Missing environment variables: {missing_vars}")
