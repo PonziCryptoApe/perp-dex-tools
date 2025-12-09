@@ -860,4 +860,41 @@ class VariationalAdapter(ExchangeAdapter):
         
         except Exception as e:
             logger.error(f"❌ 处理持仓更新失败: {e}")
-    
+            
+    async def get_position(self, symbol: str) -> Optional[dict]:
+        """
+        获取 Variational 持仓信息（复用 client 方法）
+        
+        Args:
+            symbol: 币种符号（如 'HYPE'）
+        
+        Returns:
+            {
+                'symbol': 'HYPE',
+                'side': 'long',
+                'size': 2.5,
+                'entry_price': 28.3,
+                'unrealized_pnl': 0.08
+            }
+        """
+        try:
+            # ✅ 直接调用 VariationalClient 的方法
+            # 注意：需要先在 variational.py 中添加 get_position() 方法
+            position = await self.client.get_position(symbol)
+            
+            if position:
+                logger.debug(
+                    f"📊 Variational 持仓:\n"
+                    f"   Symbol: {position['symbol']}\n"
+                    f"   Side: {position['side']}\n"
+                    f"   Size: {position['size']}\n"
+                    f"   Entry Price: ${position['entry_price']}"
+                )
+            else:
+                logger.debug(f"📊 Variational 无持仓: {symbol}")
+            
+            return position
+        
+        except Exception as e:
+            logger.error(f"❌ Variational 获取持仓失败: {e}", exc_info=True)
+            return None

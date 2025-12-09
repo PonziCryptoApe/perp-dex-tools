@@ -819,7 +819,96 @@ class VariationalClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"【VARIATIONAL】Error getting account positions: {e}", "ERROR")
             return Decimal('0')
-
+    
+        # Line 845-900
+    
+    async def get_position(self, symbol: str) -> Optional[dict]:
+        """
+        获取指定币种的持仓信息
+        
+        Args:
+            symbol: 币种符号（如 'HYPE'）
+        
+        Returns:
+            {
+                'symbol': 'HYPE',
+                'side': 'short',
+                'size': 0.01,
+                'entry_price': 29.7032,
+                'unrealized_pnl': 0.000012
+            }
+        """
+        try:
+            url = f"{self.api_base}/positions"
+            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+            
+            # ✅ 调用 API
+            data = await self._make_var_request('GET', url, cookies=cookies)
+            
+            # ✅ 检查返回数据
+            if not data:
+                self.logger.log(f"No positions data", "DEBUG")
+                return None
+            
+            # ✅ 关键修正：data 本身就是数组，不需要 data['positions']
+            positions = data if isinstance(data, list) else []
+            
+            # ✅ 遍历持仓列表
+            for pos in positions:
+                # ✅ 获取 position_info
+                position_info = pos.get('position_info', {})
+                
+                # ✅ 获取 instrument 信息
+                instrument = position_info.get('instrument', {})
+                
+                # ✅ 匹配币种
+                if instrument.get('underlying') == symbol:
+                    # ✅ 获取持仓数量
+                    qty_str = position_info.get('qty', '0')
+                    size = Decimal(str(qty_str))
+                    
+                    # ✅ 无持仓
+                    if size == 0:
+                        self.logger.log(f"Found {symbol} position but size is 0", "DEBUG")
+                        return None
+                    
+                    # ✅ 判断多空方向
+                    side = 'short' if size < 0 else 'long'
+                    
+                    # ✅ 获取开仓均价
+                    avg_entry_price = Decimal(str(position_info.get('avg_entry_price', '0')))
+                    
+                    # ✅ 获取未实现盈亏
+                    unrealized_pnl = Decimal(str(pos.get('upnl', '0')))
+                    
+                    result = {
+                        'symbol': symbol,
+                        'side': side,
+                        'size': abs(size),
+                        'entry_price': avg_entry_price,
+                        'unrealized_pnl': unrealized_pnl
+                    }
+                    
+                    self.logger.log(
+                        f"Found {symbol} position:\n"
+                        f"  Side: {side}\n"
+                        f"  Size: {abs(size)}\n"
+                        f"  Entry Price: {avg_entry_price}\n"
+                        f"  Unrealized PnL: {unrealized_pnl}",
+                        "DEBUG"
+                    )
+                    
+                    return result
+            
+            # ✅ 未找到该币种的持仓
+            self.logger.log(f"No position found for {symbol}", "DEBUG")
+            return None
+        
+        except Exception as e:
+            self.logger.log(f"Error getting position for {symbol}: {e}", "ERROR")
+            import traceback
+            self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            return None
     def setup_order_update_handler(self, handler) -> None:
         """设置订单更新处理器"""
         self._order_update_handler = handler

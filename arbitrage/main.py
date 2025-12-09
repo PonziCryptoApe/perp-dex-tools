@@ -242,7 +242,8 @@ async def main():
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
                        help='只监控，不下单')
-    
+    parser.add_argument('--min-depth-quantity', type=float, default=None, help='最小深度值')
+    parser.add_argument('--max-position', type=float, default=None, help='最大仓位，如果不传则使用配置文件中的')
     args = parser.parse_args()
     
     # 列出所有交易对
@@ -290,11 +291,12 @@ async def main():
     open_threshold = args.open_threshold if args.open_threshold is not None else config.open_threshold
     close_threshold = args.close_threshold if args.close_threshold is not None else config.close_threshold
     monitor_only = args.monitor_only  # ✅ 获取 monitor_only 参数
-    min_depth_quantity = config.min_depth_quantity if hasattr(config, 'min_depth_quantity') else Decimal('0')
+    min_depth_quantity = Decimal(str(args.min_depth_quantity)) if args.min_depth_quantity is not None else config.min_depth_quantity if hasattr(config, 'min_depth_quantity') else Decimal('0')
     # 读取累计模式配置
     accumulate_mode = config.accumulate_mode
-    max_position = Decimal(str(config.max_position))
-    position_step = Decimal(str(config.position_step))
+    max_position = Decimal(str(args.max_position)) if args.max_position is not None else Decimal(str(config.max_position))
+
+    dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
 
     logger.info(
         f"\n"
@@ -313,7 +315,7 @@ async def main():
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"
-        f"  持仓步长:     {position_step}\n"
+        f"  动态阈值:     {'启用' if dynamic_threshold.get('enabled', False) else '禁用'}\n"  # ✅ 新增
         f"{'='*60}\n"
     )
     
@@ -383,10 +385,31 @@ async def main():
         min_depth_quantity=min_depth_quantity,  # ✅ 传递最小深度数量
         accumulate_mode=accumulate_mode,
         max_position=max_position,
-        position_step=position_step
+        dynamic_threshold=dynamic_threshold  # ✅ 传递动态阈值配置
     )
     logger.info("✅ 策略创建成功\n")
-
+    # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========
+    if accumulate_mode:
+        logger.info("🔄 累计模式：正在从交易所同步仓位...")
+        try:
+            synced_qty = await strategy.position_manager.sync_from_exchanges(
+                exchange_a=exchange_a,
+                exchange_b=exchange_b,
+                symbol=config.symbol
+            )
+            
+            if synced_qty is not None and synced_qty != 0:
+                logger.warning(
+                    f"⚠️ 检测到未平仓位: {synced_qty:+.4f}\n"
+                    f"   已同步到本地，策略将继续运行"
+                )
+            else:
+                logger.info("✅ 无持仓，从空仓开始")
+        
+        except Exception as e:
+            logger.error(f"❌ 同步仓位失败: {e}")
+            logger.warning("⚠️ 将从本地默认值（0）开始运行")
+    # ========== 新增部分结束 ==========
     # Step 5: 启动策略
     try:
         await strategy.start()

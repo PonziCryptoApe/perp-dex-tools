@@ -22,7 +22,7 @@ class PairConfig:
     variational_config: Dict[str, Any]  # ✅ 新增：Variational 特定配置
     accumulate_mode: bool = False  # ✅ 新增：是否启用累积模式
     max_position: Decimal = Decimal('1.0')  # ✅ 新增：最大持仓
-    position_step: Decimal = Decimal('0.1')  # ✅ 新增：持仓步长
+    dynamic_threshold: Dict[str, Any] = None  # ✅ 新增：动态阈值配置
 
 
 def load_pair_config(pair_id: str) -> PairConfig:
@@ -85,13 +85,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
         # 默认值：与 quantity 相同
         max_position = quantity
     
-    # ✅ 解析 position_step（可选，默认为 quantity）
-    if 'position_step' in pair_data:
-        position_step = Decimal(str(pair_data['position_step']))
-    else:
-        # 默认值：与 quantity 相同
-        position_step = quantity
-    
+    dynamic_threshold = pair_data.get('dynamic_threshold', {})
 
     return PairConfig(
         pair_id=pair_id,
@@ -107,7 +101,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
         variational_config=variational_config,
         accumulate_mode=accumulate_mode,
         max_position=max_position,
-        position_step=position_step,
+        dynamic_threshold=dynamic_threshold,
     )
 
 def list_all_pairs() -> list:

@@ -11,6 +11,7 @@ from ..models.prices import PriceSnapshot
 from ..services.price_monitor import PriceMonitorService
 from ..services.position_manager import PositionManagerService
 from ..services.order_executor_parallel import OrderExecutor
+from ..services.dynamic_threshold import DynamicThresholdManager
 from ..models.position import Position
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class HedgeStrategy(BaseStrategy):
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
-        position_step: Decimal = Decimal('0.01'),
+        dynamic_threshold: Optional[dict] = None,
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -59,7 +60,7 @@ class HedgeStrategy(BaseStrategy):
             trade_logger=trade_logger,
             accumulate_mode=accumulate_mode,
             max_position=max_position,
-            position_step=position_step
+            position_step=quantity
         )
 
         # 价格监控服务
@@ -118,6 +119,18 @@ class HedgeStrategy(BaseStrategy):
         # ✅ 定期输出统计（可选）
         self._last_stats_log_time = 0
         self._stats_log_interval = 60  # 每 60 秒输出一次统计
+
+        # 动态阈值管理器
+        dt_config = dynamic_threshold
+        if dt_config.get('enabled', False):
+            self.threshold_manager = DynamicThresholdManager(
+                sample_size=dt_config.get('sample_size', 1000),
+                min_samples=dt_config.get('min_samples', 200),
+                std_multiplier=dt_config.get('std_multiplier', 1.0),
+                min_total_threshold=dt_config.get('min_total_threshold', 0.02),
+            )
+        else:
+            self.threshold_manager = None
         
         
         logger.info(
@@ -138,6 +151,24 @@ class HedgeStrategy(BaseStrategy):
         
         # 启动价格监控
         await self.monitor.start()
+        # ✅ 新增：启动时同步仓位
+        if self.position_manager.accumulate_mode:
+            logger.info("🔄 累计模式启动，同步交易所仓位...")
+            synced_qty = await self.position_manager.sync_from_exchanges(
+                exchange_a=self.exchange_a,
+                exchange_b=self.exchange_b,
+                symbol=self.symbol
+            )
+            
+            if synced_qty is not None:
+                logger.info(
+                    f"✅ 仓位同步完成:\n"
+                    f"   本地仓位: {synced_qty:+.4f}\n"
+                    f"   最大仓位: ±{self.position_manager.max_position}\n"
+                    f"   剩余空间: {self.position_manager.max_position - abs(synced_qty):.4f}"
+                )
+            else:
+                logger.warning("⚠️ 仓位同步失败，使用初始值 0")
         
         # 订阅价格更新
         self.monitor.subscribe(self._on_price_update)
@@ -172,22 +203,65 @@ class HedgeStrategy(BaseStrategy):
             price_update_time_a = prices.exchange_a_timestamp
             price_update_time_b = prices.exchange_b_timestamp
 
+            # 记录信号触发时间
+            signal_trigger_time = time.time()
+            signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
+            signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
+        
+            signal_flag = False
+            # ✅ 过滤延迟过大的信号
+            if signal_delay_ms_a <= self.max_signal_delay_ms and signal_delay_ms_b <= self.max_signal_delay_ms:
+                signal_flag = True
+
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
-            if self.position_manager.accumulate_mode:
-                 # ✅ 优先检查平仓信号（如果可以平仓）
-                if self.position_manager.can_close('long'):
-                    await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
-                    
-                    # ✅ 如果正在执行，跳过开仓检查
-                    if self._executing_lock.locked():
-                        return
+            print(f"🔍 价差: {spread_pct:.4f}%, 反向价差: {reverse_spread_pct:.4f}%")
+            # ✅ 新增：记录价差并尝试调整阈值
+            if self.threshold_manager and signal_flag:
+                # 添加数据
+                self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
                 
-                # ✅ 检查开仓信号（如果可以开仓）
-                if self.position_manager.can_open('short'):
-                    await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
-            
+                # 尝试调整
+                current_qty = self.position_manager.get_current_position_qty()
+                new_open, new_close = self.threshold_manager.try_adjust(
+                    current_qty, 
+                    self.position_manager.max_position
+                )
+                
+                # 更新阈值
+                if new_open is not None:
+                    self.open_threshold_pct = new_open
+                    self.close_threshold_pct = new_close
+                    
+            if self.position_manager.accumulate_mode:
+                current_qty = self.position_manager.get_current_position_qty()
+                logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
+                if current_qty < 0:
+                    # ✅ 优先检查平仓信号（如果可以平仓）
+                    if self.position_manager.can_close('long'):
+                        await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
+                        
+                        # ✅ 如果正在执行，跳过开仓检查
+                        if self._executing_lock.locked():
+                            return
+                
+                    # ✅ 检查开仓信号（如果可以开仓）
+                    if self.position_manager.can_open('short'):
+                        await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
+                else:
+                    # ✅ 优先检查平仓信号（如果可以平仓）
+                    if self.position_manager.can_close('short'):
+                        await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
+                        
+                        # ✅ 如果正在执行，跳过开仓检查
+                        if self._executing_lock.locked():
+                            return
+                
+                    # ✅ 检查开仓信号（如果可以开仓）
+                    if self.position_manager.can_open('long'):
+                        await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
+                
             else:
                 # ✅ 根据持仓状态决定检查哪种信号
                 if not self.position_manager.has_position():
@@ -397,6 +471,21 @@ class HedgeStrategy(BaseStrategy):
                             f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
                             f"📊 统计: {self._format_open_stats()}"  # ✅ 新增
                         )
+                        # ========== ✅ 新增：校验仓位 ==========
+                        # logger.info(f"🔍 开仓后校验仓位...")
+                        # expected_qty = self.position_manager.get_current_position_qty()
+                        
+                        # is_consistent = await self.position_manager.verify_and_sync(
+                        #     exchange_a=self.exchange_a,
+                        #     exchange_b=self.exchange_b,
+                        #     symbol=self.symbol,
+                        #     expected_qty=expected_qty,
+                        #     tolerance=self.quantity_precision
+                        # )
+                        
+                        # if not is_consistent:
+                        #     logger.warning(f"⚠️ 开仓后仓位校验不一致，已自动修正为交易所实际值")
+                        # ========== 新增部分结束 ==========
                         # logger.info(f"✅ 开仓成功: {position}，等待平仓...")
                         # 发送飞书通知
                         if self.lark_bot:
@@ -648,6 +737,19 @@ class HedgeStrategy(BaseStrategy):
                             f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
                             f"📊 统计: {self._format_close_stats()}"
                         )
+                        # logger.info(f"🔍 平仓后校验仓位...")
+                        # expected_qty = self.position_manager.get_current_position_qty()
+                        
+                        # is_consistent = await self.position_manager.verify_and_sync(
+                        #     exchange_a=self.exchange_a,
+                        #     exchange_b=self.exchange_b,
+                        #     symbol=self.symbol,
+                        #     expected_qty=expected_qty,
+                        #     tolerance=self.quantity_precision
+                        # )
+                        
+                        # if not is_consistent:
+                        #     logger.warning("⚠️ 平仓后仓位不一致，已自动修正")                                
                         # 发送飞书通知
                         if self.lark_bot:
                             await self._send_close_notification(updated_position, pnl_pct, prices)
@@ -819,6 +921,17 @@ class HedgeStrategy(BaseStrategy):
         current_time = time.time()
         
         if current_time - self._last_stats_log_time >= self._stats_log_interval:
+            threshold_info = ""
+            if self.threshold_manager:
+                stats = self.threshold_manager.get_stats()
+                threshold_info = (
+                    f"\n"
+                    f"📊 动态阈值:\n"
+                    f"   当前: 开仓{stats.get('current_open', 0):.4f}% "
+                    f"平仓{stats.get('current_close', 0):.4f}% "
+                    f"(调整{stats['adjustment_count']}次)\n"
+                    f"   样本: 开仓{stats['open_samples']} 平仓{stats['close_samples']}\n"
+                )
             logger.info(
                 f"\n"
                 f"{'='*60}\n"
@@ -829,6 +942,7 @@ class HedgeStrategy(BaseStrategy):
                 f"\n"
                 f"🔴 平仓信号:\n"
                 f"   {self._format_close_stats()}\n"
+                f"{threshold_info}"
                 f"{'='*60}"
             )
             self._last_stats_log_time = current_time

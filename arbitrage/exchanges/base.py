@@ -135,5 +135,24 @@ class ExchangeAdapter(ABC):
         """
         return raw_orderbook
     
+    @abstractmethod
+    async def get_position(self, symbol: str) -> Optional[dict]:
+        """
+        获取持仓信息（抽象方法，子类必须实现）
+        
+        Args:
+            symbol: 币种符号（如 'HYPE'）
+        
+        Returns:
+            {
+                'symbol': 'HYPE',
+                'side': 'short',  # 'long' or 'short'
+                'size': 2.5,      # 持仓数量（绝对值，正数）
+                'entry_price': 28.5,
+                'unrealized_pnl': -0.05
+            }
+            或 None（无持仓）
+        """
+        pass
     def __str__(self):
         return f"{self.exchange_name}Adapter({self.symbol})"

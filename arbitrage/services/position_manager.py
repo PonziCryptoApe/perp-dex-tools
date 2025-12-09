@@ -91,7 +91,7 @@ class PositionManagerService:
         if not self.accumulate_mode:
             # ✅ 传统模式：没有持仓才能开仓
             return not self.has_position()
-        
+        logger.info(f"🔍 检查累计模式下能否开仓: direction={direction}")
         # ✅ 累计模式：检查是否超过阈值
         if direction == 'short':
             # 开空：Exchange A 卖出，Exchange B 买入
@@ -154,6 +154,13 @@ class PositionManagerService:
                     f"   阈值: +{self.max_position}\n"
                     f"   🚫 禁止操作"
                 )
+            # else:
+            #     logger.info(
+            #         f"✅ 可以平仓（或反向开多）:\n"
+            #         f"   当前: {self.current_position_qty}\n"
+            #         f"   尝试后: {new_position}\n"
+            #         f"   阈值: +{self.max_position}"
+            #     )
             return can_close
         
         else:  # 'short'
@@ -365,6 +372,130 @@ class PositionManagerService:
             'utilization': round(utilization, 2),
             'direction': 'short' if self.current_position_qty < 0 else ('long' if self.current_position_qty > 0 else 'flat')
         }
+    # ========== 在类中添加新方法 ==========
+
+    async def sync_from_exchanges(
+        self,
+        exchange_a,
+        exchange_b,
+        symbol: str
+    ):
+        """
+        从交易所同步仓位
+        
+        Args:
+            exchange_a: 交易所 A 适配器
+            exchange_b: 交易所 B 适配器  
+            symbol: 交易对符号
+        
+        Returns:
+            同步后的净仓位数量
+        """
+        try:
+            # 获取交易所仓位
+            position_a = await exchange_a.get_position(symbol)
+            position_b = await exchange_b.get_position(symbol)
+
+            # 解析仓位数量
+            qty_a = Decimal(str(position_a.get('size', 0))) if position_a else Decimal('0')
+            qty_b = Decimal(str(position_b.get('size', 0))) if position_b else Decimal('0')
+            logger.info(
+                f"🔍 获取交易所仓位:\n"
+                f"   {exchange_a.exchange_name}: {qty_a:+.4f} ({'空头' if position_a and position_a.get('side') == 'short' else '多头' if position_a and position_a.get('side') == 'long' else '无仓位'})\n"
+                f"   {exchange_b.exchange_name}: {qty_b:+.4f} ({'空头' if position_b and position_b.get('side') == 'short' else '多头' if position_b and position_b.get('side') == 'long' else '无仓位'})"
+            )
+            # Exchange A 做空 → 仓位为负
+            qty = qty_b
+            if position_b and position_b.get('side') == 'long':
+                qty = -qty_b
+
+            # Exchange B 做多 → 仓位为正（已经是正数）
+            
+            # 净仓位 = qty_a（以 B 的多头数量为基准）
+            synced_qty = qty
+            
+            logger.info(
+                f"🔄 同步仓位:\n"
+                f"   {exchange_a.exchange_name}: {qty_a:+.4f}\n"
+                f"   {exchange_b.exchange_name}: {qty_b:+.4f}\n"
+                f"   本地净仓位: {synced_qty:+.4f}"
+            )
+            
+            # 检查对冲状态
+            hedge_diff = qty_a + qty_b
+            if abs(hedge_diff) > self.position_step * Decimal('0.1'):  # 允许 10% 误差
+                logger.warning(
+                    f"⚠️ 仓位不对冲:\n"
+                    f"   {exchange_a.exchange_name}: {qty_a:+.4f}\n"
+                    f"   {exchange_b.exchange_name}: {qty_b:+.4f}\n"
+                    f"   差额: {hedge_diff:+.4f}\n"
+                    f"   建议检查订单状态"
+                )
+            
+            # 更新本地仓位
+            self.current_position_qty = synced_qty
+            
+            return synced_qty
+        
+        except Exception as e:
+            logger.error(f"❌ 同步仓位失败: {e}", exc_info=True)
+            return None
+
+
+    async def verify_and_sync(
+        self,
+        exchange_a,
+        exchange_b,
+        symbol: str,
+        expected_qty: Decimal,
+        tolerance: Decimal = Decimal('0.01')
+    ) -> bool:
+        """
+        校验并同步仓位（交易后调用）
+        
+        Args:
+            exchange_a: 交易所 A
+            exchange_b: 交易所 B
+            symbol: 交易对
+            expected_qty: 预期的本地仓位
+            tolerance: 允许误差
+        
+        Returns:
+            是否一致
+        """
+        try:
+            # 获取实际仓位
+            actual_qty = await self.sync_from_exchanges(exchange_a, exchange_b, symbol)
+            
+            if actual_qty is None:
+                logger.error("❌ 无法获取交易所仓位，跳过校验")
+                return False
+            
+            # 计算差异
+            diff = abs(actual_qty - expected_qty)
+            
+            if diff <= tolerance:
+                logger.debug(f"✅ 仓位校验通过: 预期 {expected_qty:+.4f} = 实际 {actual_qty:+.4f}")
+                return True
+            
+            else:
+                # 差异超过阈值 → 修正本地
+                logger.warning(
+                    f"⚠️ 仓位不一致:\n"
+                    f"   本地预期: {expected_qty:+.4f}\n"
+                    f"   交易所实际: {actual_qty:+.4f}\n"
+                    f"   差异: {diff:.4f}\n"
+                    f"   → 已修正为交易所实际值"
+                )
+                
+                # 强制修正
+                self.current_position_qty = actual_qty
+                
+                return False
+        
+        except Exception as e:
+            logger.error(f"❌ 仓位校验失败: {e}", exc_info=True)
+            return False
     
     def _log_open_trade(self, position: Position):
         """记录开仓交易到 CSV"""

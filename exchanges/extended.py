@@ -773,6 +773,63 @@ class ExtendedClient(BaseExchangeClient):
                 position_amt = 0
         return position_amt
     
+    # 更详细的获取仓位的方法    
+    async def get_position(self, symbol: str) -> Optional[dict]:
+        """
+        获取指定币种的持仓信息
+        
+        Args:
+            symbol: 币种符号（如 'HYPE'）
+        
+        Returns:
+            {
+                'symbol': 'HYPE',
+                'side': 'short',
+                'size': 2.5,
+                'entry_price': 28.5,
+                'unrealized_pnl': -0.05
+            }
+        """
+        try:
+            market_name = f"{symbol}-USD"
+            
+            # ✅ 调用 API 获取持仓
+            positions_data = await self.perpetual_trading_client.account.get_positions(
+                market_names=[market_name]
+            )
+            
+            if not positions_data or not hasattr(positions_data, 'data'):
+                self.logger.log(f"No positions data for {symbol}", "DEBUG")
+                return None
+            
+            # ✅ 遍历持仓列表
+            positions = positions_data.data
+            for p in positions:
+                if p.market == market_name:
+                    size = Decimal(str(p.size))
+                    
+                    # ✅ 如果持仓为 0，返回 None
+                    if size == 0:
+                        return None
+                    
+                    # ✅ 判断多空方向
+                    side = 'long' if p.side == 'LONG' else 'short'
+                    
+                    return {
+                        'symbol': symbol,
+                        'side': side,
+                        'size': abs(size),  # 返回绝对值
+                        'entry_price': Decimal(str(getattr(p, 'open_price', 0))),
+                        'unrealized_pnl': Decimal(str(getattr(p, 'unrealisedPnl', 0)))
+                    }
+            
+            # ✅ 未找到该币种的持仓
+            return None
+        
+        except Exception as e:
+            self.logger.log(f"Error getting position for {symbol}: {e}", "ERROR")
+            return None
+    
     async def handle_account(self, message):
         """Handle order updates from WebSocket using correct pattern."""
         try:

@@ -553,3 +553,41 @@ class ExtendedAdapter(ExchangeAdapter):
     def get_latest_orderbook(self) -> Optional[Dict]:
         """获取最新订单簿"""
         return self._orderbook
+    
+    async def get_position(self, symbol: str) -> Optional[dict]:
+        """
+        获取 Extended 持仓信息
+        
+        Args:
+            symbol: 币种符号（如 'HYPE'）
+        
+        Returns:
+            {
+                'symbol': 'HYPE',
+                'side': 'short',
+                'size': 2.5,
+                'entry_price': 28.5,
+                'unrealized_pnl': -0.05
+            }
+        """
+        try:
+            # ✅ 调用 ExtendedClient 的 get_position 方法
+            # 注意：你需要先在 extended.py 中添加 get_position() 方法
+            position = await self.client.get_position(symbol)
+            
+            if position:
+                logger.debug(
+                    f"📊 {self.exchange_name} 持仓:\n"
+                    f"   Symbol: {position['symbol']}\n"
+                    f"   Side: {position['side']}\n"
+                    f"   Size: {position['size']}\n"
+                    f"   Entry Price: ${position['entry_price']}"
+                )
+            else:
+                logger.debug(f"📊 {self.exchange_name} 无持仓: {symbol}")
+            
+            return position
+        
+        except Exception as e:
+            logger.error(f"❌ {self.exchange_name} 获取持仓失败: {e}", exc_info=True)
+            return None
