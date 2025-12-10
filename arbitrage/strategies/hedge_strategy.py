@@ -216,7 +216,6 @@ class HedgeStrategy(BaseStrategy):
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
-            print(f"🔍 价差: {spread_pct:.4f}%, 反向价差: {reverse_spread_pct:.4f}%")
             # ✅ 新增：记录价差并尝试调整阈值
             if self.threshold_manager and signal_flag:
                 # 添加数据
@@ -830,6 +829,7 @@ class HedgeStrategy(BaseStrategy):
             f"🔔 {title}\n\n"
             f"交易对: {self.symbol}\n"
             f"数量: {self.quantity}\n"
+            f"当前仓位: {self.position_manager.get_current_position_qty().quantize(Decimal('0.0001'))}\n"
             f"信号价差: {position.spread_pct.quantize(Decimal('0.0001'))}%\n"
             f"总滑点: {total_slippage}%（A: {a_slippage}% B: {b_slippage}%）\n"
             f"开仓时间: {trigger_time}"
