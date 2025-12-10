@@ -91,7 +91,6 @@ class PositionManagerService:
         if not self.accumulate_mode:
             # ✅ 传统模式：没有持仓才能开仓
             return not self.has_position()
-        logger.info(f"🔍 检查累计模式下能否开仓: direction={direction}")
         # ✅ 累计模式：检查是否超过阈值
         if direction == 'short':
             # 开空：Exchange A 卖出，Exchange B 买入
@@ -101,11 +100,7 @@ class PositionManagerService:
             
             if not can_open:
                 logger.warning(
-                    f"⚠️ 空头仓位已达阈值:\n"
-                    f"   当前: {self.current_position_qty}\n"
-                    f"   尝试开仓后: {new_position}\n"
-                    f"   阈值: -{self.max_position}\n"
-                    f"   🚫 禁止开仓"
+                    f"🚫 空头仓位已达阈值，当前{self.current_position_qty}, 禁止开空"
                 )
             return can_open
         
@@ -117,11 +112,7 @@ class PositionManagerService:
             
             if not can_open:
                 logger.warning(
-                    f"⚠️ 多头仓位已达阈值:\n"
-                    f"   当前: {self.current_position_qty}\n"
-                    f"   尝试开仓后: {new_position}\n"
-                    f"   阈值: +{self.max_position}\n"
-                    f"   🚫 禁止开仓"
+                    f"🚫 多头仓位已达阈值，当前 {self.current_position_qty}, 禁止开多"
                 )
             return can_open
     
@@ -148,19 +139,8 @@ class PositionManagerService:
             can_close = new_position <= self.max_position
             if not can_close:
                 logger.warning(
-                    f"⚠️ 反向开仓后阈值:\n"
-                    f"   当前: {self.current_position_qty}\n"
-                    f"   尝试后: {new_position}\n"
-                    f"   阈值: +{self.max_position}\n"
-                    f"   🚫 禁止操作"
+                    f"🚫 反向开仓后达到阈值，当前 {self.current_position_qty}, 禁止开多"
                 )
-            # else:
-            #     logger.info(
-            #         f"✅ 可以平仓（或反向开多）:\n"
-            #         f"   当前: {self.current_position_qty}\n"
-            #         f"   尝试后: {new_position}\n"
-            #         f"   阈值: +{self.max_position}"
-            #     )
             return can_close
         
         else:  # 'short'
@@ -170,11 +150,7 @@ class PositionManagerService:
             can_close = new_position >= -self.max_position
             if not can_close:
                 logger.warning(
-                    f"⚠️ 开仓后超过阈值:\n"
-                    f"   当前: {self.current_position_qty}\n"
-                    f"   尝试后: {new_position}\n"
-                    f"   阈值: -{self.max_position}\n"
-                    f"   🚫 禁止操作"
+                    f"🚫 反向开仓后达到阈值，当前 {self.current_position_qty}，禁止开空"
                 )
             return can_close
     
@@ -407,6 +383,7 @@ class PositionManagerService:
             # Exchange A 做空 → 仓位为负
             qty = qty_b
             if position_b and position_b.get('side') == 'long':
+                qty_a = -qty_a
                 qty = -qty_b
 
             # Exchange B 做多 → 仓位为正（已经是正数）

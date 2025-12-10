@@ -162,7 +162,7 @@ class Position:
             }
         """
         # ✅ 开仓滑点
-        entry_a_slippage = ((self.exchange_a_entry_price - self.exchange_a_signal_entry_price) 
+        entry_a_slippage = -((self.exchange_a_entry_price - self.exchange_a_signal_entry_price) 
                            / self.exchange_a_signal_entry_price * 100)
         
         entry_b_slippage = ((self.exchange_b_entry_price - self.exchange_b_signal_entry_price) 
@@ -177,7 +177,7 @@ class Position:
                               / self.exchange_a_signal_exit_price * 100)
         
         if self.exchange_b_exit_price and self.exchange_b_signal_exit_price:
-            exit_b_slippage = ((self.exchange_b_exit_price - self.exchange_b_signal_exit_price) 
+            exit_b_slippage = -((self.exchange_b_exit_price - self.exchange_b_signal_exit_price) 
                               / self.exchange_b_signal_exit_price * 100)
         
         # ✅ 总滑点（开仓）
@@ -188,7 +188,7 @@ class Position:
         # ✅ 总滑点（平仓）
         # A 所平空（买入）：滑点越小越好（负数更好）
         # B 所平多（卖出）：滑点越大越好（正数更好）
-        total_exit_slippage = -exit_a_slippage + exit_b_slippage
+        total_exit_slippage = exit_a_slippage + exit_b_slippage
         
         return {
             'entry_a_slippage_pct': entry_a_slippage,

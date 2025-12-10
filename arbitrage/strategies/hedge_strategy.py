@@ -233,13 +233,13 @@ class HedgeStrategy(BaseStrategy):
                 if new_open is not None:
                     self.open_threshold_pct = new_open
                     self.close_threshold_pct = new_close
-                    
+
             if self.position_manager.accumulate_mode:
                 current_qty = self.position_manager.get_current_position_qty()
-                logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
+                # logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
                 if current_qty < 0:
                     # ✅ 优先检查平仓信号（如果可以平仓）
-                    if self.position_manager.can_close('long'):
+                    if self.position_manager.can_open('long'):
                         await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
                         
                         # ✅ 如果正在执行，跳过开仓检查
@@ -251,7 +251,7 @@ class HedgeStrategy(BaseStrategy):
                         await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
                 else:
                     # ✅ 优先检查平仓信号（如果可以平仓）
-                    if self.position_manager.can_close('short'):
+                    if self.position_manager.can_open('short'):
                         await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
                         
                         # ✅ 如果正在执行，跳过开仓检查
@@ -422,7 +422,10 @@ class HedgeStrategy(BaseStrategy):
                 
                 # 发送飞书通知（可选）
                 if self.lark_bot:
-                    await self._send_open_notification(virtual_position, prices)
+                    if self.position_manager.accumulate_mode:
+                        await self._send_multi_notification('short', position)
+                    else:
+                        await self._send_open_notification(position, prices)
 
                 return
             async with self._executing_lock:
@@ -489,7 +492,11 @@ class HedgeStrategy(BaseStrategy):
                         # logger.info(f"✅ 开仓成功: {position}，等待平仓...")
                         # 发送飞书通知
                         if self.lark_bot:
-                            await self._send_open_notification(position, prices)
+                            if self.position_manager.accumulate_mode:
+                                await self._send_multi_notification('short', position)
+                            else:
+                                await self._send_open_notification(position, prices)
+
                     else:
                         # ✅ 节流日志：每5秒最多输出一次
                         if current_time - self.last_log_time >= self.log_interval:
@@ -512,7 +519,7 @@ class HedgeStrategy(BaseStrategy):
         if self.position_manager.accumulate_mode:
             # 平仓信号：Exchange A 买入（平空），Exchange B 卖出（平多）
             # 效果：current_position_qty 变正（减少空头或增加多头）
-            if not self.position_manager.can_close('long'):
+            if not self.position_manager.can_open('long'):
                 # logger.debug("⏸️ 平仓/开仓后超过阈值，跳过平仓信号")
                 return
         else:
@@ -673,7 +680,8 @@ class HedgeStrategy(BaseStrategy):
                     temp_position.exit_time = datetime.now()
                     
                     pnl_pct = self.position_manager.reduce_position(temp_position, 'long')
-                    await self._send_close_notification(temp_position, pnl_pct, prices)
+                    if self.position_manager.accumulate_mode:
+                       await self._send_multi_notification('long', temp_position)
                 else:
                     # ✅ 传统模式：先设置平仓价格，再平仓
                     position.exchange_a_signal_exit_price = prices.exchange_a_ask
@@ -687,14 +695,15 @@ class HedgeStrategy(BaseStrategy):
                 self._last_close_time = time.time()
                 # 发送飞书通知（可选）
                 if self.lark_bot:
-                    await self._send_close_notification(position, pnl_pct, prices)
-
-                # logger.info("✅ 虚拟持仓已清除，切换到开仓监控模式")
+                    if self.position_manager.accumulate_mode:
+                        await self._send_multi_notification('long', position)
+                    else:
+                        await self._send_close_notification(position, pnl_pct, prices)
                 return
             
             async with self._executing_lock:
                 if self.position_manager.accumulate_mode:
-                    if not self.position_manager.can_close('long'):
+                    if not self.position_manager.can_open('long'):
                         logger.warning("⏳ 平仓操作期间超过阈值，跳过本次平仓")
                         return
                 else:
@@ -752,7 +761,10 @@ class HedgeStrategy(BaseStrategy):
                         #     logger.warning("⚠️ 平仓后仓位不一致，已自动修正")                                
                         # 发送飞书通知
                         if self.lark_bot:
-                            await self._send_close_notification(updated_position, pnl_pct, prices)
+                            if self.position_manager.accumulate_mode:
+                                await self._send_multi_notification('long', updated_position)
+                            else:
+                                await self._send_close_notification(updated_position, pnl_pct, prices)
 
                         # 清除持仓
                         # self.position = None
@@ -798,7 +810,32 @@ class HedgeStrategy(BaseStrategy):
             exchange_b_order_id='DUMMY',
             spread_pct=Decimal('0')
         )
-    
+    async def _send_multi_notification(self, direction: str, position: Position):
+        mode_text = "虚拟" if self.monitor_only else "实际"
+        actual_slippage = position.calculate_slippage()
+        logger.info(f'----------actual-------------{actual_slippage}')
+        if direction == 'long':
+            title = f'对冲开多通知（{mode_text}）'
+            a_slippage = actual_slippage['exit_a_slippage_pct'].quantize(Decimal('0.0001'))
+            b_slippage = actual_slippage['exit_b_slippage_pct'].quantize(Decimal('0.0001'))
+            total_slippage = actual_slippage['total_exit_slippage_pct'].quantize(Decimal('0.0001'))
+            trigger_time = position.exit_time.strftime('%Y-%m-%d %H:%M:%S')
+        else: 
+            title = f'对冲开空通知（{mode_text}）'
+            a_slippage = actual_slippage['entry_a_slippage_pct'].quantize(Decimal('0.0001'))
+            b_slippage = actual_slippage['entry_b_slippage_pct'].quantize(Decimal('0.0001'))
+            total_slippage = actual_slippage['total_entry_slippage_pct'].quantize(Decimal('0.0001'))
+            trigger_time = position.entry_time.strftime('%Y-%m-%d %H:%M:%S')
+        message = (
+            f"🔔 {title}\n\n"
+            f"交易对: {self.symbol}\n"
+            f"数量: {self.quantity}\n"
+            f"信号价差: {position.spread_pct.quantize(Decimal('0.0001'))}%\n"
+            f"总滑点: {total_slippage}%（A: {a_slippage}% B: {b_slippage}%）\n"
+            f"开仓时间: {trigger_time}"
+        )
+        await self.lark_bot.send_text(message)
+
     async def _send_open_notification(self, position: Position, prices: PriceSnapshot):
         """发送开仓通知"""
         try:
