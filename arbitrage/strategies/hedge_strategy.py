@@ -822,7 +822,7 @@ class HedgeStrategy(BaseStrategy):
             f"交易对: {self.symbol}\n"
             f"数量: {self.quantity}\n"
             f"当前仓位: {self.position_manager.get_current_position_qty().quantize(Decimal('0.0001'))}\n"
-            f"信号价差: {position.spread_pct.quantize(Decimal('0.0001'))}%（阈值: {threshold.quantize(Decimal('0.0001'))}%）\n"
+            f"信号价差: {position.spread_pct.quantize(Decimal('0.0001'))}%（阈值: {threshold}%）\n"
             f"总滑点: {total_slippage}%（A: {a_slippage}% B: {b_slippage}%）\n"
             f"开仓时间: {trigger_time}"
         )
