@@ -809,18 +809,20 @@ class HedgeStrategy(BaseStrategy):
             b_slippage = actual_slippage['exit_b_slippage_pct'].quantize(Decimal('0.0001'))
             total_slippage = actual_slippage['total_exit_slippage_pct'].quantize(Decimal('0.0001'))
             trigger_time = position.exit_time.strftime('%Y-%m-%d %H:%M:%S')
+            threshold = self.close_threshold_pct
         else: 
             title = f'对冲开空通知（{mode_text}）'
             a_slippage = actual_slippage['entry_a_slippage_pct'].quantize(Decimal('0.0001'))
             b_slippage = actual_slippage['entry_b_slippage_pct'].quantize(Decimal('0.0001'))
             total_slippage = actual_slippage['total_entry_slippage_pct'].quantize(Decimal('0.0001'))
             trigger_time = position.entry_time.strftime('%Y-%m-%d %H:%M:%S')
+            threshold = self.open_threshold_pct
         message = (
             f"🔔 {title}\n\n"
             f"交易对: {self.symbol}\n"
             f"数量: {self.quantity}\n"
             f"当前仓位: {self.position_manager.get_current_position_qty().quantize(Decimal('0.0001'))}\n"
-            f"信号价差: {position.spread_pct.quantize(Decimal('0.0001'))}%\n"
+            f"信号价差: {position.spread_pct.quantize(Decimal('0.0001'))}%（阈值: {threshold.quantize(Decimal('0.0001'))}%）\n"
             f"总滑点: {total_slippage}%（A: {a_slippage}% B: {b_slippage}%）\n"
             f"开仓时间: {trigger_time}"
         )
