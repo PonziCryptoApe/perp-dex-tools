@@ -251,16 +251,16 @@ class HedgeStrategy(BaseStrategy):
                 else:
                     # ✅ 优先检查平仓信号（如果可以平仓）
                     if self.position_manager.can_open('short'):
-                        await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
-                        
+                        await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
+
                         # ✅ 如果正在执行，跳过开仓检查
                         if self._executing_lock.locked():
                             return
                 
                     # ✅ 检查开仓信号（如果可以开仓）
                     if self.position_manager.can_open('long'):
-                        await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
-                
+                        await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
+
             else:
                 # ✅ 根据持仓状态决定检查哪种信号
                 if not self.position_manager.has_position():
@@ -282,12 +282,8 @@ class HedgeStrategy(BaseStrategy):
         ✅ 监控模式下，会创建虚拟持仓（不实际下单）
         """
         # ✅ 累计模式：检查是否可以开空
-        if self.position_manager.accumulate_mode:
+        if not self.position_manager.accumulate_mode:
             # 开仓信号 = Extended 开空（卖出），Variational 开多（买入）
-            if not self.position_manager.can_open('short'):
-                # logger.debug("⏸️ 空头仓位已达阈值，跳过开仓信号")
-                return
-        else:
             # ✅ 传统模式：检查是否有持仓
             if self.position_manager.has_position():
                 return
@@ -515,13 +511,7 @@ class HedgeStrategy(BaseStrategy):
         ✅ 监控模式下，会清除虚拟持仓（不实际下单）
         """
         # ✅ 累计模式：检查是否可以平仓（或反向开仓）
-        if self.position_manager.accumulate_mode:
-            # 平仓信号：Exchange A 买入（平空），Exchange B 卖出（平多）
-            # 效果：current_position_qty 变正（减少空头或增加多头）
-            if not self.position_manager.can_open('long'):
-                # logger.debug("⏸️ 平仓/开仓后超过阈值，跳过平仓信号")
-                return
-        else:
+        if not self.position_manager.accumulate_mode:
             # ✅ 传统模式：检查是否有持仓
             if not self.position_manager.has_position():
                 return
