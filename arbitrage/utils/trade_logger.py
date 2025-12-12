@@ -88,8 +88,11 @@ class TradeLogger:
         # ✅ 计算滑点
         slippage_pct = Decimal('0')
         if signal_price and signal_price != Decimal('0'):
-            slippage_pct = ((filled_price - signal_price) / signal_price) * 100
-        
+            if side.lower() == 'buy':
+                slippage_pct = ((filled_price - signal_price) / signal_price) * 100
+            elif side.lower() == 'sell':
+                slippage_pct = ((signal_price - filled_price) / signal_price) * 100
+
         try:
             with open(self.csv_filename, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -178,7 +181,7 @@ class TradeLogger:
         )
         
         # ✅ 计算总滑点
-        slippage_a = ((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
+        slippage_a = -((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
         slippage_b = ((exchange_b_filled_price - exchange_b_signal_price) / exchange_b_signal_price * 100)
         total_slippage = slippage_a + slippage_b
         

@@ -538,6 +538,7 @@ class OrderExecutor:
                 else:
                     logger.critical(f"🚨 平仓任务 {i+1} 失败，需要手动处理！")
         return Decimal('0'), Decimal('0')
+    
     async def _retry_place_order(
         self,
         exchange: ExchangeAdapter,
@@ -572,53 +573,47 @@ class OrderExecutor:
 
         for attempt in range(1, max_retries + 1):
             try:
-                if attempt > 1:
-                    logger.info(
-                        f"🔄 重试下单: {exchange.exchange_name} | "
-                        f"类型: {order_type} | 方向: {side} | "
-                        f"尝试次数: {attempt}/{max_retries}"
-                    )
-                    await asyncio.sleep(self.retry_delay)
-                    # ✅ 从第 2 次重试开始，获取最新价格和 quote_id
-                    try:
-                        orderbook = exchange.get_latest_orderbook()
+                logger.info(
+                    f"🔄 重试下单: {exchange.exchange_name} | "
+                    f"类型: {order_type} | 方向: {side} | "
+                    f"尝试次数: {attempt}/{max_retries}"
+                )
+                # ✅ 从第 1 次重试开始，获取最新价格和 quote_id
+                try:
+                    orderbook = exchange.get_latest_orderbook()
+                    if orderbook:
+                        # ✅ 更新 quote_id（如果有）
+                        if orderbook.get('quote_id'):
+                            current_quote_id = orderbook['quote_id']
+                            logger.info(f"💡 获取最新 quote_id: {current_quote_id[:8]}...")
                         
-                        if orderbook:
-                            # ✅ 更新 quote_id（如果有）
-                            if orderbook.get('quote_id'):
-                                current_quote_id = orderbook['quote_id']
-                                logger.info(f"💡 获取最新 quote_id: {current_quote_id[:8]}...")
-                            
-                            # ✅ 根据订单方向获取最优价格
-                            if side.lower() == 'buy':
-                                # 买入：使用卖一价（asks）
-                                if orderbook.get('asks') and len(orderbook['asks']) > 0:
-                                    new_price = Decimal(str(orderbook['asks'][0][0]))
-                                    logger.info(
-                                        f"💡 获取最新卖一价: ${initial_price} → ${new_price} "
-                                        f"(变化: {((new_price - initial_price) / initial_price * 100):+.4f}%)"
-                                    )
-                                    price = new_price
-                            else:
-                                # 卖出：使用买一价（bids）
-                                if orderbook.get('bids') and len(orderbook['bids']) > 0:
-                                    new_price = Decimal(str(orderbook['bids'][0][0]))
-                                    logger.info(
-                                        f"💡 获取最新买一价: ${initial_price} → ${new_price} "
-                                        f"(变化: {((new_price - initial_price) / initial_price * 100):+.4f}%)"
-                                    )
-                                    price = new_price
+                        # ✅ 根据订单方向获取最优价格
+                        if side.lower() == 'buy':
+                            # 买入：使用卖一价（asks）
+                            if orderbook.get('asks') and len(orderbook['asks']) > 0:
+                                new_price = Decimal(str(orderbook['asks'][0][0]))
+                                logger.info(
+                                    f"💡 获取最新卖一价: ${initial_price} → ${new_price} "
+                                    f"(变化: {((new_price - initial_price) / initial_price * 100):+.4f}%)"
+                                )
+                                price = new_price
                         else:
-                            logger.warning(f"⚠️ 无法获取最新订单簿，使用初始价格 ${initial_price}")
-                    
-                    except Exception as e:
-                        logger.warning(f"⚠️ 获取最新价格失败: {e}，使用初始价格 ${initial_price}")
-                # ✅ 从第 3 次重试开始，强制使用 aggressive 模式
-                if attempt >= 3:
-                    current_retry_mode = 'aggressive'
-                    logger.info(f"💡 第 {attempt} 次重试，切换为 aggressive 模式")
-                else:
-                    current_retry_mode = retry_mode
+                            # 卖出：使用买一价（bids）
+                            if orderbook.get('bids') and len(orderbook['bids']) > 0:
+                                new_price = Decimal(str(orderbook['bids'][0][0]))
+                                logger.info(
+                                    f"💡 获取最新买一价: ${initial_price} → ${new_price} "
+                                    f"(变化: {((new_price - initial_price) / initial_price * 100):+.4f}%)"
+                                )
+                                price = new_price
+                    else:
+                        logger.warning(f"⚠️ 无法获取最新订单簿，使用初始价格 ${initial_price}")
+                
+                except Exception as e:
+                    logger.warning(f"⚠️ 获取最新价格失败: {e}，使用初始价格 ${initial_price}")
+                current_retry_mode = retry_mode
+                logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式")
+
                 if order_type == 'open':
                     result = await exchange.place_open_order(
                         side=side,
@@ -653,12 +648,11 @@ class OrderExecutor:
                     }
             
                 if result.get('success'):
-                    if attempt > 1:
-                        logger.info(
-                            f"✅ 下单成功: {exchange.exchange_name} | "
-                            f"类型: {order_type} | 方向: {side} | "
-                            f"尝试次数: {attempt}/{max_retries}"
-                        )
+                    logger.info(
+                        f"✅ 下单成功: {exchange.exchange_name} | "
+                        f"类型: {order_type} | 方向: {side} | "
+                        f"尝试次数: {attempt}/{max_retries}"
+                    )
                     return result
                 else:
                     logger.warning(
@@ -1158,7 +1152,7 @@ class OrderExecutor:
                     side='buy',
                     quantity=close_quantity,
                     price=exchange_a_price,
-                    retry_mode='opportunistic',
+                    retry_mode='aggressive',
                     quote_id=exchange_a_quote_id,
                     max_retries=self.max_retries + 2  # 增加重试次数
                 )

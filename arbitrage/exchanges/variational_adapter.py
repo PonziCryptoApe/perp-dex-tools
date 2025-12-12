@@ -437,63 +437,29 @@ class VariationalAdapter(ExchangeAdapter):
                 self.current_order_id = rfq_id
                 logger.info(f"✅ 已设置 current_order_id = {rfq_id}")
 
-                final_status = await self._wait_for_order_fill(rfq_id, timeout=5.0)
-                logger.info(f"📊 等待结果: final_status={final_status}")
-
-                if not final_status:
-                    logger.warning(f"⚠️ WebSocket 超时，但订单可能已成交")
-                    # 改为restful API查询最终状态
-                    history_data = await self.client.get_orders_history(limit=20, offset=0, rfq_id=rfq_id)
-                    if history_data and 'result' in history_data and history_data['result']:
-                        order_data = history_data['result'][0]  # 第一个匹配的订单
-                        final_status = order_data.get('status', None)
-                        logger.info(f"📊 通过 RESTful API 获取订单状态: final_status={final_status}")
-                        if final_status and final_status.upper() in ['FILLED', 'CLEARED']:
-                            logger.info(f"✅ 根据 RESTful API 判断，订单已成交")
-                            return {
-                                'success': True,
-                                'order_id': rfq_id,
-                                'error': None,
-                                'filled_price': Decimal(str(order_data.get('price', '0'))),
-                                'filled_quantity': Decimal(str(order_data.get('qty', '0')))
-                            }
-                        else:
-                            logger.error(f"❌ 超时且订单状态为 {final_status}")
-                            return {
-                                'success': False,
-                                'order_id': rfq_id,
-                                'error': f'Timeout and order status: {final_status}',
-                                'filled_price': Decimal('0'),
-                                'filled_quantity': Decimal('0')
-                            }
-                        # 检查仓位状态
-                        # if self.position_is_full and self.order_status == 'FILLED':
-                        #     logger.info(f"✅ 根据仓位状态判断，订单已成交")
-                        #     return {
-                        #         'success': True,
-                        #         'order_id': rfq_id,
-                        #         'error': None
-                        #     }
-                        # else:
-                        #     logger.error(f"❌ 超时且仓位未成交")
-                        #     return {
-                        #         'success': False,
-                        #         'order_id': rfq_id,
-                        #         'error': 'Timeout and position not filled',
-                        #         'filled_price': Decimal('0'),
-                        #         'filled_quantity': Decimal('0')
-                        #     }
-                # ✅ 3. 判断最终状态
-                if final_status in ['FILLED', 'CLEARED']:
-                    logger.info(f"✅ 市价单成功: {rfq_id}")
-                    history_data = await self.client.get_orders_history(limit=20, offset=0, rfq_id=rfq_id)
-
-                    if history_data and 'result' in history_data and history_data['result']:
-                        order_data = history_data['result'][0]  # 第一个匹配的订单
-                        
+                # final_status = await self._wait_for_order_fill(rfq_id, timeout=5.0)
+                await asyncio.sleep(0.4)  # 确保状态更新完成
+                # logger.info(f"📊 等待结果: final_status={final_status}")
+                history_data = await self.client.get_orders_history(limit=20, offset=0, rfq_id=rfq_id)
+                if history_data and 'result' in history_data and history_data['result']:
+                    order_data = history_data['result'][0]  # 第一个匹配的订单
+                    final_status = order_data.get('status', None)
+                    logger.info(f"📊 通过 RESTful API 获取订单状态: final_status={final_status}")
+                    if not final_status:
+                        logger.error(f"❌ 超时且订单状态为 {final_status}")
+                        return {
+                            'success': False,
+                            'order_id': rfq_id,
+                            'error': f'Timeout and order status: {final_status}',
+                            'filled_price': Decimal('0'),
+                            'filled_quantity': Decimal('0')
+                        }
+                    # ✅ 3. 判断最终状态
+                    if final_status.upper() in ['FILLED', 'CLEARED']:
+                        logger.info(f"✅ 市价单成功: {rfq_id}")
                         filled_price = Decimal(str(order_data.get('price', '0')))
                         filled_quantity = Decimal(str(order_data.get('qty', '0')))
-                        
+                            
                         logger.info(
                             f"✅ 获取订单信息:\n"
                             f"   订单 ID: {rfq_id}\n"
@@ -508,35 +474,25 @@ class VariationalAdapter(ExchangeAdapter):
                             'filled_quantity': filled_quantity,
                             'error': None
                         }
-                    else:
-                        logger.warning(f"⚠️ 未找到订单 {rfq_id}，使用后备价格")
-                        
+                    elif final_status.upper() in ['CANCELED', 'REJECTED']:
+                        logger.error(f"❌ 市价单失败: {final_status}")
                         return {
-                            'success': True,
+                            'success': False,
                             'order_id': rfq_id,
-                            'filled_price': Decimal('0'),  # 或使用信号价格
-                            'filled_quantity': Decimal('0'),
-                            'error': None
+                            'error': f'Order {final_status}',
+                            'filled_price': Decimal('0'),
+                            'filled_quantity': Decimal('0')
                         }
-                elif final_status in ['CANCELED', 'REJECTED']:
-                    logger.error(f"❌ 市价单失败: {final_status}")
-                    return {
-                        'success': False,
-                        'order_id': rfq_id,
-                        'error': f'Order {final_status}',
-                        'filled_price': Decimal('0'),
-                        'filled_quantity': Decimal('0')
-                    }
-                else:
-                    # 未知状态，保守返回失败
-                    logger.error(f"❌ 未知订单状态: {final_status}")
-                    return {
-                        'success': False,
-                        'order_id': rfq_id,
-                        'error': f'Unknown status: {final_status}',
-                        'filled_price': Decimal('0'),
-                        'filled_quantity': Decimal('0')
-                    }
+                    else:
+                        # 未知状态，保守返回失败
+                        logger.error(f"❌ 未知订单状态: {final_status}")
+                        return {
+                            'success': False,
+                            'order_id': rfq_id,
+                            'error': f'Unknown status: {final_status}',
+                            'filled_price': Decimal('0'),
+                            'filled_quantity': Decimal('0')
+                        }
             except Exception as e:
                 logger.error(f"❌ place_market_order 异常: {e}")
                 import traceback

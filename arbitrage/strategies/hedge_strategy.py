@@ -418,7 +418,7 @@ class HedgeStrategy(BaseStrategy):
                 # 发送飞书通知（可选）
                 if self.lark_bot:
                     if self.position_manager.accumulate_mode:
-                        await self._send_multi_notification('short', position)
+                        await self._send_multi_notification('short', position, spread_pct)
                     else:
                         await self._send_open_notification(position, prices)
 
@@ -488,7 +488,7 @@ class HedgeStrategy(BaseStrategy):
                         # 发送飞书通知
                         if self.lark_bot:
                             if self.position_manager.accumulate_mode:
-                                await self._send_multi_notification('short', position)
+                                await self._send_multi_notification('short', position, spread_pct)
                             else:
                                 await self._send_open_notification(position, prices)
 
@@ -670,7 +670,7 @@ class HedgeStrategy(BaseStrategy):
                     
                     pnl_pct = self.position_manager.reduce_position(temp_position, 'long')
                     if self.position_manager.accumulate_mode:
-                       await self._send_multi_notification('long', temp_position)
+                       await self._send_multi_notification('long', temp_position, spread_pct)
                 else:
                     # ✅ 传统模式：先设置平仓价格，再平仓
                     position.exchange_a_signal_exit_price = prices.exchange_a_ask
@@ -685,7 +685,7 @@ class HedgeStrategy(BaseStrategy):
                 # 发送飞书通知（可选）
                 if self.lark_bot:
                     if self.position_manager.accumulate_mode:
-                        await self._send_multi_notification('long', position)
+                        await self._send_multi_notification('long', position, spread_pct)
                     else:
                         await self._send_close_notification(position, pnl_pct, prices)
                 return
@@ -751,7 +751,7 @@ class HedgeStrategy(BaseStrategy):
                         # 发送飞书通知
                         if self.lark_bot:
                             if self.position_manager.accumulate_mode:
-                                await self._send_multi_notification('long', updated_position)
+                                await self._send_multi_notification('long', updated_position, spread_pct)
                             else:
                                 await self._send_close_notification(updated_position, pnl_pct, prices)
 
@@ -799,7 +799,7 @@ class HedgeStrategy(BaseStrategy):
             exchange_b_order_id='DUMMY',
             spread_pct=Decimal('0')
         )
-    async def _send_multi_notification(self, direction: str, position: Position):
+    async def _send_multi_notification(self, direction: str, position: Position, spread_pct: Decimal):
         mode_text = "虚拟" if self.monitor_only else "实际"
         actual_slippage = position.calculate_slippage()
         logger.info(f'----------actual-------------{actual_slippage}')
@@ -825,7 +825,7 @@ class HedgeStrategy(BaseStrategy):
             f"交易对: {self.symbol}\n"
             f"数量: {self.quantity}\n"
             f"当前仓位: {current_position_qty + qty} --> {current_position_qty}\n"
-            f"信号价差: {position.spread_pct.quantize(Decimal('0.0001'))}%（阈值: {threshold}%）\n"
+            f"信号价差: {spread_pct.quantize(Decimal('0.0001'))}%（阈值: {threshold}%）\n"
             f"总滑点: {total_slippage}%（A: {a_slippage}% B: {b_slippage}%）\n"
             f"开仓时间: {trigger_time}"
         )
