@@ -22,15 +22,22 @@ sys.path.insert(0, str(project_root))
 from exchanges.variational import VariationalClient
 from helpers.util import Config
 from dotenv import load_dotenv
+log_dir = project_root / 'logs'  # 日志目录
+log_dir.mkdir(exist_ok=True)  # 创建目录
+log_file = log_dir / f'var_order_latency_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s.%(msecs)03d | %(levelname)-8s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(log_file),  # 日志文件
+        logging.StreamHandler()  # 控制台输出
+    ]
 )
 logger = logging.getLogger(__name__)
-
+logger.info(f"📝 日志文件: {log_file}")
 
 class OrderLatencyTester:
     """订单延迟测试器"""
