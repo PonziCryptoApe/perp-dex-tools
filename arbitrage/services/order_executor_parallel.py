@@ -644,7 +644,8 @@ class OrderExecutor:
                         'filled_quantity': result.get('filled_quantity', Decimal('0')),
                         'filled_price': result.get('filled_price', price),
                         'error': None,
-                        'partial_fill': True  # ✅ 传递部分成交标志
+                        'partial_fill': True,  # ✅ 传递部分成交标志
+                        'timestamp': result.get('timestamp')
                     }
             
                 if result.get('success'):
@@ -678,7 +679,8 @@ class OrderExecutor:
             'order_id': None,
             'filled_price': Decimal('0'),
             'filled_quantity': Decimal('0'),
-            'error': 'Max retries exceeded'
+            'error': 'Max retries exceeded',
+            'timestamp': time.time()
         }
 
     async def execute_open(
@@ -873,7 +875,9 @@ class OrderExecutor:
                         f"✅ 开仓成功（B 所重试成功）:\n"
                         f"   {self.exchange_a.exchange_name}: {order_a_result.get('order_id')}\n"
                         f"   {self.exchange_b.exchange_name}: {retry_result_b.get('order_id')}\n"
-                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
+                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms\n"
+                        f"   🕒 交易所A耗时: {(order_a_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
+                        f"   🕒 交易所B耗时: {(order_b_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
                     )
                     # ✅ 获取实际成交价格
                     # actual_price_a = order_a_result.get('filled_price') or exchange_a_price
@@ -1165,7 +1169,9 @@ class OrderExecutor:
                         f"✅ 平仓成功（A 所重试成功）:\n"
                         f"   {self.exchange_a.exchange_name}: {retry_result_a.get('order_id')}\n"
                         f"   {self.exchange_b.exchange_name}: {order_b_result.get('order_id')}\n"
-                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
+                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms \n"
+                        f"   🕒 交易所A耗时: {(order_a_result.get('timestamp') - execution_start_time) * 1000:.2f} ms \n"
+                        f"   🕒 交易所B耗时: {(order_b_result.get('timestamp') - execution_start_time) * 1000:.2f} ms \n"
                     )
                     # ✅ 获取实际成交价格
                     # actual_price_a = retry_result_a.get('filled_price')
@@ -1241,7 +1247,9 @@ class OrderExecutor:
                         f"✅ 平仓成功（B 所重试成功）:\n"
                         f"   {self.exchange_a.exchange_name}: {order_a_result.get('order_id')}\n"
                         f"   {self.exchange_b.exchange_name}: {retry_result_b.get('order_id')}\n"
-                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
+                        f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms\n"
+                        f"   🕒 交易所A耗时: {(order_a_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
+                        f"   🕒 交易所B耗时: {(order_b_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
                     )
                     # ✅ 获取实际成交价格
                     # actual_price_a = order_a_result.get('filled_price')

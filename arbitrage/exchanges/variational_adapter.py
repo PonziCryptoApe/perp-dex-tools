@@ -371,7 +371,8 @@ class VariationalAdapter(ExchangeAdapter):
                             return {
                                 'success': False,
                                 'order_id': None,
-                                'error': 'Failed to fetch quote_id'
+                                'error': 'Failed to fetch quote_id',
+                                'timestamp': time.time()
                             }
                         
                         current_quote_id = quote_data['quote_id']
@@ -391,7 +392,8 @@ class VariationalAdapter(ExchangeAdapter):
                         return {
                             'success': False,
                             'order_id': None,
-                            'error': f'Failed to fetch quote_id: {e}'
+                            'error': f'Failed to fetch quote_id: {e}',
+                            'timestamp': time.time()
                         }
                 
                 logger.info(
@@ -426,7 +428,8 @@ class VariationalAdapter(ExchangeAdapter):
                     return {
                         'success': False,
                         'order_id': None,
-                        'error': result.error_message
+                        'error': result.error_message,
+                        'timestamp': time.time()
                     }
                 
                 rfq_id = result.order_id
@@ -452,7 +455,8 @@ class VariationalAdapter(ExchangeAdapter):
                             'order_id': rfq_id,
                             'error': f'Timeout and order status: {final_status}',
                             'filled_price': Decimal('0'),
-                            'filled_quantity': Decimal('0')
+                            'filled_quantity': Decimal('0'),
+                            'timestamp': time.time()
                         }
                     # ✅ 3. 判断最终状态
                     if final_status.upper() in ['FILLED', 'CLEARED']:
@@ -472,7 +476,8 @@ class VariationalAdapter(ExchangeAdapter):
                             'order_id': rfq_id,
                             'filled_price': filled_price,
                             'filled_quantity': filled_quantity,
-                            'error': None
+                            'error': None,
+                            'timestamp': time.time()
                         }
                     elif final_status.upper() in ['CANCELED', 'REJECTED']:
                         logger.error(f"❌ 市价单失败: {final_status}")
@@ -481,7 +486,8 @@ class VariationalAdapter(ExchangeAdapter):
                             'order_id': rfq_id,
                             'error': f'Order {final_status}',
                             'filled_price': Decimal('0'),
-                            'filled_quantity': Decimal('0')
+                            'filled_quantity': Decimal('0'),
+                            'timestamp': time.time()
                         }
                     else:
                         # 未知状态，保守返回失败
@@ -491,7 +497,8 @@ class VariationalAdapter(ExchangeAdapter):
                             'order_id': rfq_id,
                             'error': f'Unknown status: {final_status}',
                             'filled_price': Decimal('0'),
-                            'filled_quantity': Decimal('0')
+                            'filled_quantity': Decimal('0'),
+                            'timestamp': time.time()
                         }
             except Exception as e:
                 logger.error(f"❌ place_market_order 异常: {e}")
@@ -504,7 +511,8 @@ class VariationalAdapter(ExchangeAdapter):
                     'order_id': None,
                     'error': str(e),
                     'filled_price': Decimal('0'),
-                    'filled_quantity': Decimal('0')
+                    'filled_quantity': Decimal('0'),
+                    'timestamp': time.time()
                 }
         
     async def place_limit_order(

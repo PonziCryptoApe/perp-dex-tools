@@ -4,8 +4,32 @@ import sys
 from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+import time
 
 
+# ✅ 新增：自定义时区转换器
+class BeijingFormatter(logging.Formatter):
+    """使用北京时间的日志格式化器"""
+    
+    converter = time.gmtime  # 先用 GMT
+    
+    def formatTime(self, record, datefmt=None):
+        """覆盖时间格式化方法，转换为北京时间（UTC+8）"""
+        # 获取 UTC 时间戳
+        ct = self.converter(record.created)
+        
+        # 转换为北京时间（UTC+8）
+        import datetime as dt
+        utc_time = dt.datetime.fromtimestamp(record.created, tz=dt.timezone.utc)
+        beijing_time = utc_time.astimezone(dt.timezone(dt.timedelta(hours=8)))
+        
+        if datefmt:
+            s = beijing_time.strftime(datefmt)
+        else:
+            s = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        return s
+    
 def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     """
     设置日志系统
@@ -24,7 +48,7 @@ def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     log_file = log_dir / f"arbitrage_{pair}_{datetime.now().strftime('%Y%m%d')}.log"
     
     # 创建日志格式
-    log_format = logging.Formatter(
+    log_format = BeijingFormatter(
         '%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )

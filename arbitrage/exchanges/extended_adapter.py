@@ -398,6 +398,7 @@ class ExtendedAdapter(ExchangeAdapter):
                     'error': error_msg,
                     'filled_price': Decimal('0'),
                     'filled_quantity': Decimal('0'),
+                    'timestamp': time.time()
                 }
             
             order_id = order_result.data.id
@@ -408,6 +409,7 @@ class ExtendedAdapter(ExchangeAdapter):
                     'error': 'No order ID returned',
                     'filled_price': Decimal('0'),
                     'filled_quantity': Decimal('0'),
+                    'timestamp': time.time()
                 }
             
             # 等待订单执行
@@ -462,7 +464,8 @@ class ExtendedAdapter(ExchangeAdapter):
                         'error': 'Order CANCELED (partial fill)',
                         'filled_price': price_from_ws,
                         'filled_quantity': filled_size_from_ws,
-                        'partial_fill': True  # ✅ 标记为部分成交
+                        'partial_fill': True,  # ✅ 标记为部分成交
+                        'timestamp': time.time()
                     }
                 else:
                     logger.info(
@@ -475,6 +478,7 @@ class ExtendedAdapter(ExchangeAdapter):
                         'error': 'Order CANCELED (no fill)',
                         'filled_price': Decimal('0'),
                         'filled_quantity': Decimal('0'),
+                        'timestamp': time.time()
                     }
             if status in ['REJECTED']:
                 # ✅ 激进模式：重试
@@ -489,6 +493,7 @@ class ExtendedAdapter(ExchangeAdapter):
                     'error': f'Order {status}',
                     'filled_price': Decimal('0'),
                     'filled_quantity': Decimal('0'),
+                    'timestamp': time.time()
                 }
             
             if status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED']:
@@ -521,7 +526,8 @@ class ExtendedAdapter(ExchangeAdapter):
                     'order_id': order_id,
                     'filled_price': filled_price,
                     'filled_quantity': filled_quantity,
-                    'error': None
+                    'error': None,
+                    'timestamp': time.time()
                 }
             
             return {
@@ -530,6 +536,7 @@ class ExtendedAdapter(ExchangeAdapter):
                 'error': f'Unknown status: {status}',
                 'filled_price': Decimal('0'),
                 'filled_quantity': Decimal('0'),
+                'timestamp': time.time()
             }
         
         except Exception as e:
