@@ -555,6 +555,7 @@ class OrderLatencyTester:
                 async def place_buy_order():
                     """买单任务"""
                     start = time.time()
+                    logger.info("📤 开始下买单...")
                     result = await self.client._place_market_order(
                         quote_id=quote_id,
                         side='buy',
@@ -570,6 +571,7 @@ class OrderLatencyTester:
                         await asyncio.sleep(delay_ms / 1000)
                     
                     start = time.time()
+                    logger.info("📤 开始下卖单...")
                     result = await self.client._place_market_order(
                         quote_id=quote_id,
                         side='sell',
