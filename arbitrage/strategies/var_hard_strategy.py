@@ -29,6 +29,7 @@ class VarHardStrategy:
         symbol: str,
         exchange: VariationalAdapter,
         quantity: Decimal,
+        quantity_range: tuple = (Decimal('0.0011'), Decimal('0.0033')),
         spread_threshold: Decimal = Decimal('0.0026'),  # 点差阈值 0.0026%
         max_slippage: Decimal = Decimal('0.0005'),  # 最大滑点 0.05%
         cooldown_seconds: float = 5.0,  # 冷却时间
@@ -42,6 +43,7 @@ class VarHardStrategy:
         self.symbol = symbol
         self.exchange = exchange
         self.quantity = quantity
+        self.quantity_range = quantity_range  # ✅ 新增：随机数量范围
         self.spread_threshold = spread_threshold
         self.max_slippage = max_slippage
         self.cooldown_seconds = cooldown_seconds
@@ -93,10 +95,10 @@ class VarHardStrategy:
         logger.info(
             f"🎯 Variational 硬刷策略初始化:\n"
             f"   Symbol: {symbol}\n"
-            f"   Quantity: {quantity}\n"
+            f"   Quantity: {quantity_range[0]} - {quantity_range[1]}\n"
             f"   Spread Threshold: {spread_threshold}%\n"
             f"   Max Slippage: {max_slippage * 100}%\n"
-            f"   Cooldown: {cooldown_seconds}s\n"
+            f"   Cooldown: {cooldown_range[0]} - {cooldown_range[1]}s\n"
             f"   Poll Interval: {poll_interval}s\n"
             f"   Monitor Only: {monitor_only}\n"
             f"   Data Dir: {self.data_dir}"
@@ -130,7 +132,8 @@ class VarHardStrategy:
                 'spread_pct',
                 'mid_price',
                 'quote_id',
-                'fetch_duration_ms'
+                'fetch_duration_ms',
+                'quantity'
             ])
     def _init_trades_csv(self):
         """初始化交易 CSV"""
@@ -142,6 +145,7 @@ class VarHardStrategy:
                 'order_datetime',
                 'record_timestamp',
                 'record_datetime',
+                'quantity',
                 'ob_bid_price',
                 'ob_ask_price',
                 'ob_spread_pct',
@@ -203,8 +207,10 @@ class VarHardStrategy:
             try:
                 # ========== 1. 获取报价（订单簿数据） ==========
                 fetch_start = time.time()  # ✅ 记录开始时间
+                current_quantity = self._get_random_quantity()
+
                 quote_data = await self.exchange.client._fetch_indicative_quote(
-                    qty=self.quantity,
+                    qty=current_quantity,
                     contract_id=f"{self.symbol}-PERP"
                 )
                 fetch_duration = (time.time() - fetch_start) * 1000  # ✅ 计算耗时（毫秒）
@@ -228,7 +234,8 @@ class VarHardStrategy:
                     bid_size=bid_size,
                     ask_size=ask_size,
                     quote_id=quote_id,
-                    fetch_duration=fetch_duration
+                    fetch_duration=fetch_duration,
+                    quantity=current_quantity
                 )
                 
                 # ========== 3. 检查是否满足交易条件 ==========
@@ -263,6 +270,7 @@ class VarHardStrategy:
                     f"   Bid: ${bid_price} \n"
                     f"   Ask: ${ask_price} \n"
                     f"   点差: {spread_pct:.6f}% < 阈值: {self.spread_threshold}%\n"
+                    f"   数量: {current_quantity}\n"
                     f"⏱️  获取订单簿耗时: {fetch_duration:.1f}ms\n"
                     f"⏱️  距上次下单: {time_since_last_order:.1f}s\n"  # ✅ 新增
                     f"   Quote ID: {quote_id}"
@@ -285,7 +293,8 @@ class VarHardStrategy:
                         ask_price=ask_price,
                         spread_pct=spread_pct,
                         quote_id=quote_id,
-                        fetch_duration=fetch_duration
+                        fetch_duration=fetch_duration,
+                        quantity=current_quantity
                     )
                                 
             except asyncio.CancelledError:
@@ -303,7 +312,8 @@ class VarHardStrategy:
         bid_size: Decimal,
         ask_size: Decimal,
         quote_id: str,
-        fetch_duration: float
+        fetch_duration: float,
+        quantity: Decimal
     ):
         """记录订单簿数据"""
         try:
@@ -325,13 +335,22 @@ class VarHardStrategy:
                     f'{spread_pct:.6f}',
                     str(mid_price),
                     quote_id,
-                    f'{fetch_duration:.2f}'
+                    f'{fetch_duration:.2f}',
+                    str(quantity)
                 ])
             
             self.stats['orderbook_samples'] += 1
             
         except Exception as e:
             logger.error(f"❌ 记录订单簿数据失败: {e}")
+    def _get_random_quantity(self) -> Decimal:
+        """生成随机数量"""
+        min_qty, max_qty = self.quantity_range
+        # 生成随机浮点数，转换为 Decimal
+        random_float = random.uniform(float(min_qty), float(max_qty))
+        # 保留 4 位小数
+        random_qty = Decimal(str(random_float)).quantize(Decimal('0.0001'))
+        return random_qty
     
     async def _execute_trade(
         self,
@@ -339,7 +358,8 @@ class VarHardStrategy:
         ask_price: Decimal,
         spread_pct: Decimal,
         quote_id: str,
-        fetch_duration: float
+        fetch_duration: float,
+        quantity: Decimal
     ):
         """执行交易（同时下买卖单）"""
         self.stats['trades_attempted'] += 1
@@ -349,7 +369,7 @@ class VarHardStrategy:
         order_time = time.time()
         order_datetime = datetime.fromtimestamp(order_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
-        logger.info(f"📤 开始执行交易 #{self.trade_count},下单时间: {order_datetime} (Quote ID: {quote_id})")
+        logger.info(f"📤 开始执行交易 #{self.trade_count},数量: {quantity}, ⏱️下单时间: {order_datetime} (Quote ID: {quote_id})")
 
         # 定义买单和卖单任务
         async def place_buy_order():
@@ -361,7 +381,10 @@ class VarHardStrategy:
                     side='buy',
                     max_slippage=float(self.max_slippage)
                 )
-                duration = (time.time() - start) * 1000
+                buy_success_time = time.time()
+                duration = (buy_success_time - start) * 1000
+                logger.info(f"✅ 买单下单成功: 订单ID {result.order_id},⏱️ 时间: {buy_success_time:.2f}, ⏱️ 耗时: {duration:.2f}ms")
+
                 return {
                     'success': result.success,
                     'order_id': result.order_id,
@@ -387,7 +410,9 @@ class VarHardStrategy:
                     side='sell',
                     max_slippage=float(self.max_slippage)
                 )
-                duration = (time.time() - start) * 1000
+                sell_success_time = time.time()
+                duration = (sell_success_time - start) * 1000
+                logger.info(f"✅ 卖单下单成功: 订单ID {result.order_id},⏱️ 时间: {sell_success_time:.2f}, ⏱️ 耗时: {duration:.2f}ms")
                 return {
                     'success': result.success,
                     'order_id': result.order_id,
@@ -405,13 +430,17 @@ class VarHardStrategy:
 
         async def getOrderInfo(orderId, max_retries=3):
             """获取订单信息"""
+            order_info_start = time.time()
+            logger.info(f"🔍 开始获取订单信息: {orderId},当前时间: {order_info_start}")
             for attempt in range(max_retries):
                 try:
+                    n_start_time = time.time()
                     result = await self.exchange.client.get_orders_history(rfq_id=orderId)
-                    
+                    current_time = time.time()
+                    logger.info(f"📥 第 {attempt + 1} 次获取订单信息响应时间: {current_time}, ⏱️ 耗时: {(current_time - n_start_time)*1000:.2f}ms, 累计耗时: {(current_time - order_info_start)*1000:.2f}ms")
                     # ✅ 检查返回数据是否有效
                     if result and 'result' in result and len(result['result']) > 0:
-                        logger.debug(f"✅ 第 {attempt + 1} 次尝试成功获取订单信息")
+                        logger.info(f"✅ 第 {attempt + 1} 次尝试成功获取订单信息")
                         return result
                     
                     # ✅ 如果为空，等待后重试
@@ -447,7 +476,7 @@ class VarHardStrategy:
         # 处理结果
         buy_success = isinstance(buy_result, dict) and buy_result['order_id']
         sell_success = isinstance(sell_result, dict) and sell_result['order_id']
-
+        logger.info("⏱️  并发执行结束，开始等待180ms")
         await asyncio.sleep(0.18)  # 等待订单信息更新
         # 计算滑点和实际点差
         buy_slippage_abs = None
@@ -468,13 +497,17 @@ class VarHardStrategy:
                 buyOrderInfo = info['result'][0]
                 if buyOrderInfo:
                     buy_filled_price = Decimal(str(buyOrderInfo['price'])) if buyOrderInfo else Decimal('0')
+                    logger.info(f"买单实际成交价: {buy_filled_price}")
                     buy_slippage_abs = buy_filled_price - ask_price
+                    logger.info(f"买单绝对滑点: {buy_slippage_abs}")
                     buy_slippage_pct = (buy_slippage_abs / ask_price * 100)
                     buy_created_at = buyOrderInfo.get('created_at', None)
                     buy_executed_at = buyOrderInfo.get('execution_timestamp', None)
                     buy_delay_ms = None
                     if buy_created_at and buy_executed_at:
                         try:
+                            logger.info(f"⏱️ 买单创建时间（service）: {buy_created_at}")
+                            logger.info(f"⏱️ 买单执行时间（service）: {buy_executed_at}")
                             # 将 ISO 格式字符串转换为 datetime 对象
                             buy_created_at = datetime.fromisoformat(buy_created_at.replace('Z', '+00:00'))
                             buy_executed_at = datetime.fromisoformat(buy_executed_at.replace('Z', '+00:00'))
@@ -496,13 +529,17 @@ class VarHardStrategy:
                 sellOrderInfo = info['result'][0]
                 if sellOrderInfo:
                     sell_filled_price = Decimal(str(sellOrderInfo['price'])) if sellOrderInfo else Decimal('0')
+                    logger.info(f"卖单实际成交价: {sell_filled_price}")
                     sell_slippage_abs = bid_price - sell_filled_price
+                    logger.info(f"卖单绝对滑点: {sell_slippage_abs}")
                     sell_slippage_pct = (sell_slippage_abs / bid_price * 100)
                     sell_created_at = sellOrderInfo.get('created_at', None)
                     sell_executed_at = sellOrderInfo.get('execution_timestamp', None)
                     sell_delay_ms = None
                     if sell_created_at and sell_executed_at:
                         try:
+                            logger.info(f"⏱️ 卖单创建时间（service）: {sell_created_at}")
+                            logger.info(f"⏱️ 卖单执行时间（service）: {sell_executed_at}")
                             # 将 ISO 格式字符串转换为 datetime 对象
                             sell_created_at = datetime.fromisoformat(sell_created_at.replace('Z', '+00:00'))
                             sell_executed_at = datetime.fromisoformat(sell_executed_at.replace('Z', '+00:00'))
@@ -517,7 +554,7 @@ class VarHardStrategy:
                             logger.warning(f"⚠️ 解析卖单时间失败: {e}")
             else:
                 logger.warning(f"⚠️ 卖单订单信息为空或格式不正确: {info}")
-        if buy_success and sell_success:
+        if buy_success and sell_success and sell_filled_price and buy_filled_price:
             # 计算实际成交点差
             actual_spread_pct = (
                 -(sell_filled_price - buy_filled_price) / buy_filled_price * 100
@@ -543,6 +580,7 @@ class VarHardStrategy:
         await self._record_trade(
             trade_id=trade_id,
             order_time=order_time,
+            quantity=quantity,
             bid_price=bid_price,
             ask_price=ask_price,
             spread_pct=spread_pct,
@@ -570,21 +608,22 @@ class VarHardStrategy:
             f"   Bid: ${bid_price}\n"
             f"   Ask: ${ask_price}\n"
             f"   点差: {spread_pct:.6f}%\n"
-            f"   耗时: {fetch_duration:.2f} ms\n"
+            f"   数量: {quantity}\n"
+            f"⏱️   订单簿耗时: {fetch_duration:.2f} ms\n"
             f"\n"
             f"买单:\n"
             f"   状态: {'✅ 成功' if buy_success else '❌ 失败'}\n"
             f"   订单ID: {buy_result.get('order_id', 'N/A') if isinstance(buy_result, dict) else 'N/A'}\n"
             f"   成交价: ${buy_filled_price if buy_filled_price else 'N/A'}\n"
             f"   滑点: {f'{buy_slippage_pct:+.6f}%' if buy_slippage_pct else 'N/A'}\n"
-            f"⏱️  耗时: {buy_result.get('duration_ms', 0):.2f} ms\n"
+            f"⏱️  买单耗时: {buy_result.get('duration_ms', 0):.2f} ms\n"
             f"\n"
             f"卖单:\n"
             f"   状态: {'✅ 成功' if sell_success else '❌ 失败'}\n"
             f"   订单ID: {sell_result.get('order_id', 'N/A') if isinstance(sell_result, dict) else 'N/A'}\n"
             f"   成交价: ${sell_filled_price if sell_filled_price else 'N/A'}\n"
             f"   滑点: {f'{sell_slippage_pct:+.6f}%' if sell_slippage_pct else 'N/A'}\n"
-            f"⏱️  耗时: {sell_result.get('duration_ms', 0):.2f} ms\n"
+            f"⏱️  卖单耗时: {sell_result.get('duration_ms', 0):.2f} ms\n"
             f"\n"
             f"综合:\n"
             f"   实际点差: {f'{actual_spread_pct:.6f}%' if actual_spread_pct else 'N/A'}\n"
@@ -603,7 +642,7 @@ class VarHardStrategy:
         bid_price: Decimal,
         ask_price: Decimal,
         spread_pct: Decimal,
-        quote_id: str
+        quote_id: str,
     ):
         """记录虚拟交易（监控模式）"""
         self.stats['trades_attempted'] += 1
@@ -611,6 +650,7 @@ class VarHardStrategy:
         
         trade_id = f"{self.symbol}_VIRTUAL_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.trade_count}"
         order_time = time.time()  # ✅ 添加 order_time
+        current_quantity = self._get_random_quantity()  # ✅ 生成随机数量
 
         # 假设成交价 = 订单簿价格（无滑点）
         await self._record_trade(
@@ -620,7 +660,8 @@ class VarHardStrategy:
             ask_price=ask_price,
             spread_pct=spread_pct,
             quote_id=quote_id,
-            buy_result={'success': True, 'order_id': 'VIRTUAL_BUY', 'filled_price': str(ask_price), 'filled_qty': str(self.quantity), 'duration_ms': 0},
+            quantity=current_quantity,
+            buy_result={'success': True, 'order_id': 'VIRTUAL_BUY', 'filled_price': str(ask_price), 'filled_qty': str(current_quantity), 'duration_ms': 0},
             sell_result={'success': True, 'order_id': 'VIRTUAL_SELL', 'filled_price': str(bid_price), 'filled_qty': str(self.quantity), 'duration_ms': 0},
             buy_slippage_abs=Decimal('0'),
             buy_slippage_pct=Decimal('0'),
@@ -642,6 +683,7 @@ class VarHardStrategy:
         ask_price: Decimal,
         spread_pct: Decimal,
         quote_id: str,
+        quantity: Decimal,
         buy_result: Dict,
         sell_result: Dict,
         buy_filled_price: Optional[Decimal],
@@ -667,6 +709,7 @@ class VarHardStrategy:
                     datetime.fromtimestamp(order_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # ✅ 下单日期时间
                     f'{record_time:.6f}',
                     datetime.fromtimestamp(record_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # ✅ 记录日期时间
+                    str(quantity),
                     # 订单簿
                     str(bid_price),
                     str(ask_price),
