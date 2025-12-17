@@ -2,33 +2,24 @@
 import logging
 import sys
 from pathlib import Path
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
-import time
-
+from datetime import datetime, timedelta, timezone
+from logging.handlers import TimedRotatingFileHandler
 
 # ✅ 新增：自定义时区转换器
 class BeijingFormatter(logging.Formatter):
     """使用北京时间的日志格式化器"""
     
-    converter = time.gmtime  # 先用 GMT
+    converter = lambda *args: datetime.now(timezone(timedelta(hours=8))).timetuple()
     
     def formatTime(self, record, datefmt=None):
-        """覆盖时间格式化方法，转换为北京时间（UTC+8）"""
-        # 获取 UTC 时间戳
-        ct = self.converter(record.created)
-        
-        # 转换为北京时间（UTC+8）
-        import datetime as dt
-        utc_time = dt.datetime.fromtimestamp(record.created, tz=dt.timezone.utc)
-        beijing_time = utc_time.astimezone(dt.timezone(dt.timedelta(hours=8)))
-        
+        """覆盖时间格式化方法，确保使用北京时间"""
+        dt = datetime.fromtimestamp(record.created, tz=timezone(timedelta(hours=8)))
         if datefmt:
-            s = beijing_time.strftime(datefmt)
+            s = dt.strftime(datefmt)
         else:
-            s = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
-        
-        return s
+            s = dt.strftime("%Y-%m-%d %H:%M:%S")
+        # ✅ 修复：将 record.msecs 转换为整数再格式化
+        return f"{s}.{int(record.msecs):03d}"
     
 def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     """
@@ -45,21 +36,24 @@ def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     log_dir.mkdir(parents=True, exist_ok=True)
     
     # 日志文件路径（按日期 + 交易对命名）
-    log_file = log_dir / f"arbitrage_{pair}_{datetime.now().strftime('%Y%m%d')}.log"
+    log_file = log_dir / f"arbitrage_{pair}.log"
     
     # 创建日志格式
     log_format = BeijingFormatter(
-        '%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
     # ✅ 文件 Handler（轮转日志，最大 50MB，保留 10 个备份）
-    file_handler = RotatingFileHandler(
+    file_handler = TimedRotatingFileHandler(
         log_file,
-        maxBytes=50 * 1024 * 1024,  # 50MB
-        backupCount=10,
-        encoding='utf-8'
+        when='midnight',
+        interval=1,
+        backupCount=30,
+        encoding='utf-8',
+        utc=True
     )
+    file_handler.suffix = "%Y%m%d"
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(log_format)
     

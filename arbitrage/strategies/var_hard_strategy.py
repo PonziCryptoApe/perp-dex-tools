@@ -51,23 +51,27 @@ class VarHardStrategy:
         self.poll_interval = poll_interval
         self.monitor_only = monitor_only
         self.lark_bot = lark_bot
+        self.daily_file = daily_file
         
         # 数据记录
         self.data_dir = data_dir or Path('data/var_hard')
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.current_date = datetime.now().strftime('%Y%m%d')
+
         # CSV 文件
         if daily_file:
+            self._update_csv_files()
+
             # 按天生成文件：同一天的所有运行记录到同一个文件
-            date_str = datetime.now().strftime('%Y%m%d')
-            self.orderbook_csv = self.data_dir / f'orderbook_{symbol}_{date_str}.csv'
-            self.trades_csv = self.data_dir / f'trades_{symbol}_{date_str}.csv'
+            # date_str = datetime.now().strftime('%Y%m%d')
+            # self.orderbook_csv = self.data_dir / f'orderbook_{symbol}_{date_str}.csv'
+            # self.trades_csv = self.data_dir / f'trades_{symbol}_{date_str}.csv'
             
-            # 如果文件不存在，创建并写入表头
-            if not self.orderbook_csv.exists():
-                self._init_orderbook_csv()
-            if not self.trades_csv.exists():
-                self._init_trades_csv()
+            # # 如果文件不存在，创建并写入表头
+            # if not self.orderbook_csv.exists():
+            #     self._init_orderbook_csv()
+            # if not self.trades_csv.exists():
+            #     self._init_trades_csv()
         else:
             # 每次运行生成新文件
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -116,6 +120,26 @@ class VarHardStrategy:
             f"   订单簿: {self.orderbook_csv}\n"
             f"   交易: {self.trades_csv}"
         )
+
+    def _update_csv_files(self):
+        """更新 CSV 文件（按日期切分）"""
+        date_str = datetime.now().strftime('%Y%m%d')
+        
+        # 如果日期变化了，记录日志
+        if date_str != self.current_date:
+            logger.info(f"📅 日期切换: {self.current_date} → {date_str}，创建新文件")
+            self.current_date = date_str
+        
+        # 设置文件路径
+        self.orderbook_csv = self.data_dir / f'orderbook_{self.symbol}_{date_str}.csv'
+        self.trades_csv = self.data_dir / f'trades_{self.symbol}_{date_str}.csv'
+        
+        # 如果文件不存在，创建并写入表头
+        if not self.orderbook_csv.exists():
+            self._init_orderbook_csv()
+        
+        if not self.trades_csv.exists():
+            self._init_trades_csv()
         
     def _init_orderbook_csv(self):
         """初始化订单簿 CSV"""
@@ -135,6 +159,7 @@ class VarHardStrategy:
                 'fetch_duration_ms',
                 'quantity'
             ])
+
     def _init_trades_csv(self):
         """初始化交易 CSV"""
         with open(self.trades_csv, 'w', newline='', encoding='utf-8') as f:
@@ -216,7 +241,7 @@ class VarHardStrategy:
                 fetch_duration = (time.time() - fetch_start) * 1000  # ✅ 计算耗时（毫秒）
 
                 if not quote_data or 'quote_id' not in quote_data:
-                    logger.warning("⚠️ 获取报价失败，跳过本次轮询")
+                    logger.warning(f"⚠️ 获取报价失败，跳过本次轮询, quote_data: {quote_data}")
                     await asyncio.sleep(self.poll_interval)
                     continue
                 
@@ -257,7 +282,7 @@ class VarHardStrategy:
                 if time_since_last_order < random_cooldown:
                     self.stats['cooldown_skipped'] += 1
                     remaining = random_cooldown - time_since_last_order
-                    logger.debug(
+                    logger.info(
                         f"⏳ 冷却期内，跳过交易 "
                         f"(距上次下单 {time_since_last_order:.1f}s，还需等待 {remaining:.1f}s)"
                     )
@@ -317,6 +342,9 @@ class VarHardStrategy:
     ):
         """记录订单簿数据"""
         try:
+            if self.daily_file:
+                self._update_csv_files()
+
             timestamp = time.time()
             spread_abs = ask_price - bid_price
             spread_pct = (spread_abs / ask_price * 100)
@@ -343,6 +371,7 @@ class VarHardStrategy:
             
         except Exception as e:
             logger.error(f"❌ 记录订单簿数据失败: {e}")
+
     def _get_random_quantity(self) -> Decimal:
         """生成随机数量"""
         min_qty, max_qty = self.quantity_range
@@ -428,42 +457,103 @@ class VarHardStrategy:
                     'error': str(e)
                 }
 
-        async def getOrderInfo(orderId, max_retries=3):
+        async def getOrderInfo(buyOrderId, sellOrderId, max_retries=10):
             """获取订单信息"""
             order_info_start = time.time()
-            logger.info(f"🔍 开始获取订单信息: {orderId},当前时间: {order_info_start}")
+            buyOrderInfo = None
+            sellOrderInfo = None
+            buy_found_attempt = None
+            sell_found_attempt = None
             for attempt in range(max_retries):
                 try:
                     n_start_time = time.time()
-                    result = await self.exchange.client.get_orders_history(rfq_id=orderId)
-                    current_time = time.time()
-                    logger.info(f"📥 第 {attempt + 1} 次获取订单信息响应时间: {current_time}, ⏱️ 耗时: {(current_time - n_start_time)*1000:.2f}ms, 累计耗时: {(current_time - order_info_start)*1000:.2f}ms")
-                    # ✅ 检查返回数据是否有效
-                    if result and 'result' in result and len(result['result']) > 0:
-                        logger.info(f"✅ 第 {attempt + 1} 次尝试成功获取订单信息")
-                        return result
+                    result = await self.exchange.client.get_orders_history()
+                    for order in result['result']:
+                        if order.get('rfq_id') == buyOrderId and buyOrderInfo is None:
+                            buyOrderInfo = order
+                            buy_found_attempt = attempt + 1
+                            logger.info(f"✅ 第 {buy_found_attempt} 次尝试成功获取买单信息")
+                        if order.get('rfq_id') == sellOrderId and sellOrderInfo is None:
+                            sellOrderInfo = order
+                            sell_found_attempt = attempt + 1
+                            logger.info(f"✅ 第 {sell_found_attempt} 次尝试成功获取卖单信息")
                     
+                    current_time = time.time()
+                    duration_ms = (current_time - n_start_time) * 1000
+                    cumulative_ms = (current_time - order_info_start) * 1000
+                    logger.info(
+                        f"📥 第 {attempt + 1} 次查询订单历史: "
+                        f"响应时间={current_time:.2f}, "
+                        f"耗时={duration_ms:.2f}ms, "
+                        f"累计={cumulative_ms:.2f}ms, "
+                        f"买单={'已获取' if buyOrderInfo else '未获取'}, "
+                        f"卖单={'已获取' if sellOrderInfo else '未获取'}"
+                    )
+                    if buyOrderInfo and sellOrderInfo:
+                        logger.info(
+                            f"🎉 两个订单信息都已获取: "
+                            f"买单第 {buy_found_attempt} 次, "
+                            f"卖单第 {sell_found_attempt} 次"
+                        )
+                        return {
+                            'buy': buyOrderInfo,
+                            'sell': sellOrderInfo,
+                            'buy_found_attempt': buy_found_attempt,
+                            'sell_found_attempt': sell_found_attempt
+                        }
+
                     # ✅ 如果为空，等待后重试
                     if attempt < max_retries - 1:
-                        # wait_time = 0.3 * (attempt + 1)  # 0.3s, 0.6s, 0.9s
-                        wait_time = 0.01  # 0.01s 固定等待时间
+                        wait_time = 0.005  # 0.005s 固定等待时间
 
-                        logger.debug(f"⏳ 订单信息为空，{wait_time}s 后重试 (尝试 {attempt + 1}/{max_retries})")
+                        missing = []
+                        if not buyOrderInfo:
+                            missing.append(f"买单({buyOrderId})")
+                        if not sellOrderInfo:
+                            missing.append(f"卖单({sellOrderId})")
+                        
+                        logger.info(
+                            f"⏳ 订单信息未完整，缺少: {', '.join(missing)}，"
+                            f"{wait_time}s 后重试 (尝试 {attempt + 1}/{max_retries})"
+                        )
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.warning(f"⚠️ 重试 {max_retries} 次后仍未获取到订单信息: {orderId}")
-                        return result  # 返回空结果
+                        # ✅ 达到最大重试次数，返回已获取到的信息
+                        logger.warning(
+                            f"⚠️ 重试 {max_retries} 次后: "
+                            f"买单={'已获取(第'+str(buy_found_attempt)+'次)' if buyOrderInfo else '未获取'}, "
+                            f"卖单={'已获取(第'+str(sell_found_attempt)+'次)' if sellOrderInfo else '未获取'}"
+                        )
+                        return {
+                            'buy': buyOrderInfo,
+                            'sell': sellOrderInfo,
+                            'buy_found_attempt': buy_found_attempt,
+                            'sell_found_attempt': sell_found_attempt
+                        }
                         
                 except Exception as e:
                     if attempt < max_retries - 1:
                         wait_time = 0.3 * (attempt + 1)
-                        logger.warning(f"❌ 获取订单信息异常 (尝试 {attempt + 1}/{max_retries}): {e}，{wait_time}s 后重试")
+                        logger.warning(
+                            f"❌ 获取订单信息异常 (尝试 {attempt + 1}/{max_retries}): {e}，"
+                            f"{wait_time}s 后重试"
+                        )
                         await asyncio.sleep(wait_time)
                     else:
                         logger.error(f"❌ 获取订单信息失败，已重试 {max_retries} 次: {e}")
-                        return None
+                        return {
+                            'buy': buyOrderInfo,
+                            'sell': sellOrderInfo,
+                            'buy_found_attempt': buy_found_attempt,
+                            'sell_found_attempt': sell_found_attempt
+                        }
             
-            return None
+            return {
+                'buy': buyOrderInfo,
+                'sell': sellOrderInfo,
+                'buy_found_attempt': buy_found_attempt,
+                'sell_found_attempt': sell_found_attempt
+            }
         # 并发执行
         trade_start = time.time()
         buy_result, sell_result = await asyncio.gather(
@@ -489,71 +579,83 @@ class VarHardStrategy:
         buy_filled_price = None
         sell_filled_price = None
 
-        if buy_success:
-            info = await getOrderInfo(buy_result['order_id'], max_retries=5)
-            filled_buy_duration = (time.time() - trade_start) * 1000
+        if buy_success or sell_success:
+            buy_order_id = buy_result.get('order_id') if buy_success else None
+            sell_order_id = sell_result.get('order_id') if sell_success else None
+            logger.info(f"📥 开始获取订单信息: 买单={buy_order_id}, 卖单={sell_order_id}")
+
+            info = await getOrderInfo(buy_order_id, sell_order_id, max_retries=10)
+            filled_duration = (time.time() - trade_start) * 1000
             # logger.info(f"获取买单订单信息: {info}")
-            if info and 'result' in info and len(info['result']) > 0:
-                buyOrderInfo = info['result'][0]
+            if buy_success and info and info.get('buy'):
+                buyOrderInfo = info['buy']
+                buy_found_attempt = info.get('buy_found_attempt')
+                
                 if buyOrderInfo:
-                    buy_filled_price = Decimal(str(buyOrderInfo['price'])) if buyOrderInfo else Decimal('0')
-                    logger.info(f"买单实际成交价: {buy_filled_price}")
+                    buy_filled_price = Decimal(str(buyOrderInfo['price']))
+                    logger.info(f"✅ 买单实际成交价: {buy_filled_price} (第 {buy_found_attempt} 次获取)")
+                    
                     buy_slippage_abs = buy_filled_price - ask_price
-                    logger.info(f"买单绝对滑点: {buy_slippage_abs}")
+                    logger.info(f"   买单绝对滑点: {buy_slippage_abs}")
                     buy_slippage_pct = (buy_slippage_abs / ask_price * 100)
-                    buy_created_at = buyOrderInfo.get('created_at', None)
-                    buy_executed_at = buyOrderInfo.get('execution_timestamp', None)
-                    buy_delay_ms = None
+                    
+                    # 计算买单撮合耗时
+                    buy_created_at = buyOrderInfo.get('created_at')
+                    buy_executed_at = buyOrderInfo.get('execution_timestamp')
+                    
                     if buy_created_at and buy_executed_at:
                         try:
                             logger.info(f"⏱️ 买单创建时间（service）: {buy_created_at}")
                             logger.info(f"⏱️ 买单执行时间（service）: {buy_executed_at}")
-                            # 将 ISO 格式字符串转换为 datetime 对象
-                            buy_created_at = datetime.fromisoformat(buy_created_at.replace('Z', '+00:00'))
-                            buy_executed_at = datetime.fromisoformat(buy_executed_at.replace('Z', '+00:00'))
                             
-                            # 计算时间差（秒）
-                            time_diff = (buy_executed_at - buy_created_at).total_seconds()
-                            buy_delay_ms = time_diff * 1000  # 转换为毫秒
+                            buy_created_at_dt = datetime.fromisoformat(buy_created_at.replace('Z', '+00:00'))
+                            buy_executed_at_dt = datetime.fromisoformat(buy_executed_at.replace('Z', '+00:00'))
+                            buy_delay_ms = (buy_executed_at_dt - buy_created_at_dt).total_seconds() * 1000
                             
                             logger.info(f"⏱️ 买单撮合耗时（service）: {buy_delay_ms:.2f} ms")
-                            logger.info(f"⏱️ 买单撮合耗时（client）: {filled_buy_duration:.2f} ms")
+                            logger.info(f"⏱️ 买单撮合耗时（client）: {filled_duration:.2f} ms")
                         except Exception as e:
                             logger.warning(f"⚠️ 解析买单时间失败: {e}")
-            else:
-                logger.warning(f"⚠️ 买单订单信息为空或格式不正确: {info}")    
-        if sell_success:
-            info = await getOrderInfo(sell_result['order_id'], max_retries=5)
-            filled_sell_duration = (time.time() - trade_start) * 1000
-            if info and 'result' in info and len(info['result']) > 0:
-                sellOrderInfo = info['result'][0]
+                else:
+                    logger.warning(f"⚠️ 买单订单信息为空")
+            elif buy_success:
+                logger.warning(f"⚠️ 未获取到买单订单信息 (订单ID: {buy_order_id})")
+            
+            # ✅ 处理卖单信息
+            if sell_success and info and info.get('sell'):
+                sellOrderInfo = info['sell']
+                sell_found_attempt = info.get('sell_found_attempt')
+                
                 if sellOrderInfo:
-                    sell_filled_price = Decimal(str(sellOrderInfo['price'])) if sellOrderInfo else Decimal('0')
-                    logger.info(f"卖单实际成交价: {sell_filled_price}")
+                    sell_filled_price = Decimal(str(sellOrderInfo['price']))
+                    logger.info(f"✅ 卖单实际成交价: {sell_filled_price} (第 {sell_found_attempt} 次获取)")
+                    
                     sell_slippage_abs = bid_price - sell_filled_price
-                    logger.info(f"卖单绝对滑点: {sell_slippage_abs}")
+                    logger.info(f"   卖单绝对滑点: {sell_slippage_abs}")
                     sell_slippage_pct = (sell_slippage_abs / bid_price * 100)
-                    sell_created_at = sellOrderInfo.get('created_at', None)
-                    sell_executed_at = sellOrderInfo.get('execution_timestamp', None)
-                    sell_delay_ms = None
+                    
+                    # 计算卖单撮合耗时
+                    sell_created_at = sellOrderInfo.get('created_at')
+                    sell_executed_at = sellOrderInfo.get('execution_timestamp')
+                    
                     if sell_created_at and sell_executed_at:
                         try:
                             logger.info(f"⏱️ 卖单创建时间（service）: {sell_created_at}")
                             logger.info(f"⏱️ 卖单执行时间（service）: {sell_executed_at}")
-                            # 将 ISO 格式字符串转换为 datetime 对象
-                            sell_created_at = datetime.fromisoformat(sell_created_at.replace('Z', '+00:00'))
-                            sell_executed_at = datetime.fromisoformat(sell_executed_at.replace('Z', '+00:00'))
-
-                            # 计算时间差（秒）
-                            time_diff = (sell_executed_at - sell_created_at).total_seconds()
-                            sell_delay_ms = time_diff * 1000  # 转换为毫秒
+                            
+                            sell_created_at_dt = datetime.fromisoformat(sell_created_at.replace('Z', '+00:00'))
+                            sell_executed_at_dt = datetime.fromisoformat(sell_executed_at.replace('Z', '+00:00'))
+                            sell_delay_ms = (sell_executed_at_dt - sell_created_at_dt).total_seconds() * 1000
                             
                             logger.info(f"⏱️ 卖单撮合耗时（service）: {sell_delay_ms:.2f} ms")
-                            logger.info(f"⏱️ 卖单撮合耗时（client）: {filled_sell_duration:.2f} ms")
+                            logger.info(f"⏱️ 卖单撮合耗时（client）: {filled_duration:.2f} ms")
                         except Exception as e:
                             logger.warning(f"⚠️ 解析卖单时间失败: {e}")
-            else:
-                logger.warning(f"⚠️ 卖单订单信息为空或格式不正确: {info}")
+                else:
+                    logger.warning(f"⚠️ 卖单订单信息为空")
+            elif sell_success:
+                logger.warning(f"⚠️ 未获取到卖单订单信息 (订单ID: {sell_order_id})")
+        
         if buy_success and sell_success and sell_filled_price and buy_filled_price:
             # 计算实际成交点差
             actual_spread_pct = (
@@ -562,8 +664,9 @@ class VarHardStrategy:
             # 点差损失 = 订单簿点差 - 实际点差
             spread_loss_pct = - spread_pct + actual_spread_pct
             # 总滑点
-            total_slippage_pct = buy_slippage_pct + sell_slippage_pct
-
+            if buy_slippage_pct is not None and sell_slippage_pct is not None:
+                total_slippage_pct = buy_slippage_pct + sell_slippage_pct
+        
         
         # 确定状态
         if buy_success and sell_success:
@@ -699,6 +802,9 @@ class VarHardStrategy:
     ):
         """记录交易数据到 CSV"""
         try:
+            if self.daily_file:
+                self._update_csv_files()
+            
             record_time = time.time()
             
             with open(self.trades_csv, 'a', newline='', encoding='utf-8') as f:
