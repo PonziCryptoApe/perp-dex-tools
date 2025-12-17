@@ -401,61 +401,71 @@ class VarHardStrategy:
         logger.info(f"📤 开始执行交易 #{self.trade_count},数量: {quantity}, ⏱️下单时间: {order_datetime} (Quote ID: {quote_id})")
 
         # 定义买单和卖单任务
-        async def place_buy_order():
+        async def place_buy_order(max_retries=3, retry_delay=0.01):
             """下买单"""
-            start = time.time()
-            try:
-                result = await self.exchange.client._place_market_order(
-                    quote_id=quote_id,
-                    side='buy',
-                    max_slippage=float(self.max_slippage)
-                )
-                buy_success_time = time.time()
-                duration = (buy_success_time - start) * 1000
-                logger.info(f"✅ 买单下单成功: 订单ID {result.order_id},⏱️ 时间: {buy_success_time:.2f}, ⏱️ 耗时: {duration:.2f}ms")
+            for attempt in range(max_retries):  # ✅ 重试3次
+                start = time.time()
+                try:
+                    result = await self.exchange.client._place_market_order(
+                        quote_id=quote_id,
+                        side='buy',
+                        max_slippage=float(self.max_slippage)
+                    )
+                    buy_success_time = time.time()
+                    duration = (buy_success_time - start) * 1000
+                    if result and result.order_id:
+                        logger.info(f"✅ 买单下单成功(尝试 {attempt + 1}/{max_retries}): 订单ID {result.order_id},⏱️ 时间: {buy_success_time:.2f}, ⏱️ 耗时: {duration:.2f}ms")
 
-                return {
-                    'success': result.success,
-                    'order_id': result.order_id,
-                    'duration_ms': duration,
-                    'error': result.error_message if not result.success else None
-                }
-            except Exception as e:
-                duration = (time.time() - start) * 1000
-                logger.error(f"❌ 买单异常: {e}")
-                return {
-                    'success': False,
-                    'order_id': None,
-                    'duration_ms': duration,
-                    'error': str(e)
-                }
-        
-        async def place_sell_order():
+                        return {
+                            'success': result.success,
+                            'order_id': result.order_id,
+                            'duration_ms': duration,
+                            'error': None
+                        }
+                    else:
+                        error_msg = result.error_message if result else "返回结果为空"
+                        logger.warning(f"⚠️ 买单下单失败 (尝试 {attempt + 1}/{max_retries}): {error_msg}。 {retry_delay}s 后重试...")
+                        await asyncio.sleep(retry_delay)
+
+                except Exception as e:
+                    duration = (time.time() - start) * 1000
+                    logger.error(f"❌ 买单异常 (尝试 {attempt + 1}/{max_retries}): {e}。 {retry_delay}s 后重试...")
+                    await asyncio.sleep(retry_delay)
+            logger.error(f"❌ 买单在重试 {max_retries} 次后彻底失败。")
+            return {'success': False, 'order_id': None, 'duration_ms': 0, 'error': f"重试 {max_retries} 次后失败"}
+
+        async def place_sell_order(max_retries=3, retry_delay=0.01):
             """下卖单"""
-            start = time.time()
-            try:
-                result = await self.exchange.client._place_market_order(
-                    quote_id=quote_id,
-                    side='sell',
-                    max_slippage=float(self.max_slippage)
-                )
-                sell_success_time = time.time()
-                duration = (sell_success_time - start) * 1000
-                logger.info(f"✅ 卖单下单成功: 订单ID {result.order_id},⏱️ 时间: {sell_success_time:.2f}, ⏱️ 耗时: {duration:.2f}ms")
-                return {
-                    'success': result.success,
-                    'order_id': result.order_id,
-                    'duration_ms': duration,
-                    'error': result.error_message if not result.success else None
-                }
-            except Exception as e:
-                duration = (time.time() - start) * 1000
-                logger.error(f"❌ 卖单异常: {e}")
-                return {
-                    'order_id': None,
-                    'duration_ms': duration,
-                    'error': str(e)
-                }
+            for attempt in range(max_retries):
+                start = time.time()
+                try:
+                    result = await self.exchange.client._place_market_order(
+                        quote_id=quote_id,
+                        side='sell',
+                        max_slippage=float(self.max_slippage)
+                    )
+                    duration = (time.time() - start) * 1000
+
+                    if result and result.order_id:
+                        logger.info(f"✅ 卖单下单成功 (尝试 {attempt + 1}/{max_retries}): 订单ID {result.order_id}, ⏱️ 耗时: {duration:.2f}ms")
+                        return {
+                            'success': True,
+                            'order_id': result.order_id,
+                            'duration_ms': duration,
+                            'error': None
+                        }
+                    else:
+                        error_msg = result.error_message if result else "返回结果为空"
+                        logger.warning(f"⚠️ 卖单下单失败 (尝试 {attempt + 1}/{max_retries}): {error_msg}。 {retry_delay}s 后重试...")
+                        await asyncio.sleep(retry_delay)
+
+                except Exception as e:
+                    duration = (time.time() - start) * 1000
+                    logger.error(f"❌ 卖单异常 (尝试 {attempt + 1}/{max_retries}): {e}。 {retry_delay}s 后重试...")
+                    await asyncio.sleep(retry_delay)
+
+            logger.error(f"❌ 卖单在重试 {max_retries} 次后彻底失败。")
+            return {'success': False, 'order_id': None, 'duration_ms': 0, 'error': f"重试 {max_retries} 次后失败"}
 
         async def getOrderInfo(buyOrderId, sellOrderId, max_retries=10):
             """获取订单信息"""
@@ -581,6 +591,7 @@ class VarHardStrategy:
 
         if buy_success or sell_success:
             buy_order_id = buy_result.get('order_id') if buy_success else None
+            
             sell_order_id = sell_result.get('order_id') if sell_success else None
             logger.info(f"📥 开始获取订单信息: 买单={buy_order_id}, 卖单={sell_order_id}")
 
