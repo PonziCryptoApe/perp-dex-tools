@@ -847,7 +847,7 @@ class VariationalAdapter(ExchangeAdapter):
             position = await self.client.get_position(symbol)
             
             if position:
-                logger.debug(
+                logger.info(
                     f"📊 Variational 持仓:\n"
                     f"   Symbol: {position['symbol']}\n"
                     f"   Side: {position['side']}\n"
@@ -855,7 +855,7 @@ class VariationalAdapter(ExchangeAdapter):
                     f"   Entry Price: ${position['entry_price']}"
                 )
             else:
-                logger.debug(f"📊 Variational 无持仓: {symbol}")
+                logger.info(f"📊 Variational 无持仓: {symbol}")
             
             return position
         

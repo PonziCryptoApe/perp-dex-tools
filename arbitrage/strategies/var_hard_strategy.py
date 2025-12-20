@@ -31,7 +31,7 @@ class VarHardStrategy:
         quantity: Decimal,
         quantity_range: tuple = (Decimal('0.0011'), Decimal('0.0033')),
         spread_threshold: Decimal = Decimal('0.0026'),  # 点差阈值 0.0026%
-        max_slippage: Decimal = Decimal('0.0005'),  # 最大滑点 0.05%
+        max_slippage: Decimal = Decimal('0.002'),  # 最大滑点 0.2%
         cooldown_seconds: float = 5.0,  # 冷却时间
         cooldown_range: tuple = (3.0, 6.0),  # ✅ 新增：冷却时间范围（秒）
         poll_interval: float = 0.3,  # 轮询间隔（秒）
@@ -250,6 +250,7 @@ class VarHardStrategy:
                 ask_price = Decimal(str(quote_data.get('ask', '0')))
                 bid_size = Decimal(str(quote_data.get('bid_size', '0')))
                 ask_size = Decimal(str(quote_data.get('ask_size', '0')))
+                mark_price = Decimal(str(quote_data.get('mark_price', '0')))
                 quote_id = quote_data['quote_id']
                 
                 # ========== 2. 记录订单簿数据 ==========
@@ -288,13 +289,19 @@ class VarHardStrategy:
                     )
                     await asyncio.sleep(remaining)
                     continue
-                
+                trade_side = None
+                if abs(ask_price - mark_price) < abs(bid_price - mark_price):
+                    trade_side = 'buy'
+                else:
+                    trade_side = 'sell'
                 # ========== 4. 执行交易 ==========
                 logger.info(
                     f"🎯 检测到交易机会:\n"
                     f"   Bid: ${bid_price} \n"
                     f"   Ask: ${ask_price} \n"
                     f"   点差: {spread_pct:.6f}% < 阈值: {self.spread_threshold}%\n"
+                    f"   Mark价格: ${mark_price}\n"
+                    f"   首先交易方向: {trade_side}\n"
                     f"   数量: {current_quantity}\n"
                     f"⏱️  获取订单簿耗时: {fetch_duration:.1f}ms\n"
                     f"⏱️  距上次下单: {time_since_last_order:.1f}s\n"  # ✅ 新增
@@ -312,6 +319,7 @@ class VarHardStrategy:
                         quote_id=quote_id
                     )
                 else:
+                    logger.info("💸 开始执行交易...")
                     # 实际交易
                     await self._execute_trade(
                         bid_price=bid_price,
@@ -319,7 +327,8 @@ class VarHardStrategy:
                         spread_pct=spread_pct,
                         quote_id=quote_id,
                         fetch_duration=fetch_duration,
-                        quantity=current_quantity
+                        quantity=current_quantity,
+                        side=trade_side
                     )
                                 
             except asyncio.CancelledError:
@@ -388,7 +397,8 @@ class VarHardStrategy:
         spread_pct: Decimal,
         quote_id: str,
         fetch_duration: float,
-        quantity: Decimal
+        quantity: Decimal,
+        side: str
     ):
         """执行交易（同时下买卖单）"""
         self.stats['trades_attempted'] += 1
@@ -401,11 +411,18 @@ class VarHardStrategy:
         logger.info(f"📤 开始执行交易 #{self.trade_count},数量: {quantity}, ⏱️下单时间: {order_datetime} (Quote ID: {quote_id})")
 
         # 定义买单和卖单任务
-        async def place_buy_order(max_retries=3, retry_delay=0.01):
+        async def place_buy_order(max_retries=5, retry_delay=0.01, quote_id=quote_id, quantity=quantity, mode='normal'):
             """下买单"""
-            for attempt in range(max_retries):  # ✅ 重试3次
+            for attempt in range(max_retries):  # ✅ 重试5次
                 start = time.time()
                 try:
+                    if mode == 'normal' and (attempt > 0 or quote_id is None) or mode == 'refresh':
+                        quote_data = await self.exchange.client._fetch_indicative_quote(
+                            qty=float(quantity),
+                            contract_id=f"{self.symbol}-PERP"
+                        )
+                        quote_id = quote_data['quote_id']
+                        logger.info(f"🔄 重试获取新 quote_id: {quote_id}")
                     result = await self.exchange.client._place_market_order(
                         quote_id=quote_id,
                         side='buy',
@@ -434,11 +451,18 @@ class VarHardStrategy:
             logger.error(f"❌ 买单在重试 {max_retries} 次后彻底失败。")
             return {'success': False, 'order_id': None, 'duration_ms': 0, 'error': f"重试 {max_retries} 次后失败"}
 
-        async def place_sell_order(max_retries=3, retry_delay=0.01):
+        async def place_sell_order(max_retries=5, retry_delay=0.01, quote_id=quote_id, quantity=quantity, mode='normal'):
             """下卖单"""
             for attempt in range(max_retries):
                 start = time.time()
                 try:
+                    if mode == 'normal' and (attempt > 0 or quote_id is None) or mode == 'refresh':
+                        quote_data = await self.exchange.client._fetch_indicative_quote(
+                            qty=float(quantity),
+                            contract_id=f"{self.symbol}-PERP"
+                        )
+                        quote_id = quote_data['quote_id']
+                        logger.info(f"🔄 重试获取新 quote_id: {quote_id}")
                     result = await self.exchange.client._place_market_order(
                         quote_id=quote_id,
                         side='sell',
@@ -474,6 +498,8 @@ class VarHardStrategy:
             sellOrderInfo = None
             buy_found_attempt = None
             sell_found_attempt = None
+            buy_executed_at = None
+            sell_executed_at = None
             for attempt in range(max_retries):
                 try:
                     n_start_time = time.time()
@@ -482,10 +508,12 @@ class VarHardStrategy:
                         if order.get('rfq_id') == buyOrderId and buyOrderInfo is None:
                             buyOrderInfo = order
                             buy_found_attempt = attempt + 1
+                            buy_executed_at = time.time()
                             logger.info(f"✅ 第 {buy_found_attempt} 次尝试成功获取买单信息")
                         if order.get('rfq_id') == sellOrderId and sellOrderInfo is None:
                             sellOrderInfo = order
                             sell_found_attempt = attempt + 1
+                            sell_executed_at = time.time()
                             logger.info(f"✅ 第 {sell_found_attempt} 次尝试成功获取卖单信息")
                     
                     current_time = time.time()
@@ -507,7 +535,9 @@ class VarHardStrategy:
                         )
                         return {
                             'buy': buyOrderInfo,
+                            'buy_executed_at': buy_executed_at,
                             'sell': sellOrderInfo,
+                            'sell_executed_at': sell_executed_at,
                             'buy_found_attempt': buy_found_attempt,
                             'sell_found_attempt': sell_found_attempt
                         }
@@ -564,19 +594,41 @@ class VarHardStrategy:
                 'buy_found_attempt': buy_found_attempt,
                 'sell_found_attempt': sell_found_attempt
             }
-        # 并发执行
+        # 顺序执行买卖单
         trade_start = time.time()
-        buy_result, sell_result = await asyncio.gather(
-            place_buy_order(),
-            place_sell_order(),
-            return_exceptions=True
-        )
+        buy_start = None
+        sell_start = None
+        if side == 'buy':
+            logger.info("先下买单")
+            buy_start = time.time()
+            buy_result = await place_buy_order()
+            logger.info(f"买单下单成功，订单ID: {buy_result['order_id']}，开始获取新的订单簿数据")
+            quote_data = await self.exchange.client._fetch_indicative_quote(
+                    qty=quantity,
+                    contract_id=f"{self.symbol}-PERP"
+                )
+            logger.info(f"quote_data 获取成功，quote_id: {quote_data['quote_id']}，开始下卖单")
+            sell_start = time.time()
+            sell_result = await place_sell_order(5, quote_id=quote_data['quote_id'])
+            logger.info(f"卖单下单成功，订单ID: {sell_result['order_id']}")
+        else:
+            logger.info("先下卖单")
+            sell_start = time.time()
+            sell_result = await place_sell_order()
+            logger.info(f"卖单下单成功，订单ID: {sell_result['order_id']}，开始获取新的订单簿数据")
+            quote_data = await self.exchange.client._fetch_indicative_quote(
+                    qty=quantity,
+                    contract_id=f"{self.symbol}-PERP"
+                )
+            logger.info(f"quote_data 获取成功，quote_id: {quote_data['quote_id']}，开始下买单")
+            buy_start = time.time()
+            buy_result = await place_buy_order(5, quote_id=quote_data['quote_id'])
         total_duration = (time.time() - trade_start) * 1000
         
         # 处理结果
         buy_success = isinstance(buy_result, dict) and buy_result['order_id']
         sell_success = isinstance(sell_result, dict) and sell_result['order_id']
-        logger.info("⏱️  并发执行结束，开始等待180ms")
+        logger.info("⏱️  顺序执行结束，开始等待180ms")
         await asyncio.sleep(0.18)  # 等待订单信息更新
         # 计算滑点和实际点差
         buy_slippage_abs = None
@@ -595,14 +647,15 @@ class VarHardStrategy:
             sell_order_id = sell_result.get('order_id') if sell_success else None
             logger.info(f"📥 开始获取订单信息: 买单={buy_order_id}, 卖单={sell_order_id}")
 
-            info = await getOrderInfo(buy_order_id, sell_order_id, max_retries=10)
-            filled_duration = (time.time() - trade_start) * 1000
+            info = await getOrderInfo(buy_order_id, sell_order_id, max_retries=20)
+            # filled_duration = (time.time() - trade_start) * 1000
+
             # logger.info(f"获取买单订单信息: {info}")
             if buy_success and info and info.get('buy'):
                 buyOrderInfo = info['buy']
                 buy_found_attempt = info.get('buy_found_attempt')
                 
-                if buyOrderInfo:
+                if buyOrderInfo and buyOrderInfo.get('status') == 'cleared':
                     buy_filled_price = Decimal(str(buyOrderInfo['price']))
                     logger.info(f"✅ 买单实际成交价: {buy_filled_price} (第 {buy_found_attempt} 次获取)")
                     
@@ -618,17 +671,22 @@ class VarHardStrategy:
                         try:
                             logger.info(f"⏱️ 买单创建时间（service）: {buy_created_at}")
                             logger.info(f"⏱️ 买单执行时间（service）: {buy_executed_at}")
-                            
+                            buy_executed_at_client = info.get('buy_executed_at')
+                            logger.info(f"⏱️ 买单创建时间（client）: {buy_start}")
+                            logger.info(f"⏱️ 买单执行时间（client）: {buy_executed_at_client}")
                             buy_created_at_dt = datetime.fromisoformat(buy_created_at.replace('Z', '+00:00'))
                             buy_executed_at_dt = datetime.fromisoformat(buy_executed_at.replace('Z', '+00:00'))
                             buy_delay_ms = (buy_executed_at_dt - buy_created_at_dt).total_seconds() * 1000
-                            
+                            buy_filled_duration_client = (buy_executed_at_client - buy_start) * 1000
                             logger.info(f"⏱️ 买单撮合耗时（service）: {buy_delay_ms:.2f} ms")
-                            logger.info(f"⏱️ 买单撮合耗时（client）: {filled_duration:.2f} ms")
+                            logger.info(f"⏱️ 买单撮合耗时（client）: {buy_filled_duration_client:.2f} ms")
                         except Exception as e:
-                            logger.warning(f"⚠️ 解析买单时间失败: {e}")
-                else:
-                    logger.warning(f"⚠️ 买单订单信息为空")
+                            logger.error(f"❌ 解析买单时间失败: {e}")
+                elif buyOrderInfo and buyOrderInfo.get('status') != 'cleared':
+                    logger.warning(f"⚠️ 买单订单信息未成交: 状态 {buyOrderInfo.get('status')}")
+                    # 重试下单
+                    await place_buy_order(max_retries=5)
+
             elif buy_success:
                 logger.warning(f"⚠️ 未获取到买单订单信息 (订单ID: {buy_order_id})")
             
@@ -637,7 +695,7 @@ class VarHardStrategy:
                 sellOrderInfo = info['sell']
                 sell_found_attempt = info.get('sell_found_attempt')
                 
-                if sellOrderInfo:
+                if sellOrderInfo and sellOrderInfo.get('status') == 'cleared':
                     sell_filled_price = Decimal(str(sellOrderInfo['price']))
                     logger.info(f"✅ 卖单实际成交价: {sell_filled_price} (第 {sell_found_attempt} 次获取)")
                     
@@ -653,20 +711,24 @@ class VarHardStrategy:
                         try:
                             logger.info(f"⏱️ 卖单创建时间（service）: {sell_created_at}")
                             logger.info(f"⏱️ 卖单执行时间（service）: {sell_executed_at}")
-                            
+                            sell_executed_at_client = info.get('sell_executed_at')
+                            logger.info(f"⏱️ 卖单创建时间（client）: {sell_start}")
+                            logger.info(f"⏱️ 卖单执行时间（client）: {sell_executed_at_client}")
                             sell_created_at_dt = datetime.fromisoformat(sell_created_at.replace('Z', '+00:00'))
                             sell_executed_at_dt = datetime.fromisoformat(sell_executed_at.replace('Z', '+00:00'))
                             sell_delay_ms = (sell_executed_at_dt - sell_created_at_dt).total_seconds() * 1000
-                            
+                            sell_filled_duration_client = (sell_executed_at_client - sell_start) * 1000
                             logger.info(f"⏱️ 卖单撮合耗时（service）: {sell_delay_ms:.2f} ms")
-                            logger.info(f"⏱️ 卖单撮合耗时（client）: {filled_duration:.2f} ms")
+                            logger.info(f"⏱️ 卖单撮合耗时（client）: {sell_filled_duration_client:.2f} ms")
                         except Exception as e:
                             logger.warning(f"⚠️ 解析卖单时间失败: {e}")
-                else:
-                    logger.warning(f"⚠️ 卖单订单信息为空")
+                elif sellOrderInfo and sellOrderInfo.get('status') != 'cleared':
+                    logger.warning(f"⚠️ 卖单订单信息未成交: 状态 {sellOrderInfo.get('status')}")
+
             elif sell_success:
                 logger.warning(f"⚠️ 未获取到卖单订单信息 (订单ID: {sell_order_id})")
-        
+                # 重试下单
+                await place_sell_order(max_retries=5)
         if buy_success and sell_success and sell_filled_price and buy_filled_price:
             # 计算实际成交点差
             actual_spread_pct = (
@@ -712,7 +774,9 @@ class VarHardStrategy:
             total_slippage_pct=total_slippage_pct,
             status=status
         )
-        
+        logger.info(f"📥 交易 #{self.trade_count} 记录已保存，状态: {status}")
+        cur_pos = await self.exchange.get_position(self.symbol)
+        logger.info(f"📈 当前持仓: {cur_pos}")
         # 打印结果
         msg = (f"{'='*30}\n"
             f"📊 交易 #{self.trade_count} 结果: {status}\n"
@@ -747,10 +811,28 @@ class VarHardStrategy:
             f"{'='*30}"
         )
         logger.info(msg)
-        if self.lark_bot:
-            # 发送飞书通知
-            await self.lark_bot.send_text(msg)
-    
+
+        if cur_pos and cur_pos['size'] > 0:
+            side = cur_pos['side'].upper()
+            entry_price = cur_pos['entry_price']
+            logger.info(f"🔔 当前{side}持仓: {cur_pos} {self.symbol}, 成本价格：{entry_price}")
+            logger.info("⚠️ 检测到持仓未平仓，开始平仓！")
+            if side == 'LONG':
+                await place_sell_order(5, quantity=cur_pos['size'], mode='refresh')
+            elif side == 'SHORT':
+                await place_buy_order(5, quantity=cur_pos['size'], mode='refresh')
+            logger.info("✅ 重试结束，重新检测仓位")
+            await asyncio.sleep(1)
+            final_pos = await self.exchange.get_position(self.symbol)
+            logger.info(f"📈 当前持仓: {final_pos}")
+            if final_pos is None:
+                logger.info("🎉 持仓已全部平仓！")
+            else:
+                logger.warning("⚠️ 持仓未能全部平仓，请手动检查！")
+        # if self.lark_bot:
+        #     # 发送飞书通知
+        #     await self.lark_bot.send_text(msg)
+
     async def _record_virtual_trade(
         self,
         bid_price: Decimal,
