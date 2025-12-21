@@ -28,10 +28,11 @@ class VarHardStrategy:
         self,
         symbol: str,
         exchange: VariationalAdapter,
-        quantity: Decimal,
+        quantity: Decimal = None,
         quantity_range: tuple = (Decimal('0.0011'), Decimal('0.0033')),
         spread_threshold: Decimal = Decimal('0.0026'),  # 点差阈值 0.0026%
         max_slippage: Decimal = Decimal('0.002'),  # 最大滑点 0.2%
+        max_lifetime_volume: float = float('inf'), # 最大终生交易量
         cooldown_seconds: float = 5.0,  # 冷却时间
         cooldown_range: tuple = (3.0, 6.0),  # ✅ 新增：冷却时间范围（秒）
         poll_interval: float = 0.3,  # 轮询间隔（秒）
@@ -46,6 +47,7 @@ class VarHardStrategy:
         self.quantity_range = quantity_range  # ✅ 新增：随机数量范围
         self.spread_threshold = spread_threshold
         self.max_slippage = max_slippage
+        self.max_lifetime_volume = max_lifetime_volume
         self.cooldown_seconds = cooldown_seconds
         self.cooldown_range = cooldown_range  # ✅ 新增：冷却时间范围
         self.poll_interval = poll_interval
@@ -230,6 +232,30 @@ class VarHardStrategy:
         
         while self.is_running:
             try:
+                portfolio = await self.exchange.client.get_portfolio()
+                if not (portfolio and 'balance' in portfolio):
+                    logger.error(f"❌ 获取投资组合失败: {e}")
+                    continue
+                balance = float(portfolio.get('balance'))
+                logger.info(f"📤 账号余额: {balance}")
+
+                if balance < 10:
+                    logger.error(f"❌ 账号余额低于 $10, 请充值后重新启动程序")
+                    self.is_running = False
+                    break
+                
+                trade_volume = await self.exchange.client.get_trade_volume()
+                if not (trade_volume and 'own' in trade_volume):
+                    logger.error(f"❌ 获取交易量失败: {e}")
+                    continue
+                
+                lifetime_volume = float(trade_volume.get('own', {}).get('lifetime', 0.0))
+                logger.info(f"📤 账号终生交易量达到: {lifetime_volume}")
+                if lifetime_volume >= self.max_lifetime_volume:
+                    logger.info(f"✅ 账号终生交易量达到: {lifetime_volume}, 超过设定值: {self.max_lifetime_volume}, 请更新设定后重新启动程序")
+                    self.is_running = False
+                    break
+                
                 # ========== 1. 获取报价（订单簿数据） ==========
                 fetch_start = time.time()  # ✅ 记录开始时间
                 current_quantity = self._get_random_quantity()
@@ -386,8 +412,8 @@ class VarHardStrategy:
         min_qty, max_qty = self.quantity_range
         # 生成随机浮点数，转换为 Decimal
         random_float = random.uniform(float(min_qty), float(max_qty))
-        # 保留 4 位小数
-        random_qty = Decimal(str(random_float)).quantize(Decimal('0.0001'))
+        # 保留 5 位小数
+        random_qty = Decimal(str(random_float)).quantize(Decimal('0.00001'))
         return random_qty
     
     async def _execute_trade(

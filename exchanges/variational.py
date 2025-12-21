@@ -651,6 +651,7 @@ class VariationalClient(BaseExchangeClient):
                 
         except Exception as e:
             return OrderResult(success=False, error_message=str(e))
+    
     async def cancel_order(self, order_id: str) -> OrderResult:
         """使用 cloudscraper 取消订单"""
         url = f"{self.api_base}/orders/cancel"
@@ -909,6 +910,7 @@ class VariationalClient(BaseExchangeClient):
             import traceback
             self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
             return None
+    
     def setup_order_update_handler(self, handler) -> None:
         """设置订单更新处理器"""
         self._order_update_handler = handler
@@ -979,3 +981,140 @@ class VariationalClient(BaseExchangeClient):
         if 'balance' in data:
             return Decimal(data['balance'])
         return Decimal('0')
+    
+    async def get_portfolio(self) -> Optional[dict]:
+        """
+        获取投资组合信息
+        Returns:
+            {
+                "margin_usage": {
+                    "initial_margin": "0",
+                    "maintenance_margin": "0"
+                },
+                "balance": "1.889881",
+                "upnl": "0"
+            }
+        """
+        try:
+            url = f"{self.api_base}/portfolio?compute_margin=true"
+            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+            
+            data = await self._make_var_request('GET', url, cookies=cookies)
+            
+            return data
+            
+        except Exception as e:
+            self.logger.log(f"【VARIATIONAL】Error getting portfolio {e}", "ERROR")
+            return None
+
+    async def get_trade_volume(self) -> Optional[dict]:
+        """
+        获取交易量相关信息
+        Returns:
+            {
+                "last_30d": "1.845642",
+                "all_time": "912206.296153",
+                "own": {
+                    "lifetime": "912206.296153",
+                    "last_30d": "1.845642"
+                },
+                "referred": {
+                    "lifetime": "45632098.489581",
+                    "last_30d": "43513644.10272"
+                },
+                "total": {
+                    "lifetime": "10038625.9940692",
+                    "last_30d": "8702730.666186"
+                },
+                "current_tier": {
+                    "id": 2,
+                    "name": "Silver",
+                    "total_volume_30d": "5000000",
+                    "referral_reward_rate": "0.21",
+                    "points_rate": "1.0174",
+                    "spread_discount": "0.1189",
+                    "loss_rakeback_odds_boost": "1",
+                    "loss_rakeback_referral_cut": "0.0125"
+                },
+                "boosted_tier": null
+            }
+        """
+        try:
+            url = f"{self.api_base}/portfolio/trade_volume"
+            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+            
+            data = await self._make_var_request('GET', url, cookies=cookies)
+            
+            return data
+            
+        except Exception as e:
+            self.logger.log(f"【VARIATIONAL】Error getting trade_volume {e}", "ERROR")
+            return None
+
+    async def get_points(self) -> Optional[dict]:
+        """
+        获取积分信息
+        Returns:
+            {
+                "company": "3fedfbfb-9ce3-47e0-bd86-b71bbb1fd782",
+                "total_points": "147.620000",
+                "self_points": "80.560000",
+                "referral_points": "67.060000",
+                "rank": 6519
+            }
+        """
+        try:
+            url = f"{self.api_base}/points/summary"
+            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+            
+            data = await self._make_var_request('GET', url, cookies=cookies)
+            
+            return data
+            
+        except Exception as e:
+            self.logger.log(f"【VARIATIONAL】Error getting points {e}", "ERROR")
+            return None
+    
+    async def get_points_history(self) -> Optional[list]:
+        """
+        获取历史积分
+        Returns:
+            {
+                "pagination": {
+                    "last_page": {
+                        "limit": "20",
+                        "offset": "0"
+                    },
+                    "next_page": null,
+                    "object_count": 2
+                },
+                "result": [
+                    {
+                        "end_window": "2025-12-18T00:00:00Z",
+                        "referral_points": "1.110000",
+                        "self_points": "0",
+                        "start_window": "2025-12-12T00:00:00Z",
+                        "total_points": "1.110000"
+                    },
+                    {
+                        "end_window": "2025-12-12T00:00:00Z",
+                        "referral_points": "65.950000",
+                        "self_points": "80.560000",
+                        "start_window": "2025-01-29T00:00:00Z",
+                        "total_points": "146.510000"
+                    }
+                ]
+            }
+        """
+        try:
+            url = f"{self.api_base}/points/history?limit=20&offset=0"
+            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
+            
+            data = await self._make_var_request('GET', url, cookies=cookies)
+            return data.get('result', [])
+            
+        except Exception as e:
+            self.logger.log(f"【VARIATIONAL】Error getting points {e}", "ERROR")
+            return None
+    
+    
