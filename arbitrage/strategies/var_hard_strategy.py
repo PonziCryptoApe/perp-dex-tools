@@ -232,30 +232,6 @@ class VarHardStrategy:
         
         while self.is_running:
             try:
-                portfolio = await self.exchange.client.get_portfolio()
-                if not (portfolio and 'balance' in portfolio):
-                    logger.error(f"❌ 获取投资组合失败: {e}")
-                    continue
-                balance = float(portfolio.get('balance'))
-                logger.info(f"📤 账号余额: {balance}")
-
-                if balance < 10:
-                    logger.error(f"❌ 账号余额低于 $10, 请充值后重新启动程序")
-                    self.is_running = False
-                    break
-                
-                trade_volume = await self.exchange.client.get_trade_volume()
-                if not (trade_volume and 'own' in trade_volume):
-                    logger.error(f"❌ 获取交易量失败: {e}")
-                    continue
-                
-                lifetime_volume = float(trade_volume.get('own', {}).get('lifetime', 0.0))
-                logger.info(f"📤 账号终生交易量达到: {lifetime_volume}")
-                if lifetime_volume >= self.max_lifetime_volume:
-                    logger.info(f"✅ 账号终生交易量达到: {lifetime_volume}, 超过设定值: {self.max_lifetime_volume}, 请更新设定后重新启动程序")
-                    self.is_running = False
-                    break
-                
                 # ========== 1. 获取报价（订单簿数据） ==========
                 fetch_start = time.time()  # ✅ 记录开始时间
                 current_quantity = self._get_random_quantity()
@@ -357,6 +333,33 @@ class VarHardStrategy:
                         side=trade_side
                     )
                                 
+                # 新增终生交易量和余额检测
+                trade_volume = await self.exchange.client.get_trade_volume()
+                if not (trade_volume and 'own' in trade_volume):
+                    logger.error(f"❌ 获取交易量失败")
+                    await asyncio.sleep(1)
+                    continue
+                
+                lifetime_volume = float(trade_volume.get('own', {}).get('lifetime', 0.0))
+                logger.info(f"📤 账号终生交易量达到: {lifetime_volume}")
+                if lifetime_volume >= self.max_lifetime_volume:
+                    logger.info(f"✅ 账号终生交易量达到: {lifetime_volume}, 超过设定值: {self.max_lifetime_volume}, 请更新设定后重新启动程序")
+                    self.is_running = False
+                    break
+                
+                portfolio = await self.exchange.client.get_portfolio()
+                if not (portfolio and 'balance' in portfolio):
+                    logger.error(f"❌ 获取投资组合失败")
+                    await asyncio.sleep(1)
+                    continue
+                balance = float(portfolio.get('balance'))
+                logger.info(f"📤 账号余额: {balance}")
+
+                if balance < 10:
+                    logger.error(f"❌ 账号余额低于 $10, 请充值后重新启动程序")
+                    self.is_running = False
+                    break
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
