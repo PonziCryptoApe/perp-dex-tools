@@ -18,6 +18,7 @@ class ExchangeFactory:
         'grvt': 'exchanges.grvt.GrvtClient',
         'extended': 'exchanges.extended.ExtendedClient',
         'var': 'exchanges.variational.VariationalClient',
+        'nado': 'exchanges.nado.NadoClient',
     }
 
     @classmethod

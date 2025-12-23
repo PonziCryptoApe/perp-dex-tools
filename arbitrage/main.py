@@ -21,11 +21,13 @@ from arbitrage.config.loader import load_pair_config, list_all_pairs, list_enabl
 from arbitrage.exchanges.extended_adapter import ExtendedAdapter
 from arbitrage.exchanges.lighter_adapter import LighterAdapter
 from arbitrage.exchanges.variational_adapter import VariationalAdapter  # ✅ 新增
+from arbitrage.exchanges.nado_adapter import NadoAdapter  # ✅ 新增
 from arbitrage.utils.logger import setup_logging
 from arbitrage.utils.trade_logger import TradeLogger
 from exchanges.extended import ExtendedClient
 from exchanges.lighter import LighterClient
 from exchanges.variational import VariationalClient  # ✅ 新增
+from exchanges.nado import NadoClient  # ✅ 新增
 from helpers.lark_bot import LarkBot
 from helpers.util import Config
 
@@ -43,13 +45,15 @@ logger = logging.getLogger(__name__)
 EXCHANGE_ADAPTERS = {
     'extended': ExtendedAdapter,
     'lighter': LighterAdapter,
-    'variational': VariationalAdapter,  # ✅ 新增
+    'variational': VariationalAdapter,
+    'nado': NadoAdapter,  # ✅ 新增
 }
 
 EXCHANGE_CLIENTS = {
     'extended': ExtendedClient,
     'lighter': LighterClient,
     'variational': VariationalClient,  # ✅ 新增
+    'nado': NadoClient,  # ✅ 新增
 }
 
 async def create_exchange_adapter(
@@ -182,6 +186,28 @@ async def create_exchange_adapter(
         except Exception as e:
             logger.error(f"❌ 获取 Extended 合约信息失败: {e}")
             raise
+
+    elif exchange_name == 'nado':
+        # Nado 需要获取合约信息
+        try:
+            logger.info(f"🔍 获取 Nado 合约信息...")
+            contract_id, tick_size = await client.get_contract_attributes()
+
+            if not contract_id:
+                raise ValueError("Nado contract_id 获取失败")
+            logger.info(f"✅ 获取到 Nado 合约信息: contract_id={contract_id}, tick_size={tick_size}")
+            client.config.contract_id = contract_id
+            client.config.tick_size = tick_size
+
+            logger.info(
+                f"✅ Nado 合约信息:\n"
+                f"   contract_id: {client.config.contract_id}\n"
+                f"   tick_size: {client.config.tick_size}"
+            )
+        except Exception as e:
+            logger.error(f"❌ 获取 Nado 合约信息失败: {e}")
+            raise
+        
     # ========== 5. 创建适配器 ==========
     adapter_class = EXCHANGE_ADAPTERS[exchange_name]
     

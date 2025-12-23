@@ -102,11 +102,6 @@ class ExtendedAdapter(ExchangeAdapter):
     async def subscribe_orderbook(self, callback: Callable):
         """订阅订单簿（通过轮询 Extended API）"""
         self._orderbook_callback = callback
-        
-        # ✅ Extended 没有订单簿 WebSocket，使用轮询方式
-        # self._orderbook_update_task = asyncio.create_task(
-        #     self._poll_orderbook()
-        # )
 
         self._extended_orderbook_handler = self._on_extended_orderbook_update
 

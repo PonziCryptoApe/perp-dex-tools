@@ -736,7 +736,7 @@ class OrderExecutor:
                     side='sell',
                     quantity=order_quantity,
                     price=exchange_a_price,
-                    retry_mode='opportunistic',
+                    retry_mode='aggressive',
                     quote_id=exchange_a_quote_id
                 )
             )
@@ -1107,7 +1107,7 @@ class OrderExecutor:
                     side='buy',
                     quantity=close_quantity,
                     price=exchange_a_price,
-                    retry_mode='opportunistic',
+                    retry_mode='aggressive',
                     quote_id=exchange_a_quote_id
                 )
             )

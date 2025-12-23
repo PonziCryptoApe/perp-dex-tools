@@ -159,6 +159,18 @@ class VariationalClient(BaseExchangeClient):
         """Connect to Variational exchange."""
         self.logger.log("【VARIATIONAL】Connecting to Variational exchange...", "INFO")
 
+        if self.auth_token:
+            try:
+                portfolio = await self.get_portfolio()  # 轻量检查
+                if portfolio and 'balance' in portfolio:  # token 有效
+                    self.logger.log("【VARIATIONAL】Token valid, skipping auth", "DEBUG")
+                    # 只启动/重连 WS
+                    if not self._portfolio_ws_connected:
+                        self._start_websockets()
+                    return
+            except Exception as e:
+                self.logger.log(f"【VARIATIONAL】Token invalid ({e}), re-authenticating", "WARNING")
+                self.auth_token = None  # 强制重认证
         # 1. 认证登录
         await self._authenticate()
         
