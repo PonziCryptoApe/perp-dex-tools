@@ -64,6 +64,13 @@ pairs:
     # ✅ Variational 特殊配置
     variational_config:
       polling_interval: 0.3   # 订单簿轮询间隔（秒）
+    
+    dynamic_threshold:
+      enabled: true              # 是否启用
+      sample_size: 1000          # 样本容量（固定）
+      min_samples: 10           # 开始计算的最小样本数
+      std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
+      min_total_threshold: 0.04 # 最小阈值和（%）
   
   extended_variational_hype:
     enabled: true
@@ -135,4 +142,4 @@ pairs:
       sample_size: 1000          # 样本容量（固定）
       min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
-      min_total_threshold: 0.07 # 最小阈值和（%）
+      min_total_threshold: 0.08 # 最小阈值和（%）

@@ -166,7 +166,7 @@ class VariationalAdapter(ExchangeAdapter):
                 
                 # ✅ 连续失败过多，增加延迟
                 if consecutive_errors >= max_consecutive_errors:
-                    logger.error(f"🚨 连续失败 {max_consecutive_errors} 次，暂停 10 秒")
+                    logger.warning(f"🚨 连续失败 {max_consecutive_errors} 次，暂停 10 秒")
                     await asyncio.sleep(10)
                     consecutive_errors = 0  # 重置
                 else:
@@ -441,65 +441,84 @@ class VariationalAdapter(ExchangeAdapter):
                 logger.info(f"✅ 已设置 current_order_id = {rfq_id}")
 
                 # final_status = await self._wait_for_order_fill(rfq_id, timeout=5.0)
-                await asyncio.sleep(0.4)  # 确保状态更新完成
-                # logger.info(f"📊 等待结果: final_status={final_status}")
-                history_data = await self.client.get_orders_history(limit=20, offset=0, rfq_id=rfq_id)
-                if history_data and 'result' in history_data and history_data['result']:
-                    order_data = history_data['result'][0]  # 第一个匹配的订单
-                    final_status = order_data.get('status', None)
-                    logger.info(f"📊 通过 RESTful API 获取订单状态: final_status={final_status}")
-                    if not final_status:
-                        logger.error(f"❌ 超时且订单状态为 {final_status}")
-                        return {
-                            'success': False,
-                            'order_id': rfq_id,
-                            'error': f'Timeout and order status: {final_status}',
-                            'filled_price': Decimal('0'),
-                            'filled_quantity': Decimal('0'),
-                            'timestamp': time.time()
-                        }
-                    # ✅ 3. 判断最终状态
-                    if final_status.upper() in ['FILLED', 'CLEARED']:
-                        logger.info(f"✅ 市价单成功: {rfq_id}")
-                        filled_price = Decimal(str(order_data.get('price', '0')))
-                        filled_quantity = Decimal(str(order_data.get('qty', '0')))
-                            
-                        logger.info(
-                            f"✅ 获取订单信息:\n"
-                            f"   订单 ID: {rfq_id}\n"
-                            f"   成交价: ${filled_price}\n"
-                            f"   成交量: {filled_quantity}"
-                        )
+                await asyncio.sleep(0.18)  # 确保状态更新完成
+                max_order_retries = 20
+                retry_interval = 0.005  # 5 ms
+                order_data = None
+                final_status = None
+
+                for attempt_idx in range(max_order_retries):
+                    try:
+                        # 获取订单历史，尝试寻找匹配的 rfq_id
+                        history_data = await self.client.get_orders_history(limit=20, offset=0)
+                        if history_data and 'result' in history_data:
+                            # 在结果列表中寻找对应的订单
+                            matched_orders = [o for o in history_data['result'] if o.get('rfq_id') == rfq_id]
+                            if matched_orders:
+                                order_data = matched_orders[0]
+                                final_status = order_data.get('status')
+                                logger.info(f"📊 第 {attempt_idx + 1} 次尝试成功获取订单状态: {final_status}")
+                                break
+
+                        if attempt_idx < max_order_retries - 1:
+                            logger.info(f"⏳ 订单 {rfq_id} 尚未入库，{retry_interval}s 后重试 ({attempt_idx + 1}/{max_order_retries})")
+                            await asyncio.sleep(retry_interval)
+                    except Exception as e:
+                        logger.warning(f"⚠️ 第 {attempt_idx + 1} 次查询历史订单异常: {e}")
+                        await asyncio.sleep(retry_interval)
+                
+                if not final_status:
+                    logger.error(f"❌ 达到最大重试次数，仍无法获取订单 {rfq_id} 的信息")
+                    return {
+                        'success': False,
+                        'order_id': rfq_id,
+                        'error': f'Timeout and order status: {final_status}',
+                        'filled_price': Decimal('0'),
+                        'filled_quantity': Decimal('0'),
+                        'timestamp': time.time()
+                    }
+                # ✅ 3. 判断最终状态
+                if final_status.upper() in ['FILLED', 'CLEARED']:
+                    logger.info(f"✅ 市价单成功: {rfq_id}")
+                    filled_price = Decimal(str(order_data.get('price', '0')))
+                    filled_quantity = Decimal(str(order_data.get('qty', '0')))
                         
-                        return {
-                            'success': True,
-                            'order_id': rfq_id,
-                            'filled_price': filled_price,
-                            'filled_quantity': filled_quantity,
-                            'error': None,
-                            'timestamp': time.time()
-                        }
-                    elif final_status.upper() in ['CANCELED', 'REJECTED']:
-                        logger.error(f"❌ 市价单失败: {final_status}")
-                        return {
-                            'success': False,
-                            'order_id': rfq_id,
-                            'error': f'Order {final_status}',
-                            'filled_price': Decimal('0'),
-                            'filled_quantity': Decimal('0'),
-                            'timestamp': time.time()
-                        }
-                    else:
-                        # 未知状态，保守返回失败
-                        logger.error(f"❌ 未知订单状态: {final_status}")
-                        return {
-                            'success': False,
-                            'order_id': rfq_id,
-                            'error': f'Unknown status: {final_status}',
-                            'filled_price': Decimal('0'),
-                            'filled_quantity': Decimal('0'),
-                            'timestamp': time.time()
-                        }
+                    logger.info(
+                        f"✅ 获取订单信息:\n"
+                        f"   订单 ID: {rfq_id}\n"
+                        f"   成交价: ${filled_price}\n"
+                        f"   成交量: {filled_quantity}"
+                    )
+                    
+                    return {
+                        'success': True,
+                        'order_id': rfq_id,
+                        'filled_price': filled_price,
+                        'filled_quantity': filled_quantity,
+                        'error': None,
+                        'timestamp': time.time()
+                    }
+                elif final_status.upper() in ['CANCELED', 'REJECTED']:
+                    logger.error(f"❌ 市价单失败: {final_status}")
+                    return {
+                        'success': False,
+                        'order_id': rfq_id,
+                        'error': f'Order {final_status}',
+                        'filled_price': Decimal('0'),
+                        'filled_quantity': Decimal('0'),
+                        'timestamp': time.time()
+                    }
+                else:
+                    # 未知状态，保守返回失败
+                    logger.error(f"❌ 未知订单状态: {final_status}")
+                    return {
+                        'success': False,
+                        'order_id': rfq_id,
+                        'error': f'Unknown status: {final_status}',
+                        'filled_price': Decimal('0'),
+                        'filled_quantity': Decimal('0'),
+                        'timestamp': time.time()
+                    }
             except Exception as e:
                 logger.error(f"❌ place_market_order 异常: {e}")
                 import traceback

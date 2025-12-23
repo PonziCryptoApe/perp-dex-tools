@@ -31,7 +31,7 @@ class HedgeStrategy(BaseStrategy):
         lark_bot=None,
         monitor_only: bool = False,
         trade_logger=None,
-        max_signal_delay_ms: int = 300,
+        max_signal_delay_ms: int = 100,
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
@@ -852,7 +852,7 @@ class HedgeStrategy(BaseStrategy):
             )
             await self.lark_bot.send_text(message)
         except Exception as e:
-            logger.error(f"发送飞书通知失败: {e}")
+            logger.error(f"❌ 发送飞书通知失败: {e}")
     
     async def _send_close_notification(self, position: Position, pnl_pct: Decimal, prices: PriceSnapshot):
         """发送平仓通知"""
@@ -906,7 +906,7 @@ class HedgeStrategy(BaseStrategy):
             
             await self.lark_bot.send_text(message)
         except Exception as e:
-            logger.error(f"发送飞书通知失败: {e}")
+            logger.error(f"❌ 发送飞书通知失败: {e}")
     def _format_open_stats(self) -> str:
         """格式化开仓统计信息"""
         stats = self.signal_stats['open']
