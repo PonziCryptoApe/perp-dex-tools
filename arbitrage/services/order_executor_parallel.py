@@ -1582,9 +1582,27 @@ class OrderExecutor:
                 f"   异常: {e}"  # ✅ 添加这一行
             )
 
-    async def check_position_balance(self, exchange_a_bid_price: Decimal, exchange_a_ask_price: Decimal):
+    async def check_position_balance(self):
         logger.info("🔍 检查两所仓位平衡情况...")
         symbol = self.exchange_a.symbol
+        portfolio_a = await self.exchange_a.client.get_portfolio()
+
+        if portfolio_a:
+            balance_a = portfolio_a.get('balance')
+            upnl_a = portfolio_a.get('upnl')
+            logger.info(f"📤 交易所A 权益: 账号余额: {balance_a}, upnl: { upnl_a }")
+        else:
+            logger.error(f"❌ 交易所A 获取投资组合失败")
+
+        portfolio_b = await self.exchange_b.client.get_portfolio()
+
+        if not (portfolio_b and 'balance' in portfolio_b):
+            logger.error(f"❌ 交易所B 获取投资组合失败")
+        else: 
+            balance_b = float(portfolio_b.get('balance'))
+            upnl_b = float(portfolio_b.get('upnl'))
+            logger.info(f"📤 交易所B 权益: 账号余额: {balance_b}, upnl: { upnl_b }")
+
         # 检查仓位是否平衡
         pos_a = await self.exchange_a.get_position(symbol)
         pos_b = await self.exchange_b.get_position(symbol)
@@ -1600,6 +1618,9 @@ class OrderExecutor:
         if pos_a_size == pos_b_size and pos_a_side != pos_b_side:
             logger.info("✅ 仓位平衡，无需调整")
             return
+        # 请求订单簿restful接口
+        exchange_a_bid_price, exchange_a_ask_price, _ = await self.exchange_a.client.fetch_bbo_prices(symbol)
+
         if pos_a_size > pos_b_size:
             diff_size = pos_a_size - pos_b_size
             if pos_a_side == 'short':
@@ -1650,7 +1671,14 @@ class OrderExecutor:
         logger.info(f"🔍 重新校验仓位平衡: {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}, "
                     f": {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}")
         if pos_a_size == pos_b_size and pos_a_side != pos_b_side:
-            logger.info("✅ 仓位平衡，无需调整")
+            logger.info("✅ 仓位检测后实现仓位平衡，无需调整")
         else:
-            logger.error("❌ 仓位仍不平衡，请手动检查")
+            logger.error("❌ 仓位检测后仓位仍不平衡，请手动检查")
+            # 飞书通知
+            if self.lark_bot:
+                await self.lark_bot.send_text(
+                    f"❌ 仓位检测后仓位仍不平衡，需要手动处理仓位！"
+                    f" {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}"
+                    f" {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}"
+                )
     

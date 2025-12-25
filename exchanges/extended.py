@@ -947,7 +947,16 @@ class ExtendedClient(BaseExchangeClient):
             self.logger.log(f"Error handling orderbook update: {e}", "ERROR")
             self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
         
-                
+    async def get_portfolio(self):
+        balance_info = await self.perpetual_trading_client.account.get_balance()
+        if balance_info and balance_info.data:
+            self.logger.log(f'balance: {balance_info.data}')
+            return {
+                'balance': balance_info.data.balance,
+                'upnl': balance_info.data.unrealised_pnl
+            }
+        else:
+            return None
     def get_exchange_name(self) -> str:
         """Get the exchange name."""
         return "extended"

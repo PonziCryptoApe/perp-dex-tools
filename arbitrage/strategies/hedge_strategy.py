@@ -31,7 +31,7 @@ class HedgeStrategy(BaseStrategy):
         lark_bot=None,
         monitor_only: bool = False,
         trade_logger=None,
-        max_signal_delay_ms: int = 500,
+        max_signal_delay_ms: int = 100,
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
@@ -119,7 +119,7 @@ class HedgeStrategy(BaseStrategy):
         # ✅ 定期输出统计（可选）
         self._last_stats_log_time = 0
         self._stats_log_interval = 60  # 每 60 秒输出一次统计
-        self._last_threshold_check_time = None
+        # self._last_threshold_check_time = None
         # 动态阈值管理器
         dt_config = dynamic_threshold
         if dt_config.get('enabled', False):
@@ -219,16 +219,15 @@ class HedgeStrategy(BaseStrategy):
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
-            if self._last_threshold_check_time is None:
-                self._last_threshold_check_time = time.time()
-            now = time.time()
+            # if self._last_threshold_check_time is None:
+                # self._last_threshold_check_time = time.time()
+            # now = time.time()
             # ✅ 新增：记录价差并尝试调整阈值
             if self.threshold_manager and signal_flag:
                 # 每30秒检查一次仓位数据，检查后跳过该信号
-                if now - self._last_threshold_check_time >= 30:
-                    await self.executor.check_position_balance(exchange_a_bid_price=prices.exchange_a_bid, exchange_a_ask_price=prices.exchange_a_ask)
-                    self._last_threshold_check_time = now
-                    return
+                # if now - self._last_threshold_check_time >= 30:
+                    # self._last_threshold_check_time = now
+                    # return
 
                 # 添加数据
                 self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
@@ -499,7 +498,7 @@ class HedgeStrategy(BaseStrategy):
                         # ========== 新增部分结束 ==========
                         # logger.info(f"✅ 开仓成功: {position}，等待平仓...")
                         # logger.info("🔍 开仓后检查仓位平衡...")
-                        # await self.executor.check_position_balance(exchange_a_bid_price=prices.exchange_a_bid, exchange_a_ask_price=prices.exchange_a_ask)
+                        await self.executor.check_position_balance()
 
                         # 发送飞书通知
                         if self.lark_bot:
@@ -772,7 +771,7 @@ class HedgeStrategy(BaseStrategy):
                         #     logger.warning("⚠️ 平仓后仓位不一致，已自动修正") 
                         logger.info("🔍 反向开仓后检查仓位平衡...")
 
-                        # await self.executor.check_position_balance()
+                        await self.executor.check_position_balance()
                                
                         # 发送飞书通知
                         if self.lark_bot:
