@@ -752,5 +752,10 @@ class NadoClient(BaseExchangeClient):
             size=quantity,
             status='OPEN'
         )
+    async def get_portfolio(self):
+        return {
+            'balance': '-',
+            'upnl': '-',
+        }
 
 
