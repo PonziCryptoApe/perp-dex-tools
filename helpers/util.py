@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import logging
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -82,3 +83,29 @@ def async_retry(
         
         return wrapper
     return decorator
+
+
+def beijing_to_timestamp(beijing_str: str, format_str: str = '%Y-%m-%d %H:%M:%S') -> float:
+    """
+    将北京时间字符串转换为 Unix 时间戳。
+    
+    :param beijing_str: 北京时间字符串，例如 "2025-12-24 10:00:00"
+    :param format_str: 时间格式字符串，默认 '%Y-%m-%d %H:%M:%S'
+    :return: Unix 时间戳（浮点数，秒）
+    """
+    # 解析字符串为 datetime 对象（无时区）
+    dt = datetime.strptime(beijing_str, format_str)
+    
+    # 设置北京时区 (UTC+8)
+    cst_tz = timezone(timedelta(hours=8))
+    dt = dt.replace(tzinfo=cst_tz)
+    
+    # 获取时间戳（自动转换为 UTC）
+    return dt.timestamp()
+
+# 示例使用
+if __name__ == "__main__":
+    test_time = "2025-12-24 10:00:00"  # 当前日期示例
+    timestamp = beijing_to_timestamp(test_time)
+    print(f"北京时间 {test_time} 的时间戳: {timestamp}")
+    # 输出: 北京时间 2025-12-24 10:00:00 的时间戳: 1766541600.0

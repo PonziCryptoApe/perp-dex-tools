@@ -145,8 +145,10 @@ class PriceMonitorService:
         try:
             bids_a = self.orderbook_a.get('bids', [])
             asks_a = self.orderbook_a.get('asks', [])
+            mark_a = self.orderbook_a.get('mark_price', None)
             bids_b = self.orderbook_b.get('bids', [])
             asks_b = self.orderbook_b.get('asks', [])
+            mark_b = self.orderbook_b.get('mark_price', None)
             timestamp_a = self.orderbook_a.get('timestamp', time.time())
             timestamp_b = self.orderbook_b.get('timestamp', time.time())
             
@@ -158,7 +160,9 @@ class PriceMonitorService:
             exchange_a_ask = Decimal(str(asks_a[0][0]))
             exchange_b_bid = Decimal(str(bids_b[0][0]))
             exchange_b_ask = Decimal(str(asks_b[0][0]))
-            
+            exchange_a_mark = Decimal(str(mark_a)) if mark_a is not None else None
+            exchange_b_mark = Decimal(str(mark_b)) if mark_b is not None else None
+
             # ✅ 提取深度（如果有）
             exchange_a_bid_size = Decimal(str(bids_a[0][1])) if len(bids_a[0]) > 1 else Decimal('0')
             exchange_a_ask_size = Decimal(str(asks_a[0][1])) if len(asks_a[0]) > 1 else Decimal('0')
@@ -169,8 +173,10 @@ class PriceMonitorService:
                 symbol=self.symbol,
                 exchange_a_bid=exchange_a_bid,
                 exchange_a_ask=exchange_a_ask,
+                exchange_a_mark=exchange_a_mark,
                 exchange_b_bid=exchange_b_bid,
                 exchange_b_ask=exchange_b_ask,
+                exchange_b_mark=exchange_b_mark,
                 exchange_a_name=self.exchange_a.exchange_name,
                 exchange_b_name=self.exchange_b.exchange_name,
                 exchange_a_quote_id=getattr(self.exchange_a, '_quote_id', None),
@@ -320,7 +326,13 @@ class PriceMonitorService:
         
         while time.time() - start_time < timeout:
             attempt += 1
-            
+            if self.orderbook_a:
+                logger.info(f"📘 {self.exchange_a.exchange_name} 订单簿已就绪")
+                logger.info(f"   bids_a: {self.orderbook_a.get('bids', [])[:1]}, asks_a: {self.orderbook_a.get('asks', [])[:1]}")
+            if self.orderbook_b:
+                logger.info(f"📗 {self.exchange_b.exchange_name} 订单簿已就绪")
+                logger.info(f"   bids_b: {self.orderbook_b.get('bids', [])[:1]}, asks_b: {self.orderbook_b.get('asks', [])[:1]}")
+
             if self.orderbook_a and self.orderbook_b:
                 bids_a = self.orderbook_a.get('bids', [])
                 asks_a = self.orderbook_a.get('asks', [])

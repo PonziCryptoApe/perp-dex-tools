@@ -122,7 +122,8 @@ class ExtendedAdapter(ExchangeAdapter):
         Args:
             orderbook_data: Extended WebSocket 推送的订单簿数据
                 {
-                    'ts': 1732611639000,  # 时间戳（毫秒）
+                    'ts_server': 1732611639000,  # 时间戳（待定，暂不使用）
+                    'timestamp': 1732611639000,  # 时间戳（秒）
                     'market': 'ETH-USD',
                     'bid': [{"p": 2945.9, "q": 10.0}],
                     'ask': [{"p": 2946.1, "q": 10.0}]
@@ -132,8 +133,8 @@ class ExtendedAdapter(ExchangeAdapter):
             # ✅ 提取数据
             bids = orderbook_data.get('bid', [])
             asks = orderbook_data.get('ask', [])
-            ts_ms = orderbook_data.get('ts', time.time() * 1000)
-            
+            ts = orderbook_data.get('timestamp', time.time())
+
             if not bids or not asks:
                 return
             
@@ -147,8 +148,9 @@ class ExtendedAdapter(ExchangeAdapter):
             self._orderbook = {
                 'bids': [[bid_price, bid_size]],
                 'asks': [[ask_price, ask_size]],
-                'timestamp': ts_ms / 1000,  # ← 使用 WebSocket 推送的时间戳（毫秒转秒）
-                'poll_duration_ms': 0  # WebSocket 无 API 调用延迟
+                'timestamp': ts,  # ← 使用接收到ws数据的时间戳（毫秒转秒）
+                'poll_duration_ms': 0,  # WebSocket 无 API 调用延迟
+                'mark_price': None  # extended 订单簿没有该字段
             }
             
             # ✅ 触发回调
@@ -159,7 +161,7 @@ class ExtendedAdapter(ExchangeAdapter):
                 f"📊 Extended WebSocket 订单簿更新:\n"
                 f"   买一: ${bid_price}\n"
                 f"   卖一: ${ask_price}\n"
-                f"   时间戳: {ts_ms / 1000:.6f}"
+                f"   时间戳: {ts:.6f}"
             )
         
         except Exception as e:
@@ -393,7 +395,9 @@ class ExtendedAdapter(ExchangeAdapter):
                     'error': error_msg,
                     'filled_price': Decimal('0'),
                     'filled_quantity': Decimal('0'),
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'place_duration_ms': place_duration,
+                    'execution_duration_ms': 0,
                 }
             
             order_id = order_result.data.id
@@ -404,7 +408,9 @@ class ExtendedAdapter(ExchangeAdapter):
                     'error': 'No order ID returned',
                     'filled_price': Decimal('0'),
                     'filled_quantity': Decimal('0'),
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'place_duration_ms': place_duration,
+                    'execution_duration_ms': 0,
                 }
             
             # 等待订单执行
@@ -460,7 +466,9 @@ class ExtendedAdapter(ExchangeAdapter):
                         'filled_price': price_from_ws,
                         'filled_quantity': filled_size_from_ws,
                         'partial_fill': True,  # ✅ 标记为部分成交
-                        'timestamp': time.time()
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': wait_duration,
                     }
                 else:
                     logger.info(
@@ -473,7 +481,9 @@ class ExtendedAdapter(ExchangeAdapter):
                         'error': 'Order CANCELED (no fill)',
                         'filled_price': Decimal('0'),
                         'filled_quantity': Decimal('0'),
-                        'timestamp': time.time()
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': wait_duration,
                     }
             if status in ['REJECTED']:
                 # ✅ 激进模式：重试
@@ -488,7 +498,9 @@ class ExtendedAdapter(ExchangeAdapter):
                     'error': f'Order {status}',
                     'filled_price': Decimal('0'),
                     'filled_quantity': Decimal('0'),
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'place_duration_ms': place_duration,
+                    'execution_duration_ms': wait_duration,
                 }
             
             if status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED']:
@@ -522,7 +534,9 @@ class ExtendedAdapter(ExchangeAdapter):
                     'filled_price': filled_price,
                     'filled_quantity': filled_quantity,
                     'error': None,
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'place_duration_ms': place_duration,
+                    'execution_duration_ms': wait_duration,
                 }
             
             return {
@@ -531,7 +545,9 @@ class ExtendedAdapter(ExchangeAdapter):
                 'error': f'Unknown status: {status}',
                 'filled_price': Decimal('0'),
                 'filled_quantity': Decimal('0'),
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'place_duration_ms': place_duration,
+                'execution_duration_ms': wait_duration,
             }
         
         except Exception as e:

@@ -184,13 +184,15 @@ class PositionManagerService:
             f"   Spread: {position.spread_pct:.4f}%"
         )
     
-    def add_position(self, position: Position, direction: str):
+    def add_position(self, position: Position, direction: str, signal_delay_ms_a: int = 0, signal_delay_ms_b: int = 0):
         """
         添加仓位（累计模式专用）
         
         Args:
             position: Position 对象
             direction: 'short' 或 'long'
+            signal_delay_ms_a: 交易所 A 信号延迟（毫秒）
+            signal_delay_ms_b: 交易所 B 信号延迟（毫秒）
         """
         if not self.accumulate_mode:
             logger.warning("⚠️ 传统模式下不支持 add_position()，请使用 set_position()")
@@ -209,7 +211,7 @@ class PositionManagerService:
         self.position_history.append(position)
         
         # ✅ 记录开仓交易到 CSV
-        self._log_open_trade(position)
+        self._log_open_trade(position, signal_delay_ms_a, signal_delay_ms_b)
         
         # ✅ 计算仓位利用率
         utilization = abs(self.current_position_qty / self.max_position * 100) if self.max_position > 0 else 0
@@ -293,8 +295,8 @@ class PositionManagerService:
         )
         
         return pnl_pct
-    
-    def close_position(self) -> Decimal:
+
+    def close_position(self, signal_delay_ms_a: float, signal_delay_ms_b: float) -> Decimal:
         """
         平仓并计算盈亏（传统模式）
         
@@ -314,7 +316,7 @@ class PositionManagerService:
         )
         
         # ✅ 记录平仓交易到 CSV
-        self._log_close_trade(self.position, pnl_pct)
+        self._log_close_trade(self.position, pnl_pct, signal_delay_ms_a, signal_delay_ms_b)
         
         duration = self.position.get_holding_duration()
         
@@ -385,6 +387,8 @@ class PositionManagerService:
             if position_b and position_b.get('side') == 'long':
                 qty_a = -qty_a
                 qty = -qty_b
+            if position_b and position_b.get('side') == 'short':
+                qty_b = -qty_b
 
             # Exchange B 做多 → 仓位为正（已经是正数）
             
@@ -473,8 +477,8 @@ class PositionManagerService:
         except Exception as e:
             logger.error(f"❌ 仓位校验失败: {e}", exc_info=True)
             return False
-    
-    def _log_open_trade(self, position: Position):
+
+    def _log_open_trade(self, position: Position, signal_delay_ms_a: float = 0, signal_delay_ms_b: float = 0):
         """记录开仓交易到 CSV"""
         if self.trade_logger:
             self.trade_logger.log_open_position(
@@ -489,10 +493,18 @@ class PositionManagerService:
                 exchange_b_filled_price=position.exchange_b_entry_price,
                 exchange_b_order_id=position.exchange_b_order_id,
                 quantity=position.quantity,
-                spread_pct=position.spread_pct
+                spread_pct=position.spread_pct,
+                signal_delay_ms_a=signal_delay_ms_a,
+                signal_delay_ms_b=signal_delay_ms_b,
+                place_duration_a_ms=position.place_duration_a_ms,
+                place_duration_b_ms=position.place_duration_b_ms,
+                execution_duration_a_ms=position.execution_duration_a_ms,
+                execution_duration_b_ms=position.execution_duration_b_ms,
+                attempt_a=position.attempt_a,
+                attempt_b=position.attempt_b
             )
-    
-    def _log_close_trade(self, position: Position, pnl_pct: Decimal):
+
+    def _log_close_trade(self, position: Position, pnl_pct: Decimal, signal_delay_ms_a: float = 0, signal_delay_ms_b: float = 0):
         """记录平仓交易到 CSV"""
         if self.trade_logger:
             # ✅ 计算平仓时的价差
@@ -517,5 +529,13 @@ class PositionManagerService:
                 exchange_b_order_id=position.exchange_b_exit_order_id or '',
                 quantity=position.quantity,
                 spread_pct=close_spread_pct,
-                pnl_pct=pnl_pct
+                pnl_pct=pnl_pct,
+                signal_delay_ms_a=signal_delay_ms_a,
+                signal_delay_ms_b=signal_delay_ms_b,
+                place_duration_a_ms=position.place_duration_a_ms,
+                place_duration_b_ms=position.place_duration_b_ms,
+                execution_duration_a_ms=position.execution_duration_a_ms,
+                execution_duration_b_ms=position.execution_duration_b_ms,
+                attempt_a=position.attempt_a,
+                attempt_b=position.attempt_b
             )

@@ -645,7 +645,10 @@ class OrderExecutor:
                         'filled_price': result.get('filled_price', price),
                         'error': None,
                         'partial_fill': True,  # ✅ 传递部分成交标志
-                        'timestamp': result.get('timestamp')
+                        'timestamp': result.get('timestamp'),
+                        'place_duration_ms': result.get('place_duration_ms'),
+                        'execution_duration_ms': result.get('execution_duration_ms'),
+                        'attempt': attempt # ✅ 实际尝试次数
                     }
             
                 if result.get('success'):
@@ -654,7 +657,10 @@ class OrderExecutor:
                         f"类型: {order_type} | 方向: {side} | "
                         f"尝试次数: {attempt}/{max_retries}"
                     )
-                    return result
+                    return {
+                        **result,
+                        'attempt': attempt  # ✅ 实际尝试次数
+                    }
                 else:
                     logger.warning(
                         f"⚠️ 下单失败: {exchange.exchange_name} | "
@@ -680,7 +686,8 @@ class OrderExecutor:
             'filled_price': Decimal('0'),
             'filled_quantity': Decimal('0'),
             'error': 'Max retries exceeded',
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            'attempt': max_retries
         }
 
     async def execute_open(
@@ -943,10 +950,27 @@ class OrderExecutor:
                 filled_qty_a = order_a_result.get('filled_quantity', order_quantity)
                 filled_qty_b = order_b_result.get('filled_quantity', order_quantity)
 
+                place_duration_a = order_a_result.get('place_duration_ms', 0)
+                place_duration_b = order_b_result.get('place_duration_ms', 0)
+                execution_duration_a_ms = order_a_result.get('execution_duration_ms', 0)
+                execution_duration_b_ms = order_b_result.get('execution_duration_ms', 0)
+
+                attempt_a = order_a_result.get('attempt', 0)
+                attempt_b = order_b_result.get('attempt', 0)
+
+
                 logger.info(
                     f"📊 初始成交结果:\n"
                     f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {order_quantity}\n"
-                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {order_quantity}"
+                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {order_quantity}\n"
+                    f"   下单耗时:\n"
+                    f"   {self.exchange_a.exchange_name}: {place_duration_a:.2f} ms\n"
+                    f"   {self.exchange_b.exchange_name}: {place_duration_b:.2f} ms\n"
+                    f"   执行耗时:\n"
+                    f"   {self.exchange_a.exchange_name}: {execution_duration_a_ms:.2f} ms\n"
+                    f"   {self.exchange_b.exchange_name}: {execution_duration_b_ms:.2f} ms\n"
+                    f"   {self.exchange_a.exchange_name} 重试次数: {attempt_a}\n"
+                    f"   {self.exchange_b.exchange_name} 重试次数: {attempt_b}\n"
                 )
                 
                 # ✅ 4. 平衡仓位（关键！）
@@ -1030,6 +1054,12 @@ class OrderExecutor:
                     spread_pct=spread_pct,
                     signal_entry_time=signal_trigger_time,
                     entry_execution_delay_ms=total_delay_ms,
+                    place_duration_a_ms=place_duration_a,
+                    place_duration_b_ms=place_duration_b,
+                    execution_duration_a_ms=execution_duration_a_ms,
+                    execution_duration_b_ms=execution_duration_b_ms,
+                    attempt_a=attempt_a,
+                    attempt_b=attempt_b,
                 )
                 return True, position
             
@@ -1303,11 +1333,25 @@ class OrderExecutor:
                 # ✅ 3. 到这里两所都成功了，检查成交数量
                 filled_qty_a = order_a_result.get('filled_quantity', position.quantity)
                 filled_qty_b = order_b_result.get('filled_quantity', position.quantity)
-                
+                place_duration_a_ms = order_a_result.get('place_duration_ms', 0)
+                place_duration_b_ms = order_b_result.get('place_duration_ms', 0)
+
+                execution_duration_a_ms = order_a_result.get('execution_duration_ms', 0)
+                execution_duration_b_ms = order_b_result.get('execution_duration_ms', 0)
+                attempt_a = order_a_result.get('attempt', 0)
+                attempt_b = order_b_result.get('attempt', 0)
                 logger.info(
-                    f"📊 初始平仓结果:\n"
+                    f"📊 初始成交结果:\n"
                     f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {position.quantity}\n"
-                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {position.quantity}"
+                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {position.quantity}\n"
+                    f"   下单耗时:\n"
+                    f"   {self.exchange_a.exchange_name}: {place_duration_a_ms:.2f} ms\n"
+                    f"   {self.exchange_b.exchange_name}: {place_duration_b_ms:.2f} ms\n"
+                    f"   执行耗时:\n"
+                    f"   {self.exchange_a.exchange_name}: {execution_duration_a_ms:.2f} ms\n"
+                    f"   {self.exchange_b.exchange_name}: {execution_duration_b_ms:.2f} ms\n"
+                    f"   {self.exchange_a.exchange_name} 重试次数: {attempt_a}\n"
+                    f"   {self.exchange_b.exchange_name} 重试次数: {attempt_b}\n"
                 )
                 
                 # ✅ 4. 平衡仓位（关键！）
@@ -1350,7 +1394,13 @@ class OrderExecutor:
                     position.exit_execution_delay_ms = total_delay_ms
                 else:
                     total_delay_ms = None
-
+                # 新增延迟和尝试次数记录
+                position.place_duration_a_ms = place_duration_a_ms
+                position.place_duration_b_ms = place_duration_b_ms
+                position.execution_duration_a_ms = execution_duration_a_ms
+                position.execution_duration_b_ms = execution_duration_b_ms
+                position.attempt_a = attempt_a
+                position.attempt_b = attempt_b
                 # ✅ 只在有效 Position 时计算质量报告
                 if (position.exchange_a_signal_entry_price > 0 and 
                     position.exchange_b_signal_entry_price > 0 and
@@ -1358,7 +1408,7 @@ class OrderExecutor:
                     
                     quality_report = position.get_execution_quality_report()
                     logger.info(
-                        f"✅ 平仓成功:\n"
+                        f"✅ 反向开仓成功:\n"
                         f"   {self.exchange_a.exchange_name}:\n"
                         f"      订单 ID: {order_a_result.get('order_id')}\n"
                         f"      信号价格: ${exchange_a_price}\n"
@@ -1531,3 +1581,76 @@ class OrderExecutor:
                 f"   原订单: {order_id or 'N/A'}\n"  # ✅ 添加这一行
                 f"   异常: {e}"  # ✅ 添加这一行
             )
+
+    async def check_position_balance(self, exchange_a_bid_price: Decimal, exchange_a_ask_price: Decimal):
+        logger.info("🔍 检查两所仓位平衡情况...")
+        symbol = self.exchange_a.symbol
+        # 检查仓位是否平衡
+        pos_a = await self.exchange_a.get_position(symbol)
+        pos_b = await self.exchange_b.get_position(symbol)
+        pos_a_size = pos_a['size'] if pos_a else Decimal('0')
+        pos_a_side = pos_a['side'] if pos_a else None
+        pos_b_size = pos_b['size'] if pos_b else Decimal('0')
+        pos_b_side = pos_b['side'] if pos_b else None
+        if pos_a_side is None and pos_b_side is None:
+            logger.info("✅ 两所均无持仓")
+            return
+        logger.info(f"🔍 校验仓位平衡: {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}, "
+                    f": {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}")
+        if pos_a_size == pos_b_size and pos_a_side != pos_b_side:
+            logger.info("✅ 仓位平衡，无需调整")
+            return
+        if pos_a_size > pos_b_size:
+            diff_size = pos_a_size - pos_b_size
+            if pos_a_side == 'short':
+                # Exchange A 空头多于 Exchange B，平A
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol} 以平衡仓位")
+                await self.exchange_a.place_market_order(
+                    side='buy',
+                    quantity=diff_size,
+                    price=exchange_a_ask_price,
+                    retry_mode='aggressive',
+
+                )
+            else:
+                # Exchange A 多头多于 Exchange B，多卖出差额
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {diff_size} {symbol} 以平衡仓位")
+                await self.exchange_a.place_market_order(
+                    side='sell',
+                    quantity=diff_size,
+                    price=exchange_a_bid_price,
+                    retry_mode='aggressive',
+                )
+        if pos_b_size > pos_a_size:
+            diff_size = pos_b_size - pos_a_size
+            if pos_a_side == 'short':
+                # Exchange A 空头少于 Exchange B, A 卖出差额
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol} 以平衡仓位")
+                await self.exchange_a.place_market_order(
+                    side='sell',
+                    quantity=diff_size,
+                    price=exchange_a_bid_price,
+                    retry_mode='aggressive',
+                )
+            else:
+                # Exchange A 多头少于 Exchange B，A买入差额
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {diff_size} {symbol} 以平衡仓位")
+                await self.exchange_a.place_market_order(
+                    side='buy',
+                    quantity=diff_size,
+                    price=exchange_a_ask_price,
+                    retry_mode='aggressive',
+                )
+        pos_a = await self.exchange_a.get_position(symbol)
+        pos_b = await self.exchange_b.get_position(symbol)
+        pos_a_size = pos_a['size'] if pos_a else Decimal('0')
+        pos_a_side = pos_a['side']
+        pos_b_size = pos_b['size'] if pos_b else Decimal('0')
+        pos_b_side = pos_b['side']
+        logger.info(f"🔍 重新校验仓位平衡: {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}, "
+                    f": {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}")
+        if pos_a_size == pos_b_size and pos_a_side != pos_b_side:
+            logger.info("✅ 仓位平衡，无需调整")
+        else:
+            logger.error("❌ 仓位仍不平衡，请手动检查")
+    

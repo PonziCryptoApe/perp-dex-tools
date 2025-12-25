@@ -929,7 +929,8 @@ class ExtendedClient(BaseExchangeClient):
                 
                 # update orderbook
                 self.orderbook = {
-                    'ts': ts,
+                    'ts_server': ts,
+                    'timestamp': time.time(),
                     'market': market,
                     'bid': bids,  # should be list of [{"p": price, "q": quantity}] with a length of 1 
                     'ask': asks   # should be list of [{"p": price, "q": quantity}] with a length of 1

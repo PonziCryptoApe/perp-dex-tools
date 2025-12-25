@@ -3,7 +3,7 @@
 import time
 from decimal import Decimal
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 @dataclass
 class PriceSnapshot:
@@ -15,8 +15,10 @@ class PriceSnapshot:
     symbol: str
     exchange_a_bid: Decimal  # Exchange A 买一价
     exchange_a_ask: Decimal  # Exchange A 卖一价
+    exchange_a_mark: Decimal  # Exchange A 标记价（可选）
     exchange_b_bid: Decimal  # Exchange B 买一价
     exchange_b_ask: Decimal  # Exchange B 卖一价
+    exchange_b_mark: Decimal  # Exchange B 标记价（可选）
     exchange_a_name: str     # Exchange A 名称
     exchange_b_name: str     # Exchange B 名称
     exchange_a_timestamp: float = None # Exchange A 时间戳（extended 拿到订单簿的时间戳）
@@ -36,7 +38,23 @@ class PriceSnapshot:
         """初始化后处理"""
         if self.timestamp is None:
             self.timestamp = time.time()
-    
+
+    def calculate_direction_a(self, side: Literal['long', 'short']) -> bool:
+        if abs(self.exchange_a_ask - self.exchange_a_mark) < abs(self.exchange_a_bid - self.exchange_a_mark):
+            trade_side = 'long'
+        else:
+            trade_side = 'short'
+
+        return trade_side == side
+
+    def calculate_direction_b(self, side: Literal['long', 'short']) -> bool:
+        if abs(self.exchange_b_ask - self.exchange_b_mark) < abs(self.exchange_b_bid - self.exchange_b_mark):
+            trade_side = 'long'
+        else:
+            trade_side = 'short'
+
+        return trade_side == side
+
     def calculate_spread_pct(self) -> Decimal:
         """
         计算开仓套利空间（价差百分比）

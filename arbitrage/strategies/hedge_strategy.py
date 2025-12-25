@@ -31,7 +31,7 @@ class HedgeStrategy(BaseStrategy):
         lark_bot=None,
         monitor_only: bool = False,
         trade_logger=None,
-        max_signal_delay_ms: int = 100,
+        max_signal_delay_ms: int = 500,
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
@@ -119,7 +119,7 @@ class HedgeStrategy(BaseStrategy):
         # ✅ 定期输出统计（可选）
         self._last_stats_log_time = 0
         self._stats_log_interval = 60  # 每 60 秒输出一次统计
-
+        self._last_threshold_check_time = None
         # 动态阈值管理器
         dt_config = dynamic_threshold
         if dt_config.get('enabled', False):
@@ -212,12 +212,24 @@ class HedgeStrategy(BaseStrategy):
             # ✅ 过滤延迟过大的信号
             if signal_delay_ms_a <= self.max_signal_delay_ms and signal_delay_ms_b <= self.max_signal_delay_ms:
                 signal_flag = True
-
+            else:
+                logger.warning(f"⚠️ 信号延迟过大: A {signal_delay_ms_a:.2f} ms（阈值: {self.max_signal_delay_ms} ms），"
+                               f" B {signal_delay_ms_b:.2f} ms（阈值: {self.max_signal_delay_ms} ms）")
+                return  # 丢弃该信号
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
+            if self._last_threshold_check_time is None:
+                self._last_threshold_check_time = time.time()
+            now = time.time()
             # ✅ 新增：记录价差并尝试调整阈值
             if self.threshold_manager and signal_flag:
+                # 每30秒检查一次仓位数据，检查后跳过该信号
+                if now - self._last_threshold_check_time >= 30:
+                    await self.executor.check_position_balance(exchange_a_bid_price=prices.exchange_a_bid, exchange_a_ask_price=prices.exchange_a_ask)
+                    self._last_threshold_check_time = now
+                    return
+
                 # 添加数据
                 self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
                 
@@ -234,24 +246,25 @@ class HedgeStrategy(BaseStrategy):
                     self.close_threshold_pct = new_close
 
             if self.position_manager.accumulate_mode:
+                logger.info("🔄 累计模式下的信号检查")
                 current_qty = self.position_manager.get_current_position_qty()
-                # logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
+                logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
                 if current_qty < 0:
                     # ✅ 优先检查平仓信号（如果可以平仓）
                     if self.position_manager.can_open('long'):
-                        await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
-                        
+                        await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+
                         # ✅ 如果正在执行，跳过开仓检查
                         if self._executing_lock.locked():
                             return
                 
                     # ✅ 检查开仓信号（如果可以开仓）
                     if self.position_manager.can_open('short'):
-                        await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
+                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 else:
                     # ✅ 优先检查平仓信号（如果可以平仓）
                     if self.position_manager.can_open('short'):
-                        await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
+                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
 
                         # ✅ 如果正在执行，跳过开仓检查
                         if self._executing_lock.locked():
@@ -259,23 +272,23 @@ class HedgeStrategy(BaseStrategy):
                 
                     # ✅ 检查开仓信号（如果可以开仓）
                     if self.position_manager.can_open('long'):
-                        await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
-
+                        await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                
             else:
                 # ✅ 根据持仓状态决定检查哪种信号
                 if not self.position_manager.has_position():
                     # 无持仓，检查开仓信号
-                    await self._check_open_signal(prices, spread_pct, price_update_time_a, price_update_time_b)
+                    await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 else:
                     # 有持仓，检查平仓信号
-                    await self._check_close_signal(prices, reverse_spread_pct, price_update_time_a, price_update_time_b)
+                    await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
 
         except Exception as e:
             logger.error(f"❌ 价格更新处理失败: {e}")
             import traceback
             traceback.print_exc()
 
-    async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, price_update_time_a: float, price_update_time_b: float):
+    async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
         检查开仓信号
         
@@ -300,31 +313,31 @@ class HedgeStrategy(BaseStrategy):
             return
         
         current_time = time.time()
-        
+        direction_ok = prices.calculate_direction_b('long')
         # 判断是否满足开仓阈值
-        if spread_pct >= Decimal(str(self.open_threshold_pct)):
+        if spread_pct >= Decimal(str(self.open_threshold_pct)) and direction_ok:
             self.signal_stats['open']['total'] += 1
             # 记录信号触发时间
             signal_trigger_time = time.time()
-            signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
-            signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
+            # signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
+            # signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
         
             # ✅ 过滤延迟过大的信号
             if signal_delay_ms_a > self.max_signal_delay_ms or signal_delay_ms_b > self.max_signal_delay_ms:
                 self.signal_stats['open']['delay_filtered'] += 1
 
-                logger.warning(
-                    f"⚠️ 开仓信号延迟过大，已过滤:\n"
-                    f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
-                    f"   {self.exchange_a.exchange_name}_bid_size: {prices.exchange_a_bid_size}\n"
-                    f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
-                    f"   {self.exchange_b.exchange_name}_ask_size: {prices.exchange_b_ask_size}\n"
-                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
-                    f"   数量: {self.quantity}"
-                )
-                return  # ✅ 丢弃该信号
+                # logger.warning(
+                #     f"⚠️ 开仓信号延迟过大，已过滤:\n"
+                #     f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                #     f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                #     f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
+                #     f"   {self.exchange_a.exchange_name}_bid_size: {prices.exchange_a_bid_size}\n"
+                #     f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
+                #     f"   {self.exchange_b.exchange_name}_ask_size: {prices.exchange_b_ask_size}\n"
+                #     f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
+                #     f"   数量: {self.quantity}"
+                # )
+                # return  # ✅ 丢弃该信号
             # ========== ✅ 新增：检查深度 ==========
             # Exchange A: 卖出（使用买一深度）
             depth_a = prices.exchange_a_bid_size
@@ -367,13 +380,13 @@ class HedgeStrategy(BaseStrategy):
             if actual_quantity < self.quantity:
                 self.signal_stats['open']['depth_adjusted'] += 1
 
-                logger.info(
-                    f"💡 根据深度调整下单数量:\n"
-                    f"   配置数量: {self.quantity}\n"
-                    f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
-                    f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
-                    f"   实际数量: {actual_quantity} (调整: {((actual_quantity - self.quantity) / self.quantity * 100):+.2f}%)"
-                )
+                # logger.info(
+                #     f"💡 根据深度调整下单数量:\n"
+                #     f"   配置数量: {self.quantity}\n"
+                #     f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
+                #     f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
+                #     f"   实际数量: {actual_quantity} (调整: {((actual_quantity - self.quantity) / self.quantity * 100):+.2f}%)"
+                # )
                 return
             
             logger.info(
@@ -456,7 +469,7 @@ class HedgeStrategy(BaseStrategy):
 
                         # ✅ 累计模式：添加仓位
                         if self.position_manager.accumulate_mode:
-                            self.position_manager.add_position(position, 'short')
+                            self.position_manager.add_position(position, 'short', signal_delay_ms_a, signal_delay_ms_b)
                         else:
                             self.position_manager.set_position(position)
 
@@ -485,6 +498,9 @@ class HedgeStrategy(BaseStrategy):
                         #     logger.warning(f"⚠️ 开仓后仓位校验不一致，已自动修正为交易所实际值")
                         # ========== 新增部分结束 ==========
                         # logger.info(f"✅ 开仓成功: {position}，等待平仓...")
+                        # logger.info("🔍 开仓后检查仓位平衡...")
+                        # await self.executor.check_position_balance(exchange_a_bid_price=prices.exchange_a_bid, exchange_a_ask_price=prices.exchange_a_ask)
+
                         # 发送飞书通知
                         if self.lark_bot:
                             if self.position_manager.accumulate_mode:
@@ -504,7 +520,7 @@ class HedgeStrategy(BaseStrategy):
                     self._is_executing = False
             self._log_stats_if_needed()
 
-    async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal, price_update_time_a: float, price_update_time_b: float):
+    async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
         检查平仓信号
         
@@ -526,44 +542,46 @@ class HedgeStrategy(BaseStrategy):
         
         current_time = time.time()
 
+        direction_ok = prices.calculate_direction_b('short')
+
         # 判断是否满足平仓阈值
-        if spread_pct >= Decimal(str(self.close_threshold_pct)):
+        if spread_pct >= Decimal(str(self.close_threshold_pct)) and direction_ok:
             self.signal_stats['close']['total'] += 1
 
             # 记录信号触发时间
             signal_trigger_time = time.time()
 
             # ✅ 计算延迟（价格更新 → 信号触发）
-            signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
-            signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
+            # signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
+            # signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
 
             # ✅ 过滤延迟过大的信号
-            if signal_delay_ms_a > self.max_signal_delay_ms or signal_delay_ms_b > self.max_signal_delay_ms:
-                self.signal_stats['close']['delay_filtered'] += 1
+            # if signal_delay_ms_a > self.max_signal_delay_ms or signal_delay_ms_b > self.max_signal_delay_ms:
+            #     self.signal_stats['close']['delay_filtered'] += 1
 
-                # 计算当前盈亏（仅用于日志）
-                if position:
-                    pnl_pct = position.calculate_pnl_pct(
-                        exchange_a_price=prices.exchange_a_ask,
-                        exchange_b_price=prices.exchange_b_bid
-                    )
-                else:
-                    pnl_pct = Decimal('0')
+            #     # 计算当前盈亏（仅用于日志）
+            #     if position:
+            #         pnl_pct = position.calculate_pnl_pct(
+            #             exchange_a_price=prices.exchange_a_ask,
+            #             exchange_b_price=prices.exchange_b_bid
+            #         )
+            #     else:
+            #         pnl_pct = Decimal('0')
                 
-                logger.warning(
-                    f"⚠️ 平仓信号延迟过大，已过滤:\n"
-                    f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                    f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
-                    f"   {self.exchange_a.exchange_name}_ask_size: {prices.exchange_a_ask_size}\n"
-                    f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
-                    f"   {self.exchange_b.exchange_name}_bid_size: {prices.exchange_b_bid_size}\n"
-                    f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)\n"
-                    f"   数量: {self.quantity}\n"
-                    f"   当前盈亏: {pnl_pct:.4f}%\n"
-                    f"   持仓时长: {position.get_holding_duration() if position else 'N/A'}\n"
-                )
-                return  # ✅ 丢弃该信号
+            #     logger.warning(
+            #         f"⚠️ 反向开仓信号延迟过大，已过滤:\n"
+            #         f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+            #         f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+            #         f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
+            #         f"   {self.exchange_a.exchange_name}_ask_size: {prices.exchange_a_ask_size}\n"
+            #         f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
+            #         f"   {self.exchange_b.exchange_name}_bid_size: {prices.exchange_b_bid_size}\n"
+            #         f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)\n"
+            #         f"   数量: {self.quantity}\n"
+            #         f"   当前盈亏: {pnl_pct:.4f}%\n"
+            #         f"   持仓时长: {position.get_holding_duration() if position else 'N/A'}\n"
+            #     )
+            #     return  # ✅ 丢弃该信号
             # ========== ✅ 新增：检查平仓深度 ==========
             # Exchange A: 买入平空（使用卖一深度）
             depth_a = prices.exchange_a_ask_size
@@ -587,7 +605,7 @@ class HedgeStrategy(BaseStrategy):
                     pnl_pct = Decimal('0')
                 
                 logger.warning(
-                    f"⚠️ 平仓深度不足，跳过:\n"
+                    f"⚠️ 反向开仓深度不足，跳过:\n"
                     f"   {self.exchange_a.exchange_name} 卖一深度: {depth_a}\n"
                     f"   {self.exchange_b.exchange_name} 买一深度: {depth_b}\n"
                     f"   最小深度: {min_depth} < 持仓数量: {check_quantity}\n"
@@ -601,7 +619,7 @@ class HedgeStrategy(BaseStrategy):
             # ✅ 如果深度远大于持仓数量，记录日志
             if min_depth >= check_quantity * Decimal('2.0'):
                 logger.info(
-                    f"💡 平仓深度充足:\n"
+                    f"💡 反向开仓深度充足:\n"
                     f"   {self.exchange_a.exchange_name} 卖一深度: {depth_a}\n"
                     f"   {self.exchange_b.exchange_name} 买一深度: {depth_b}\n"
                     f"   持仓数量: {check_quantity}\n"
@@ -679,9 +697,10 @@ class HedgeStrategy(BaseStrategy):
                     position.exchange_b_exit_price = prices.exchange_b_bid
                     position.exit_time = datetime.now()
                     
-                    pnl_pct = self.position_manager.close_position()
+                    pnl_pct = self.position_manager.close_position(signal_delay_ms_a, signal_delay_ms_b)
 
                 self._last_close_time = time.time()
+                
                 # 发送飞书通知（可选）
                 if self.lark_bot:
                     if self.position_manager.accumulate_mode:
@@ -693,7 +712,7 @@ class HedgeStrategy(BaseStrategy):
             async with self._executing_lock:
                 if self.position_manager.accumulate_mode:
                     if not self.position_manager.can_open('long'):
-                        logger.warning("⏳ 平仓操作期间超过阈值，跳过本次平仓")
+                        logger.warning("⏳ 反向开仓操作期间超过阈值，跳过本次反向开仓")
                         return
                 else:
                     if not self.position_manager.has_position():
@@ -726,12 +745,15 @@ class HedgeStrategy(BaseStrategy):
                             pnl_pct = self.position_manager.reduce_position(updated_position, 'long')
                         else:
                             self.position_manager.position = updated_position
-                            pnl_pct = self.position_manager.close_position()
+                            pnl_pct = self.position_manager.close_position(
+                                signal_delay_ms_a,
+                                signal_delay_ms_b
+                            )
                         
                         # ✅ 显示仓位摘要
                         summary = self.position_manager.get_position_summary()
                         logger.info(
-                            f"✅ 平仓成功，盈亏: {pnl_pct:+.4f}%\n"
+                            f"✅ 反向开仓成功，盈亏: {pnl_pct:+.4f}%\n"
                             f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
                             f"📊 统计: {self._format_close_stats()}"
                         )
@@ -747,7 +769,11 @@ class HedgeStrategy(BaseStrategy):
                         # )
                         
                         # if not is_consistent:
-                        #     logger.warning("⚠️ 平仓后仓位不一致，已自动修正")                                
+                        #     logger.warning("⚠️ 平仓后仓位不一致，已自动修正") 
+                        logger.info("🔍 反向开仓后检查仓位平衡...")
+
+                        # await self.executor.check_position_balance()
+                               
                         # 发送飞书通知
                         if self.lark_bot:
                             if self.position_manager.accumulate_mode:
@@ -764,7 +790,7 @@ class HedgeStrategy(BaseStrategy):
                             # ✅ 节流日志：每5秒最多输出一次
                             logger.info(
                                 f"📊 当前价差: {spread_pct:.4f}% "
-                                f"(平仓阈值: {self.close_threshold_pct}%) - 监控平仓中..."
+                                f"(反向开仓阈值: {self.close_threshold_pct}%) - 监控反向开仓中..."
                             )
                             self.last_log_time = current_time
                 finally:
@@ -799,6 +825,7 @@ class HedgeStrategy(BaseStrategy):
             exchange_b_order_id='DUMMY',
             spread_pct=Decimal('0')
         )
+    
     async def _send_multi_notification(self, direction: str, position: Position, spread_pct: Decimal):
         mode_text = "虚拟" if self.monitor_only else "实际"
         actual_slippage = position.calculate_slippage()

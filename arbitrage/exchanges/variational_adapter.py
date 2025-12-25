@@ -220,7 +220,8 @@ class VariationalAdapter(ExchangeAdapter):
             
             bid_price = Decimal(str(quote_data['bid']))
             ask_price = Decimal(str(quote_data['ask']))
-            
+            mark_price = Decimal(str(quote_data['mark_price']))
+
             fetch_duration_ms = (fetch_end - fetch_start) * 1000  # 毫秒
             # logger.info(f"📊 订单簿获取耗时: {fetch_duration_ms:.2f} ms")
 
@@ -230,7 +231,8 @@ class VariationalAdapter(ExchangeAdapter):
                 'asks': [[float(ask_price), float(self.query_quantity)]],
                 'timestamp': fetch_start,  # 秒时间戳
                 'quote_id': quote_data.get('quote_id', None),
-                'fetch_duration': fetch_duration_ms
+                'fetch_duration': fetch_duration_ms,
+                'mark_price': mark_price
             }
             
             return orderbook
@@ -329,25 +331,9 @@ class VariationalAdapter(ExchangeAdapter):
         for attempt in range(max_attempts):
             try:
                 # ✅ 记录下单时间
-                self._order_place_time = time.time()
                 # max_slippage = slippage_levels[attempt]
                 max_slippage = 0.0005  # 固定使用 0.05% 滑点
 
-                # ✅ 计算与最后一次订单簿获取的时间差
-                if self._orderbook_fetch_time:
-                    time_diff = (self._order_place_time - self._orderbook_fetch_time) * 1000  # 毫秒
-                    self._time_diffs.append(time_diff)
-                    
-                    logger.info(
-                        f"⏱️ 订单簿获取 → 下单时间差: {time_diff:.2f} ms\n"
-                        f"   订单簿时间: {self._orderbook_fetch_time:.3f}\n"
-                        f"   下单时间:   {self._order_place_time:.3f}"
-                    )
-                    
-                    # ✅ 警告：时间差过大
-                    if time_diff > 1000:  # 超过 1 秒
-                        logger.warning(f"⚠️ 订单簿数据过旧！时间差: {time_diff:.0f} ms")
-                
                 # ✅ 第 1 次尝试使用传入的 quote_id，后续重试重新获取
                 if attempt == 0 and quote_id is not None:
                     current_quote_id = quote_id
@@ -357,6 +343,7 @@ class VariationalAdapter(ExchangeAdapter):
                     logger.info(f"🔄 第 {attempt + 1} 次尝试：重新获取 quote_id...")
                     
                     try:
+                        start_time = time.time()
                         # ✅ 调用 Variational API 获取最新报价
                         quote_data = await self.client._fetch_indicative_quote(
                             quantity=str(self.query_quantity),
@@ -382,6 +369,7 @@ class VariationalAdapter(ExchangeAdapter):
                         logger.info(
                             f"✅ 获取到新的 quote_id: {current_quote_id[:8]}...\n"
                             f"   最新价格: ${latest_price}"
+                            f"   获取时间: {(time.time() - start_time):.3f}"
                         )
                     
                     except Exception as e:
@@ -395,6 +383,22 @@ class VariationalAdapter(ExchangeAdapter):
                             'error': f'Failed to fetch quote_id: {e}',
                             'timestamp': time.time()
                         }
+                self._order_place_time = time.time()
+
+                # ✅ 计算与最后一次订单簿获取的时间差
+                if self._orderbook_fetch_time:
+                    time_diff = (self._order_place_time - self._orderbook_fetch_time) * 1000  # 毫秒
+                    self._time_diffs.append(time_diff)
+                    
+                    logger.info(
+                        f"⏱️ 订单簿获取 → 下单时间差: {time_diff:.2f} ms\n"
+                        f"   订单簿时间: {self._orderbook_fetch_time:.3f}\n"
+                        f"   下单时间:   {self._order_place_time:.3f}"
+                    )
+                    
+                    # ✅ 警告：时间差过大
+                    if time_diff > 1000:  # 超过 1 秒
+                        logger.warning(f"⚠️ 订单簿数据过旧！时间差: {time_diff:.0f} ms")
                 
                 logger.info(
                     f"📤 尝试下单 {attempt + 1}/{max_attempts}:\n"
@@ -411,7 +415,8 @@ class VariationalAdapter(ExchangeAdapter):
                 )
                 
                 logger.info(f"📊 Market order raw response: {result}")
-                
+                place_end = time.time()
+                place_duration = (place_end - self._order_place_time) * 1000  # 毫秒
                 # ✅ 检查返回格式
                 if not result.success:
                     error_msg = result.error_message or "Unknown error"
@@ -441,11 +446,14 @@ class VariationalAdapter(ExchangeAdapter):
                 logger.info(f"✅ 已设置 current_order_id = {rfq_id}")
 
                 # final_status = await self._wait_for_order_fill(rfq_id, timeout=5.0)
+                logger.info(f" 等待180ms后获取订单{rfq_id} 状态...")
                 await asyncio.sleep(0.18)  # 确保状态更新完成
+                
                 max_order_retries = 20
                 retry_interval = 0.005  # 5 ms
                 order_data = None
                 final_status = None
+                retries = 0
 
                 for attempt_idx in range(max_order_retries):
                     try:
@@ -458,6 +466,7 @@ class VariationalAdapter(ExchangeAdapter):
                                 order_data = matched_orders[0]
                                 final_status = order_data.get('status')
                                 logger.info(f"📊 第 {attempt_idx + 1} 次尝试成功获取订单状态: {final_status}")
+                                retries = attempt_idx + 1
                                 break
 
                         if attempt_idx < max_order_retries - 1:
@@ -466,7 +475,8 @@ class VariationalAdapter(ExchangeAdapter):
                     except Exception as e:
                         logger.warning(f"⚠️ 第 {attempt_idx + 1} 次查询历史订单异常: {e}")
                         await asyncio.sleep(retry_interval)
-                
+
+                execution_duration = (time.time() - place_end) * 1000  # 毫秒
                 if not final_status:
                     logger.error(f"❌ 达到最大重试次数，仍无法获取订单 {rfq_id} 的信息")
                     return {
@@ -475,14 +485,17 @@ class VariationalAdapter(ExchangeAdapter):
                         'error': f'Timeout and order status: {final_status}',
                         'filled_price': Decimal('0'),
                         'filled_quantity': Decimal('0'),
-                        'timestamp': time.time()
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': execution_duration,
+                        'retries': retries
                     }
                 # ✅ 3. 判断最终状态
                 if final_status.upper() in ['FILLED', 'CLEARED']:
                     logger.info(f"✅ 市价单成功: {rfq_id}")
                     filled_price = Decimal(str(order_data.get('price', '0')))
                     filled_quantity = Decimal(str(order_data.get('qty', '0')))
-                        
+                    execution_duration = (time.time() - place_end) * 1000  # 毫秒
                     logger.info(
                         f"✅ 获取订单信息:\n"
                         f"   订单 ID: {rfq_id}\n"
@@ -496,7 +509,9 @@ class VariationalAdapter(ExchangeAdapter):
                         'filled_price': filled_price,
                         'filled_quantity': filled_quantity,
                         'error': None,
-                        'timestamp': time.time()
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': execution_duration,
                     }
                 elif final_status.upper() in ['CANCELED', 'REJECTED']:
                     logger.error(f"❌ 市价单失败: {final_status}")
@@ -506,7 +521,9 @@ class VariationalAdapter(ExchangeAdapter):
                         'error': f'Order {final_status}',
                         'filled_price': Decimal('0'),
                         'filled_quantity': Decimal('0'),
-                        'timestamp': time.time()
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': execution_duration,
                     }
                 else:
                     # 未知状态，保守返回失败
@@ -517,7 +534,9 @@ class VariationalAdapter(ExchangeAdapter):
                         'error': f'Unknown status: {final_status}',
                         'filled_price': Decimal('0'),
                         'filled_quantity': Decimal('0'),
-                        'timestamp': time.time()
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': execution_duration,
                     }
             except Exception as e:
                 logger.error(f"❌ place_market_order 异常: {e}")

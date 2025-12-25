@@ -7,6 +7,7 @@ import sys
 import os
 from pathlib import Path
 from decimal import Decimal
+import time
 from dotenv import load_dotenv
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -29,7 +30,7 @@ from exchanges.lighter import LighterClient
 from exchanges.variational import VariationalClient  # ✅ 新增
 from exchanges.nado import NadoClient  # ✅ 新增
 from helpers.lark_bot import LarkBot
-from helpers.util import Config
+from helpers.util import Config, beijing_to_timestamp
 
 # 配置日志
 # logging.basicConfig(
@@ -292,6 +293,8 @@ async def main():
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
                        help='只监控，不下单')
+    parser.add_argument('--end-time', type=str, default=None,
+                       help='指定策略结束时间，格式为 YYYY-MM-DD HH:MM:SS（北京时间）')
     parser.add_argument('--min-depth-quantity', type=float, default=None, help='最小深度值')
     parser.add_argument('--max-position', type=float, default=None, help='最大仓位，如果不传则使用配置文件中的')
     args = parser.parse_args()
@@ -403,8 +406,17 @@ async def main():
             )
             
             # 保持运行
-            while True:
-                await asyncio.sleep(1)
+            if args.end_time:
+                logger.info(f"⏰ 策略运行至北京时间 {args.end_time}自动停止")
+                end_timestamp = beijing_to_timestamp(args.end_time)
+
+                while end_timestamp - time.time() > 0:
+                    await asyncio.sleep(1)
+
+                await strategy.stop()
+            else:
+                while True:
+                    await asyncio.sleep(1)
         
         except KeyboardInterrupt:
             logger.info("\n👋 收到停止信号")
@@ -593,9 +605,18 @@ async def main():
         )
         
         # 保持运行
-        while True:
-            await asyncio.sleep(1)
-    
+        if args.end_time:
+            logger.info(f"⏰ 策略运行至北京时间 {args.end_time}自动停止")
+            end_timestamp = beijing_to_timestamp(args.end_time)
+
+            while end_timestamp - time.time() > 0:
+                await asyncio.sleep(1)
+
+            await strategy.stop()
+        else:
+            while True:
+                await asyncio.sleep(1)
+
     except KeyboardInterrupt:
         logger.info("\n👋 收到停止信号")
     

@@ -59,6 +59,13 @@ class Position:
     
     # ✅ 平仓延迟（信号触发 → 订单成交）
     exit_execution_delay_ms: Optional[float] = None
+
+    place_duration_a_ms: Optional[float] = None
+    place_duration_b_ms: Optional[float] = None
+    execution_duration_a_ms: Optional[float] = None
+    execution_duration_b_ms: Optional[float] = None
+    attempt_a: Optional[int] = None
+    attempt_b: Optional[int] = None
     
     def __post_init__(self):
         """初始化时间"""

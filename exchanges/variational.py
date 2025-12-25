@@ -423,7 +423,7 @@ class VariationalClient(BaseExchangeClient):
                 self.orderbook = {
                     'bids': [[data['bid'], data.get('bid_size', '0')]],
                     'asks': [[data['ask'], data.get('ask_size', '0')]],
-                    'timestamp': datetime.now(timezone.utc).isoformat()
+                    'timestamp': time.time()
                 }
                 self.logger.log(f"【VARIATIONAL】Orderbook updated: bid={data['bid']}, ask={data['ask']}", "DEBUG")
         except json.JSONDecodeError:
