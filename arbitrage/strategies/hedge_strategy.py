@@ -199,7 +199,10 @@ class HedgeStrategy(BaseStrategy):
         """
         if not self.is_running:
             return
-        
+        is_stale, stale_msg = self.monitor.is_orderbook_stale(max_age=0.1)  # 100ms 阈值
+        if is_stale:
+            logger.warning(f"⚠️ 订单簿过时，丢弃信号: {stale_msg}")
+            return
         try:
             # ✅ 记录价格更新的时间
             price_update_time_a = prices.exchange_a_timestamp
