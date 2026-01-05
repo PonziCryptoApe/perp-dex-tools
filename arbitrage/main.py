@@ -16,8 +16,6 @@ from logging.handlers import RotatingFileHandler
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from arbitrage.strategies.hedge_strategy import HedgeStrategy
-from arbitrage.strategies.var_hard_strategy import VarHardStrategy  # ✅ 新增导入
-
 from arbitrage.config.loader import load_pair_config, list_all_pairs, list_enabled_pairs
 from arbitrage.exchanges.extended_adapter import ExtendedAdapter
 from arbitrage.exchanges.lighter_adapter import LighterAdapter
@@ -261,28 +259,6 @@ async def main():
                        help='交易对 ID (如 extended_lighter_btc)')
     parser.add_argument('--list-pairs', action='store_true',
                        help='列出所有可用的交易对')
-    # ✅ 新增：硬刷策略相关参数
-    parser.add_argument('--var-hard', action='store_true',
-                       help='运行 Variational 硬刷策略（不需要 --pair）')
-    
-    parser.add_argument('--symbol', '-s', type=str,
-                       help='交易币种（硬刷策略必需，如 BTC、ETH）')
-    parser.add_argument('--spread-threshold', type=float, default=0.0026,
-                       help='硬刷策略点差阈值（默认：0.0026%%）')
-    parser.add_argument('--cooldown', type=float, default=5.0,
-                       help='硬刷策略冷却时间（秒，默认：5）')
-    parser.add_argument('--poll-interval', type=float, default=0.1,
-                       help='硬刷策略轮询间隔（秒，默认：0.1）')
-    parser.add_argument('--data-dir', type=str, default=None,
-                       help='硬刷策略数据目录（默认：data/var_hard）')
-    parser.add_argument('--max-lifetime-volume', '-mlv', type=float, default=float('inf'),
-                       help='硬刷策略最大终生交易量，超过会自动退出。默认: %(default)s"')
-    parser.add_argument('--quantity-range', nargs=2, type=Decimal, default=[Decimal('0.0011'), Decimal('0.0033')],
-                        help="硬刷策略数量范围，最小值和最大值（例如：0.001 0.005）。默认: %(default)s")
-    parser.add_argument('--cooldown-range', nargs=2, type=float, default=[3.0, 6.0],
-                        help="硬刷策略冷却时间范围，最小值和最大值（例如：3.0 6.0）。默认: %(default)s")
-
-    
     parser.add_argument('--quantity', '-q', type=str, default=None,
                        help='开仓数量（可选，覆盖配置）')
     parser.add_argument('--open-threshold', type=float, default=None,
@@ -312,127 +288,6 @@ async def main():
     else:
         logger.warning("⚠️ 未设置 LARK_TOKEN，飞书通知已禁用")
 
-    # ========== ✅ 新增：硬刷策略 ==========
-    if args.var_hard:
-        # 检查必要参数
-        if not args.symbol:
-            parser.error("硬刷策略需要指定 --symbol 参数（如 BTC、ETH）")
-        
-        if not args.quantity_range:
-            parser.error("硬刷策略需要指定 --quantity-range 参数")
-        
-        # 加载环境变量
-        if args.env_file:
-            load_dotenv(args.env_file)
-        else:
-            load_dotenv()
-        
-        # 设置日志
-        log_dir = Path(__file__).parent.parent / "logs/var_hard"
-        setup_logging(f"var_hard_{args.symbol}", log_dir)
-        
-        logger.info(
-            f"\n"
-            f"{'='*60}\n"
-            f"🚀 启动 Variational 硬刷策略\n"
-            f"{'='*60}\n"
-            f"  币种:           {args.symbol}\n"
-            f"  数量范围:    [{str(args.quantity_range[0])}, {str(args.quantity_range[1])}]\n"
-            f"  点差阈值:       {args.spread_threshold}%\n"
-            f"  冷却时间范围:       [{str(args.cooldown_range[0])}, {str(args.cooldown_range[1])}]\n"
-            f"  最大终身交易量:       {args.max_lifetime_volume}\n"
-            f"  轮询间隔:       {args.poll_interval}s\n"
-            f"  监控模式:       {'是' if args.monitor_only else '否'}\n"
-            f"  数据目录:       {args.data_dir or 'data/var_hard'}\n"
-            f"{'='*60}\n"
-        )
-        
-        # 创建 Variational 适配器
-        try:
-            logger.info("🔌 初始化 Variational 适配器...")
-            
-            exchange = await create_exchange_adapter(
-                exchange_name='variational',
-                symbol=args.symbol,
-                # quantity=Decimal(args.quantity),
-                config_override={'polling_interval': args.poll_interval}
-            )
-            
-            logger.info("✅ Variational 适配器初始化成功")
-        
-        except Exception as e:
-            logger.error(f"❌ 适配器初始化失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-        
-        # 创建硬刷策略
-        data_dir = Path(args.data_dir) if args.data_dir else None
-        
-        
-        strategy = VarHardStrategy(
-            symbol=args.symbol,
-            exchange=exchange,
-            quantity_range=args.quantity_range,
-            spread_threshold=Decimal(str(args.spread_threshold)),
-            max_slippage=Decimal('0.0005'),
-            max_lifetime_volume=args.max_lifetime_volume,
-            cooldown_range=args.cooldown_range,
-            poll_interval=args.poll_interval,
-            data_dir=data_dir,
-            monitor_only=args.monitor_only,
-            lark_bot=lark_bot,
-        )
-        
-        logger.info("✅ 硬刷策略创建成功\n")
-        
-        # 启动策略
-        try:
-            await strategy.start()
-            
-            mode_text = "监控模式" if args.monitor_only else "交易模式"
-            print(
-                f"\n"
-                f"╔════════════════════════════════════════════════════════════╗\n"
-                f"║  Variational 硬刷策略运行中 - {mode_text}                    ║\n"
-                f"╠════════════════════════════════════════════════════════════╣\n"
-                f"║  币种:   {args.symbol:^10s}                                      ║\n"
-                f"║  数量范围:   [{str(args.quantity_range[0])}, {str(args.quantity_range[1])}]                         ║\n"
-                f"║  点差阈值: {args.spread_threshold:^6.6f}%                                        ║\n"
-                f"║  最大终身交易量: {args.max_lifetime_volume}                                   ║\n"
-                f"╠════════════════════════════════════════════════════════════╣\n"
-                f"║  按 Ctrl+C 停止                                            ║\n"
-                f"╚════════════════════════════════════════════════════════════╝\n"
-            )
-            
-            # 保持运行
-            if args.end_time:
-                logger.info(f"⏰ 策略运行至北京时间 {args.end_time}自动停止")
-                end_timestamp = beijing_to_timestamp(args.end_time)
-
-                while end_timestamp - time.time() > 0:
-                    await asyncio.sleep(1)
-
-                await strategy.stop()
-            else:
-                while True:
-                    await asyncio.sleep(1)
-        
-        except KeyboardInterrupt:
-            logger.info("\n👋 收到停止信号")
-        
-        except Exception as e:
-            logger.error(f"❌ 策略运行异常: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        finally:
-            logger.info("🧹 清理资源...")
-            await strategy.stop()
-            await exchange.disconnect()
-            logger.info("✅ 程序已退出")
-        
-        return  # ✅ 硬刷策略运行完毕，直接返回
     # ======================================
     # 列出所有交易对
     if args.list_pairs:
