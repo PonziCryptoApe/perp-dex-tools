@@ -4,16 +4,18 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
+import os
 
 # ✅ 新增：自定义时区转换器
-class BeijingFormatter(logging.Formatter):
+class ZoneFormatter(logging.Formatter):
     """使用北京时间的日志格式化器"""
     
     converter = lambda *args: datetime.now(timezone(timedelta(hours=8))).timetuple()
     
     def formatTime(self, record, datefmt=None):
         """覆盖时间格式化方法，确保使用北京时间"""
-        dt = datetime.fromtimestamp(record.created, tz=timezone(timedelta(hours=8)))
+        hours = 0 if os.getenv('TIME_ZONE') == 'UTC' else 8
+        dt = datetime.fromtimestamp(record.created, tz=timezone(timedelta(hours=hours)))
         if datefmt:
             s = dt.strftime(datefmt)
         else:
@@ -39,7 +41,7 @@ def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     log_file = log_dir / f"arbitrage_{pair}.log"
     
     # 创建日志格式
-    log_format = BeijingFormatter(
+    log_format = ZoneFormatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )

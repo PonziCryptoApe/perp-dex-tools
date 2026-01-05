@@ -36,7 +36,7 @@ class TradingLogger:
         # Log file paths inside logs directory
         self.log_file = os.path.join(logs_dir, order_file_name)
         self.debug_log_file = os.path.join(logs_dir, debug_log_file_name)
-        self.timezone = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Shanghai'))
+        self.timezone = pytz.timezone(os.getenv('TIME_ZONE', 'Asia/Shanghai'))
         self.logger = self._setup_logger(log_to_console)
 
     def _setup_logger(self, log_to_console: bool) -> logging.Logger:

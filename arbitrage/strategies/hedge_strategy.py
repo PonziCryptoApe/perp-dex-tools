@@ -35,6 +35,7 @@ class HedgeStrategy(BaseStrategy):
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
+        direction_reverse: bool = False, # 默认负滑点方向才下单
         dynamic_threshold: Optional[dict] = None,
     ):
         super().__init__(
@@ -54,6 +55,7 @@ class HedgeStrategy(BaseStrategy):
         self.max_signal_delay_ms_a = 200
         self.max_signal_delay_ms_b = 60
         self.min_depth_quantity = min_depth_quantity
+        self.direction_reverse = direction_reverse
 
         # ✅ 使用 PositionManagerService 管理持仓
         self.position_manager = PositionManagerService(
@@ -224,11 +226,6 @@ class HedgeStrategy(BaseStrategy):
             # now = time.time()
             # ✅ 新增：记录价差并尝试调整阈值
             if self.threshold_manager and signal_flag:
-                # 每30秒检查一次仓位数据，检查后跳过该信号
-                # if now - self._last_threshold_check_time >= 30:
-                    # self._last_threshold_check_time = now
-                    # return
-
                 # 添加数据
                 self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
                 
@@ -312,7 +309,8 @@ class HedgeStrategy(BaseStrategy):
             return
         
         current_time = time.time()
-        direction_ok = prices.calculate_direction_b('long')
+        base_direction = prices.calculate_direction_b('long')
+        direction_ok = base_direction if not self.direction_reverse else not base_direction
         # 判断是否满足开仓阈值
         if spread_pct >= Decimal(str(self.open_threshold_pct)) and direction_ok:
             self.signal_stats['open']['total'] += 1
@@ -540,8 +538,8 @@ class HedgeStrategy(BaseStrategy):
             return
         
         current_time = time.time()
-
-        direction_ok = prices.calculate_direction_b('short')
+        base_direction = prices.calculate_direction_b('short')
+        direction_ok = base_direction if not self.direction_reverse else not base_direction
 
         # 判断是否满足平仓阈值
         if spread_pct >= Decimal(str(self.close_threshold_pct)) and direction_ok:

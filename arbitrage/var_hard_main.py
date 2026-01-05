@@ -248,6 +248,7 @@ async def main():
                        help='硬刷策略冷却时间（秒，默认：5）')
     parser.add_argument('--poll-interval', type=float, default=0.1,
                        help='硬刷策略轮询间隔（秒，默认：0.1）')
+    parser.add_argument('--direction-reverse', type=bool, default=False, help="默认先下单负滑点方向")
     parser.add_argument('--data-dir', type=str, default=None,
                        help='硬刷策略数据目录（默认：data/var_hard）')
     parser.add_argument('--max-lifetime-volume', '-mlv', type=float, default=float('inf'),
@@ -319,6 +320,7 @@ async def main():
         f"  最大终身交易量:       {args.max_lifetime_volume}\n"
         f"  运行截止时间:         { args.end_time }"
         f"  轮询间隔:       {args.poll_interval}s\n"
+        f"  负向滑点方向下单: { '是' if not args.direction_reverse else '否'}"
         # f"  监控模式:       {'是' if args.monitor_only else '否'}\n"
         f"  数据目录:       {args.data_dir or 'data/var_hard'}\n"
         f"{'='*60}\n"
@@ -356,6 +358,7 @@ async def main():
         max_lifetime_volume=args.max_lifetime_volume,
         cooldown_range=args.cooldown_range,
         poll_interval=args.poll_interval,
+        direction_reverse=args.direction_reverse,
         data_dir=data_dir,
         lark_bot=lark_bot,
     )

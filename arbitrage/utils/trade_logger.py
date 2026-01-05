@@ -6,6 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from typing import Optional
+import os
 
 
 class TradeLogger:
@@ -93,8 +94,9 @@ class TradeLogger:
             notes: 备注信息
         """
         # 获取当前北京时间 (UTC+8, Asia/Shanghai 时区)
-        beijing_tz = ZoneInfo("Asia/Shanghai")
-        current_beijing_time = datetime.now(beijing_tz)
+        timezone = os.getenv('TIME_ZONE') if os.getenv('TIME_ZONE') else 'Asia/Shanghai'
+        tz = ZoneInfo(timezone)
+        current_beijing_time = datetime.now(tz)
         timestamp = current_beijing_time.strftime("%Y-%m-%d %H:%M:%S %Z")
         # ✅ 计算滑点
         slippage_pct = Decimal('0')

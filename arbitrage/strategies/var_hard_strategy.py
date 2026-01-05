@@ -7,6 +7,7 @@ Variational 硬刷策略
 """
 
 import asyncio
+import os
 import random
 import time
 import csv
@@ -15,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Dict
 import logging
+
+import pytz
 
 from ..exchanges.variational_adapter import VariationalAdapter
 
@@ -36,6 +39,7 @@ class VarHardStrategy:
         cooldown_seconds: float = 5.0,  # 冷却时间
         cooldown_range: tuple = (3.0, 6.0),  # ✅ 新增：冷却时间范围（秒）
         poll_interval: float = 0.3,  # 轮询间隔（秒）
+        direction_reverse: bool = False, # 是否先下负滑点方向
         data_dir: Path = None,
         monitor_only: bool = False,
         daily_file: bool = True,
@@ -51,6 +55,7 @@ class VarHardStrategy:
         self.cooldown_seconds = cooldown_seconds
         self.cooldown_range = cooldown_range  # ✅ 新增：冷却时间范围
         self.poll_interval = poll_interval
+        self.direction_reverse = direction_reverse
         self.monitor_only = monitor_only
         self.lark_bot = lark_bot
         self.daily_file = daily_file
@@ -293,9 +298,9 @@ class VarHardStrategy:
                     continue
                 trade_side = None
                 if abs(ask_price - mark_price) < abs(bid_price - mark_price):
-                    trade_side = 'buy'
+                    trade_side = 'buy' if not self.direction_reverse else 'sell'
                 else:
-                    trade_side = 'sell'
+                    trade_side = 'sell' if not self.direction_reverse else 'buy'
                 # ========== 4. 执行交易 ==========
                 logger.info(
                     f"🎯 检测到交易机会:\n"
@@ -392,7 +397,7 @@ class VarHardStrategy:
                 writer = csv.writer(f)
                 writer.writerow([
                     f'{timestamp:.6f}',
-                    datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                    datetime.fromtimestamp(timestamp, tz=pytz.timezone(os.getenv('TIME_ZONE', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                     str(bid_price),
                     str(bid_size),
                     str(ask_price),
@@ -435,7 +440,7 @@ class VarHardStrategy:
         
         trade_id = f"{self.symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.trade_count}"
         order_time = time.time()
-        order_datetime = datetime.fromtimestamp(order_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        order_datetime = datetime.fromtimestamp(order_time, tz=pytz.timezone(os.getenv('TIME_ZONE', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
         logger.info(f"📤 开始执行交易 #{self.trade_count},数量: {quantity}, ⏱️下单时间: {order_datetime} (Quote ID: {quote_id})")
 
@@ -934,9 +939,9 @@ class VarHardStrategy:
                 writer.writerow([
                     trade_id,
                     f'{order_time:.6f}',
-                    datetime.fromtimestamp(order_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # ✅ 下单日期时间
+                    datetime.fromtimestamp(order_time, tz=pytz.timezone(os.getenv('TIME_ZONE', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # ✅ 下单日期时间
                     f'{record_time:.6f}',
-                    datetime.fromtimestamp(record_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # ✅ 记录日期时间
+                    datetime.fromtimestamp(record_time, tz=pytz.timezone(os.getenv('TIME_ZONE', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # ✅ 记录日期时间
                     str(quantity),
                     # 订单簿
                     str(bid_price),

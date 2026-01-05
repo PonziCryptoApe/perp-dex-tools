@@ -273,6 +273,7 @@ async def main():
                        help='指定策略结束时间，格式为 YYYY-MM-DD HH:MM:SS（北京时间）')
     parser.add_argument('--min-depth-quantity', type=float, default=None, help='最小深度值')
     parser.add_argument('--max-position', type=float, default=None, help='最大仓位，如果不传则使用配置文件中的')
+    parser.add_argument('--direction-reverse', type=bool, default=False, help='是表示正向滑点方向才下单，默认先负滑点方向才下单')
     args = parser.parse_args()
     # 加载环境变量
     if args.env_file:
@@ -329,10 +330,11 @@ async def main():
     close_threshold = args.close_threshold if args.close_threshold is not None else config.close_threshold
     monitor_only = args.monitor_only  # ✅ 获取 monitor_only 参数
     min_depth_quantity = Decimal(str(args.min_depth_quantity)) if args.min_depth_quantity is not None else config.min_depth_quantity if hasattr(config, 'min_depth_quantity') else Decimal('0')
+    
     # 读取累计模式配置
     accumulate_mode = config.accumulate_mode
     max_position = Decimal(str(args.max_position)) if args.max_position is not None else Decimal(str(config.max_position))
-
+    direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
 
     logger.info(
@@ -352,6 +354,7 @@ async def main():
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"
+        f"  负向滑点方向下单: { '是' if not direction_reverse else '否'}\n"
         f"  动态阈值:     {'启用' if dynamic_threshold.get('enabled', False) else '禁用'}\n"  # ✅ 新增
         f"{'='*60}\n"
     )
@@ -416,6 +419,7 @@ async def main():
         min_depth_quantity=min_depth_quantity,  # ✅ 传递最小深度数量
         accumulate_mode=accumulate_mode,
         max_position=max_position,
+        direction_reverse=direction_reverse,
         dynamic_threshold=dynamic_threshold  # ✅ 传递动态阈值配置
     )
     logger.info("✅ 策略创建成功\n")
