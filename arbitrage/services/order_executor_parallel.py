@@ -308,7 +308,7 @@ class OrderExecutor:
         #     Decimal('0.1')  # 或固定 0.1（根据币种调整）
         # )
 
-        tolerance = Decimal(self.quantity_precision)  # ✅ 固定 0.01（更严格）
+        tolerance = Decimal(self.quantity_precision) * 10  # ✅ 固定 0.01（更严格）
 
         # ✅ 4. 策略 1️⃣：小误差 → 使用小数量
         if abs(final_diff) <= tolerance:
@@ -1615,7 +1615,7 @@ class OrderExecutor:
             return
         logger.info(f"🔍 校验仓位平衡: {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}, "
                     f": {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}")
-        if abs(pos_a_size - pos_b_size) < self.quantity_precision and pos_a_side != pos_b_side:
+        if abs(pos_a_size - pos_b_size) < self.quantity_precision * 10 and pos_a_side != pos_b_side:
             logger.info("✅ 仓位平衡，无需调整")
             return
         # 请求订单簿restful接口
