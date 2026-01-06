@@ -58,7 +58,8 @@ LOG_TO_CONSOLE=true
 LOG_TO_FILE=true
 LOG_FILE=trading_log.csv
 
-TIMEZONE=Asia/Shanghai
+TIME_ZONE=Asia/Shanghai
+ENV_INDEX=
 
 # EdgeX API Endpoints
 EDGEX_BASE_URL=https://pro.edgex.exchange

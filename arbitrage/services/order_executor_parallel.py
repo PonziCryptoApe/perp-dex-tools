@@ -42,6 +42,7 @@ class OrderExecutor:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.lark_token = os.getenv("LARK_TOKEN_SERIOUS")
+        self.lark_index_text = f'【{os.getenv("ENV_INDEX")}】' if os.getenv("ENV_INDEX", None) else ''
         if self.lark_token:
             self.lark_bot = LarkBot(self.lark_token)
         else:
@@ -1247,7 +1248,7 @@ class OrderExecutor:
                     )
                     if self.lark_bot:
                         await self.lark_bot.send_text(
-                            f"❌ {self.exchange_a.exchange_name} 重试失败，需要手动处理仓位！"
+                            f"❌ {self.lark_index_text}{self.exchange_a.exchange_name} 重试失败，需要手动处理仓位！"
                         )
                     return False, None
 
@@ -1325,7 +1326,7 @@ class OrderExecutor:
                     )
                     if self.lark_bot:
                         await self.lark_bot.send_text(
-                            f"🚨 {self.exchange_b.exchange_name} 平仓失败（重试后仍失败），需要手动处理！"
+                            f"🚨 {self.lark_index_text}{self.exchange_b.exchange_name} 平仓失败（重试后仍失败），需要手动处理！"
                         )
                     return False, None
             # 情况 4️⃣: 两所都成功 → 完成
@@ -1489,7 +1490,7 @@ class OrderExecutor:
                 logger.critical(f"🚨 紧急平仓失败，需要手动处理！")
                 if self.lark_bot:
                     await self.lark_bot.send_text(
-                        f"🚨 {self.exchange_a.exchange_name} 紧急平仓失败，需要手动处理！"
+                        f"🚨 {self.lark_index_text}{self.exchange_a.exchange_name} 紧急平仓失败，需要手动处理！"
                     )
 
         except Exception as e:
@@ -1526,7 +1527,7 @@ class OrderExecutor:
                 logger.critical(f"🚨 紧急平仓失败，需要手动处理！")
                 if self.lark_bot:
                     await self.lark_bot.send_text(
-                        f"🚨 {self.exchange_b.exchange_name} 紧急平仓失败，需要手动处理！"
+                        f"🚨 {self.lark_index_text}{self.exchange_b.exchange_name} 紧急平仓失败，需要手动处理！"
                     )
         
         except Exception as e:
@@ -1677,7 +1678,7 @@ class OrderExecutor:
             # 飞书通知
             if self.lark_bot:
                 await self.lark_bot.send_text(
-                    f"❌ 仓位检测后仓位仍不平衡，需要手动处理仓位！"
+                    f"❌ {self.lark_index_text}仓位检测后仓位仍不平衡，需要手动处理仓位！"
                     f" {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}"
                     f" {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}"
                 )
