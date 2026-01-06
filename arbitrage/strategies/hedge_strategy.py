@@ -314,7 +314,7 @@ class HedgeStrategy(BaseStrategy):
         base_direction = prices.calculate_direction_b('long')
         direction_ok = base_direction if not self.direction_reverse else not base_direction
         # 判断是否满足开仓阈值
-        if spread_pct >= Decimal(str(self.open_threshold_pct)) and direction_ok:
+        if spread_pct >= Decimal(str(self.open_threshold_pct)):
             self.signal_stats['open']['total'] += 1
             # 记录信号触发时间
             signal_trigger_time = time.time()
@@ -544,7 +544,7 @@ class HedgeStrategy(BaseStrategy):
         direction_ok = base_direction if not self.direction_reverse else not base_direction
 
         # 判断是否满足平仓阈值
-        if spread_pct >= Decimal(str(self.close_threshold_pct)) and direction_ok:
+        if spread_pct >= Decimal(str(self.close_threshold_pct)):
             self.signal_stats['close']['total'] += 1
 
             # 记录信号触发时间
