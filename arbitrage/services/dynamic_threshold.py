@@ -254,7 +254,7 @@ class DynamicThresholdManager:
                         f"→ 调整后: {threshold_sum:.4f}%"
                     )
         
-        elif threshold_sum > self.min_total_threshold * 1.5:  # ✅ 如果阈值和过大（超过 1.5 倍）
+        elif threshold_sum > self.min_total_threshold * 1.2:  # ✅ 如果阈值和过大（超过 1.2 倍）
             # ✅ 可选：缩小倍数（使阈值更紧）
             if open_std > 0 and close_std > 0:
                 mean_sum = open_mean + close_mean
@@ -262,7 +262,7 @@ class DynamicThresholdManager:
                 
                 if std_sum > 0:
                     # ✅ 缩小到 min_total_threshold 的 1.2 倍（留一点余量）
-                    target_threshold = self.min_total_threshold * 1.2
+                    target_threshold = self.min_total_threshold * 1.1
                     required_multiplier = (target_threshold - mean_sum) / std_sum
                     
                     # ✅ 只缩小，不增大
