@@ -31,7 +31,7 @@ class HedgeStrategy(BaseStrategy):
         lark_bot=None,
         monitor_only: bool = False,
         trade_logger=None,
-        max_signal_delay_ms: int = 100,
+        max_signal_delay_ms: int = 200,
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
@@ -199,9 +199,9 @@ class HedgeStrategy(BaseStrategy):
         """
         if not self.is_running:
             return
-        is_stale, stale_msg = self.monitor.is_orderbook_stale(max_age=0.1)  # 100ms 阈值
+        is_stale, stale_msg = self.monitor.is_orderbook_stale(self.max_signal_delay_ms / 1000)
         if is_stale:
-            logger.warning(f"⚠️ 订单簿过时，丢弃信号: {stale_msg}")
+            # logger.warning(f"⚠️ 订单簿过时，丢弃信号: {stale_msg}")
             return
         try:
             # ✅ 记录价格更新的时间
@@ -245,7 +245,6 @@ class HedgeStrategy(BaseStrategy):
                     self.close_threshold_pct = new_close
 
             if self.position_manager.accumulate_mode:
-                logger.info("🔄 累计模式下的信号检查")
                 current_qty = self.position_manager.get_current_position_qty()
                 logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
                 if current_qty < 0:
