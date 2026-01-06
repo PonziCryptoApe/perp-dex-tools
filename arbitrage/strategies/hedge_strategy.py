@@ -483,21 +483,19 @@ class HedgeStrategy(BaseStrategy):
                         )
                         # ========== ✅ 新增：校验仓位 ==========
                         # logger.info(f"🔍 开仓后校验仓位...")
-                        # expected_qty = self.position_manager.get_current_position_qty()
+                        expected_qty = self.position_manager.get_current_position_qty()
                         
-                        # is_consistent = await self.position_manager.verify_and_sync(
-                        #     exchange_a=self.exchange_a,
-                        #     exchange_b=self.exchange_b,
-                        #     symbol=self.symbol,
-                        #     expected_qty=expected_qty,
-                        #     tolerance=self.quantity_precision
-                        # )
+                        is_consistent = await self.position_manager.verify_and_sync(
+                            exchange_a=self.exchange_a,
+                            exchange_b=self.exchange_b,
+                            symbol=self.symbol,
+                            expected_qty=expected_qty,
+                            tolerance=self.quantity_precision * 10
+                        )
                         
-                        # if not is_consistent:
-                        #     logger.warning(f"⚠️ 开仓后仓位校验不一致，已自动修正为交易所实际值")
+                        if not is_consistent:
+                            logger.warning(f"⚠️ 开仓后仓位校验不一致，已自动修正为交易所实际值")
                         # ========== 新增部分结束 ==========
-                        # logger.info(f"✅ 开仓成功: {position}，等待平仓...")
-                        # logger.info("🔍 开仓后检查仓位平衡...")
                         await self.executor.check_position_balance()
 
                         # 发送飞书通知
@@ -756,19 +754,19 @@ class HedgeStrategy(BaseStrategy):
                             f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
                             f"📊 统计: {self._format_close_stats()}"
                         )
-                        # logger.info(f"🔍 平仓后校验仓位...")
-                        # expected_qty = self.position_manager.get_current_position_qty()
+                        logger.info(f"🔍 平仓后校验仓位...")
+                        expected_qty = self.position_manager.get_current_position_qty()
                         
-                        # is_consistent = await self.position_manager.verify_and_sync(
-                        #     exchange_a=self.exchange_a,
-                        #     exchange_b=self.exchange_b,
-                        #     symbol=self.symbol,
-                        #     expected_qty=expected_qty,
-                        #     tolerance=self.quantity_precision
-                        # )
+                        is_consistent = await self.position_manager.verify_and_sync(
+                            exchange_a=self.exchange_a,
+                            exchange_b=self.exchange_b,
+                            symbol=self.symbol,
+                            expected_qty=expected_qty,
+                            tolerance=self.quantity_precision * 10
+                        )
                         
-                        # if not is_consistent:
-                        #     logger.warning("⚠️ 平仓后仓位不一致，已自动修正") 
+                        if not is_consistent:
+                            logger.warning("⚠️ 平仓后仓位不一致，已自动修正") 
                         logger.info("🔍 反向开仓后检查仓位平衡...")
 
                         await self.executor.check_position_balance()
