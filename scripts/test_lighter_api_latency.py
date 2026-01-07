@@ -578,7 +578,7 @@ async def main():
         # ✅ 测试下单接口
         if args.full:
             logger.info("\n🚀 开始完整测试（包含下单）...")
-            await test.test_round_trip_latency(count=5)
+            # await test.test_round_trip_latency(count=5)
             await test.test_filled_latency(count=20)
         elif not args.query_only:
             logger.info("\n🚀 测试单次下单...")
