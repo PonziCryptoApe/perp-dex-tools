@@ -296,11 +296,15 @@ class LighterAPILatencyTest:
                 latency = (end - start) * 1000
                 
                 success = (result is not None and isinstance(result, list))
+                print(f'activeOrder长度{len(result)}')
                 self.stats['get_open_orders'].record(latency, success)
-                
-                logger.debug(f"  [{i+1}/{count}] {latency:.2f} ms - {'✅' if success else '❌'}")
-                
-                await asyncio.sleep(0.1)
+                if (len(result) == 0):
+                    end_2 = time.time()
+                    total_l = end_2 - start
+                    print(f'总延迟{total_l}')
+                    break
+
+                print(f"  [{i+1}/{count}] {latency:.2f} ms - {'✅' if success else '❌'}")
             
             except Exception as e:
                 logger.error(f"  [{i+1}/{count}] ❌ 异常: {e}")
@@ -397,8 +401,8 @@ class LighterAPILatencyTest:
         result = json.loads(response.text)
         # print(response.text)
         return result.get('bids')[0]['price'], result.get('asks')[0]['price']
-    # ========== 6. 往返延迟测试（下单→成交确认） ==========
     
+    # ========== 6. 往返延迟测试（下单→成交确认） ==========
     async def test_round_trip_latency(self, count: int = 5):
         """
         测试往返延迟：下单 → 等待成交 → 获取订单状态
@@ -470,6 +474,32 @@ class LighterAPILatencyTest:
                 
                 self.stats['round_trip'].record(0, success=False)
                 await asyncio.sleep(5)
+    
+    async def test_filled_latency(self, count: int = 10):
+        """
+        测试往返延迟：下单 → 等待成交 → 获取订单状态
+        
+        流程：
+        1. 下买单（限价单，应立即成交）
+        2. 等待 2 秒（等待 WebSocket 推送）
+        3. 下卖单（平仓）
+        4. 记录总耗时
+        """
+        logger.info(f"\n📡 测试往返延迟 (下单→成交确认) ({count} 次)...")
+        logger.info("  📤 下买单...")
+        buy_order_id, buy_latency = await self.test_place_order(side='buy')
+        if not buy_order_id:
+            logger.error("  ❌ 买单失败，跳过本轮")
+            await asyncio.sleep(2)
+        await self.test_get_open_orders(count)
+        # ✅ 4. 下卖单（平仓）
+        logger.info("  📤 下卖单...")
+        sell_order_id, sell_latency = await self.test_place_order(side='sell')
+        
+        if not sell_order_id:
+            logger.error("  ❌ 卖单失败")
+            await asyncio.sleep(2)
+        await self.test_get_open_orders(count)
     
     # ========== 打印所有统计 ==========
     
@@ -543,12 +573,13 @@ async def main():
         # ✅ 测试查询接口
         await test.test_get_markets(count=args.count)
         await test.test_get_positions(count=args.count)
-        await test.test_get_open_orders(count=args.count)
+        # await test.test_get_open_orders(count=args.count)
         
         # ✅ 测试下单接口
         if args.full:
             logger.info("\n🚀 开始完整测试（包含下单）...")
             await test.test_round_trip_latency(count=5)
+            await test.test_filled_latency(count=20)
         elif not args.query_only:
             logger.info("\n🚀 测试单次下单...")
             # 只测试一次买/卖
