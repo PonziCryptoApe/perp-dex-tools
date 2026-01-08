@@ -113,7 +113,8 @@ async def test_matching_latency(client: LighterClient, quantity: Decimal, side: 
     # 等待撮合，使用 current_order 监控
     wait_start = time.time()
     while time.time() - wait_start < max_wait:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.01)
+        print('client.current_order', client.current_order)
         if client.current_order and client.current_order.status == 'FILLED':
             match_time = time.time() - start_time
             print(f"订单撮合完成，总撮合延迟: {match_time:.4f} 秒 (放置: {placement_end - start_time:.4f} 秒, 匹配: {match_time - (placement_end - start_time):.4f} 秒)")
