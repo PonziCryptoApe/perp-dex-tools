@@ -111,6 +111,8 @@ async def test_matching_latency(client: LighterClient, quantity: Decimal, side: 
         return None
     
     # 等待撮合，使用 current_order 监控
+    # client.current_order = None  # 清空残留
+    # current_order_id = result.order_id  # 记录新 ID
     wait_start = time.time()
     while time.time() - wait_start < max_wait:
         await asyncio.sleep(0.01)
@@ -243,8 +245,10 @@ async def main():
         # 2. 测试撮合延迟（注意：撮合取决于市场流动性，可能不总是成功）
         print("\n=== 测试撮合延迟 ===")
         for i in range(5):
+            client.current_order = None  # 清空残留
             await test_matching_latency(client, test_quantity, 'buy')
             await asyncio.sleep(2)
+            client.current_order = None  # 清空残留
             await test_matching_latency(client, test_quantity, 'sell')
             await asyncio.sleep(2)
 
