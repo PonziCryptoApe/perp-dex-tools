@@ -232,7 +232,7 @@ class LighterClient(BaseExchangeClient):
                 self.logger.log_transaction(order_id, side, filled_size, price, status)
 
     @query_retry(default_return=(0, 0))
-    async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
+    async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal, int]:
         """Get orderbook using official SDK."""
         # Use WebSocket data if available
         if (hasattr(self, 'ws_manager') and
@@ -365,7 +365,7 @@ class LighterClient(BaseExchangeClient):
     async def get_order_price(self, side: str = '') -> Decimal:
         """Get the price of an order with Lighter using official SDK."""
         # Get current market prices
-        best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
+        best_bid, best_ask, _ = await self.fetch_bbo_prices(self.config.contract_id)
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
             self.logger.log("Invalid bid/ask prices", "ERROR")
             raise ValueError("Invalid bid/ask prices")
