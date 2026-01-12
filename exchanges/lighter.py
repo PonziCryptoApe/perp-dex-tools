@@ -512,6 +512,13 @@ class LighterClient(BaseExchangeClient):
                 return Decimal(position.position)
 
         return Decimal(0)
+    async def get_position_info(self) -> Dict:
+        positions = await self._fetch_positions_with_retry()
+
+        # Find position for current market
+        for position in positions:
+            if position.market_id == self.config.contract_id:
+                return position
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""
@@ -549,3 +556,33 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Failed to get tick size")
 
         return self.config.contract_id, self.config.tick_size
+    
+    async def get_portfolio(self):
+        # balance_info = await self.perpetual_trading_client.account.get_balance()
+        # if balance_info and balance_info.data:
+        #     self.logger.log(f'balance: {balance_info.data}')
+        #     return {
+        #         'balance': balance_info.data.balance,
+        #         'upnl': balance_info.data.unrealised_pnl
+        #     }
+        # else:
+        #     return None
+        balance_info = await self._fetch_accounts_with_retry()
+        return {
+                'balance': balance_info.available_balance,
+                'upnl': '-'
+            }
+    @query_retry(reraise=True)
+    async def _fetch_accounts_with_retry(self) -> List[Dict[str, Any]]:
+        """Get positions using official SDK."""
+        # Use shared API client
+        account_api = lighter.AccountApi(self.api_client)
+
+        # Get account info
+        account_data = await account_api.account(by="index", value=str(self.account_index))
+
+        if not account_data or not account_data.accounts:
+            self.logger.log("Failed to get accounts", "ERROR")
+            raise ValueError("Failed to get accounts")
+
+        return account_data.accounts[0]

@@ -290,7 +290,7 @@ class PositionManagerService:
             f"   数量: {position.quantity}\n"
             f"   当前累计: {self.current_position_qty:+} / ±{self.max_position}\n"
             f"   利用率: {utilization:.1f}%\n"
-            f"   盈亏: {pnl_pct:+.4f}%\n"
+            # f"   盈亏: {pnl_pct:+.4f}%\n"
             f"   历史笔数: {len(self.position_history)}"
         )
         

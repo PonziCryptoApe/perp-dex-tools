@@ -243,6 +243,8 @@ class HedgeStrategy(BaseStrategy):
                 if new_open is not None:
                     self.open_threshold_pct = new_open
                     self.close_threshold_pct = new_close
+                else:
+                    return
 
             if self.position_manager.accumulate_mode:
                 current_qty = self.position_manager.get_current_position_qty()

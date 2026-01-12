@@ -171,17 +171,18 @@ class VariationalClient(BaseExchangeClient):
             except Exception as e:
                 self.logger.log(f"【VARIATIONAL】Token invalid ({e}), re-authenticating", "WARNING")
                 self.auth_token = None  # 强制重认证
-        # 1. 认证登录
-        await self._authenticate()
-        
-        # 2. 启动 WebSocket 连接
-        self._stop_event.clear()
-        self._start_websockets()
-        
-        # 3. 等待 WebSocket 连接建立
-        await asyncio.sleep(2)
+        else:
+            # 1. 认证登录
+            await self._authenticate()
+            
+            # 2. 启动 WebSocket 连接
+            self._stop_event.clear()
+            self._start_websockets()
+            
+            # 3. 等待 WebSocket 连接建立
+            await asyncio.sleep(2)
 
-        self.logger.log("【VARIATIONAL】Connected to Variational exchange", "INFO")
+            self.logger.log("【VARIATIONAL】Connected to Variational exchange", "INFO")
 
     async def disconnect(self) -> None:
         """Disconnect from Variational exchange."""
