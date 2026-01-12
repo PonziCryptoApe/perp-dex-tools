@@ -446,8 +446,8 @@ class VariationalAdapter(ExchangeAdapter):
                 logger.info(f"✅ 已设置 current_order_id = {rfq_id}")
 
                 # final_status = await self._wait_for_order_fill(rfq_id, timeout=5.0)
-                logger.info(f" 等待180ms后获取订单{rfq_id} 状态...")
-                await asyncio.sleep(0.18)  # 确保状态更新完成
+                logger.info(f" 等待200ms后获取订单{rfq_id} 状态...")
+                await asyncio.sleep(0.2)  # 确保状态更新完成
                 
                 max_order_retries = 20
                 retry_interval = 0.005  # 5 ms

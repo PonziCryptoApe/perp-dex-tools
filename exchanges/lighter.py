@@ -246,8 +246,9 @@ class LighterClient(BaseExchangeClient):
         else:
             self.logger.log("Unable to get bid/ask prices from WebSocket.", "ERROR")
             raise ValueError("WebSocket not running. No bid/ask prices available")
-
-        return best_bid, best_ask
+        
+        ts = time.time()
+        return best_bid, best_ask, ts
 
     async def _submit_order_with_retry(self, order_params: Dict[str, Any]) -> OrderResult:
         """Submit an order with Lighter using official SDK."""
