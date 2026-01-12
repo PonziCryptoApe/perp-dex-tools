@@ -59,6 +59,9 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+        self.order_book = {"bids": {}, "asks": {}}  # 初始空 order_book
+        self.best_bid = None
+        self.best_ask = None
 
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
@@ -235,21 +238,28 @@ class LighterClient(BaseExchangeClient):
     async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal, int]:
         """Get orderbook using official SDK."""
         # Use WebSocket data if available
-        if (hasattr(self, 'ws_manager') and
-                self.ws_manager.best_bid and self.ws_manager.best_ask):
-            best_bid = Decimal(str(self.ws_manager.best_bid))
-            best_ask = Decimal(str(self.ws_manager.best_ask))
+        # if (hasattr(self, 'ws_manager') and
+        #         self.ws_manager.best_bid and self.ws_manager.best_ask):
+        #     best_bid = Decimal(str(self.ws_manager.best_bid))
+        #     best_ask = Decimal(str(self.ws_manager.best_ask))
 
-            if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
-                self.logger.log("Invalid bid/ask prices", "ERROR")
-                raise ValueError("Invalid bid/ask prices")
-        else:
-            self.logger.log("Unable to get bid/ask prices from WebSocket.", "ERROR")
-            raise ValueError("WebSocket not running. No bid/ask prices available")
+        #     if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+        #         self.logger.log("Invalid bid/ask prices", "ERROR")
+        #         raise ValueError("Invalid bid/ask prices")
+        # else:
+        #     self.logger.log("Unable to get bid/ask prices from WebSocket.", "ERROR")
+        #     raise ValueError("WebSocket not running. No bid/ask prices available")
+        # ✅ 优先从 synced order_book 取（Adapter 已维护）
+        bids = self.order_book.get('bids', {})
+        asks = self.order_book.get('asks', {})
+        best_bid = max(bids.keys()) if bids else None
+        best_ask = min(asks.keys()) if asks else None
         
-        ts = time.time()
-        return best_bid, best_ask, ts
-
+        if best_bid is not None and best_ask is not None and best_bid > 0 and best_ask > 0:
+            return Decimal(best_bid), Decimal(best_ask), time.time()  # 3 值返回
+        else:
+            self.logger.log("⚠️ Synced order_book invalid, fallback to REST", "WARNING")
+        return Decimal('0'), Decimal('0'), time.time()
     async def _submit_order_with_retry(self, order_params: Dict[str, Any]) -> OrderResult:
         """Submit an order with Lighter using official SDK."""
         # Ensure client is initialized

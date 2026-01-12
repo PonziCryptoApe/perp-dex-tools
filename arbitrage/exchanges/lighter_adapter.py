@@ -367,7 +367,13 @@ class LighterAdapter(ExchangeAdapter):
             'poll_duration_ms': 0,  # WebSocket 无延迟
             'mark_price': None  # Lighter 无该字段
         }
-        
+        self.client.order_book = {
+                    'bids': dict(self.lighter_order_book['bids']),
+                    'asks': dict(self.lighter_order_book['asks'])
+                }
+        self.client.best_bid = self.lighter_best_bid
+        self.client.best_ask = self.lighter_best_ask
+        logger.debug("✅ Order book synced to Client")
         logger.debug(
             f"📗 Lighter 订单簿更新:\n"
             f"   Bid: ${self.lighter_best_bid} x {bid_size}\n"
