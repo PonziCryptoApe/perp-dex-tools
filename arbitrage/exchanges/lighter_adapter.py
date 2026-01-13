@@ -895,7 +895,7 @@ class LighterAdapter(ExchangeAdapter):
                     f"   Symbol: {position.symbol}\n"
                     f"   Side: {position.sign}\n"
                     f"   Size: {position.position}\n"
-                    f"   Entry Price: ${position.entry_price}"
+                    f"   Entry Price: ${position.avg_entry_price}"
                 )
             else:
                 logger.info(f"📊 {self.exchange_name} 无持仓: {symbol}")
