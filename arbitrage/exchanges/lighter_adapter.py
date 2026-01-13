@@ -890,7 +890,13 @@ class LighterAdapter(ExchangeAdapter):
             position = await self.client.get_position_info()
 
             if position:
-                logger.info(f'当前的仓位为:{position.position}')
+                logger.info(
+                    f"📊 lighter 持仓:\n"
+                    f"   Symbol: {position.symbol}\n"
+                    f"   Side: {position.sign}\n"
+                    f"   Size: {position.position}\n"
+                    f"   Entry Price: ${position.entry_price}"
+                )
             else:
                 logger.info(f"📊 {self.exchange_name} 无持仓: {symbol}")
             

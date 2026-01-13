@@ -450,7 +450,7 @@ class VariationalAdapter(ExchangeAdapter):
                 await asyncio.sleep(0.2)  # 确保状态更新完成
                 
                 max_order_retries = 20
-                retry_interval = 0.005  # 5 ms
+                retry_interval = 0.01  # 5 ms
                 order_data = None
                 final_status = None
                 retries = 0

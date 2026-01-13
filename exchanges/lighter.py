@@ -305,7 +305,7 @@ class LighterClient(BaseExchangeClient):
             'price': int(price * self.price_multiplier),
             'is_ask': is_ask,
             'order_type': self.lighter_client.ORDER_TYPE_LIMIT,
-            'time_in_force': self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            'time_in_force': self.lighter_client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
             'reduce_only': False,
             'trigger_price': 0,
         }
