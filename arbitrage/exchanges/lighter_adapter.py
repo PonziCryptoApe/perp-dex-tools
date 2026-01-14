@@ -602,7 +602,7 @@ class LighterAdapter(ExchangeAdapter):
                 'price': int(order_price * self.client.price_multiplier),
                 'is_ask': side_upper == 'SELL',
                 'order_type': self.client.lighter_client.ORDER_TYPE_LIMIT,
-                'time_in_force': self.client.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                'time_in_force': self.client.lighter_client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
                 'reduce_only': False,
                 'trigger_price': 0,
             }
