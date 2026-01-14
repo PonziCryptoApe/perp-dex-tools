@@ -246,6 +246,11 @@ class OrderLatencyTester:
             num_tests += 1
             logger.info(f"⚠️ 调整测试次数为 {num_tests}（买卖成对）")
         
+        # 清空统计列表
+        self.api_query_times = []  # 单次查询耗时
+        self.api_order_delays = []  # 下单到查到总延迟
+        self.api_match_times = []  # 撮合时间
+        
         for i in range(num_tests):
             # 交替买入卖出：买-卖-买-卖...
             side = 'buy' if i % 2 == 0 else 'sell'
@@ -281,13 +286,14 @@ class OrderLatencyTester:
                     continue
                 
                 order_id = result.order_id
+                order_place_end_time = time.time()
                 logger.info(f"✅ 订单已发送: {order_id}")
-                logger.info(f'下单时间: { (time.time() - order_place_time):.2f} 秒')
-                
+                logger.info(f'下单时间: { (order_place_end_time - order_place_time):.2f} 秒')
+                await asyncio.sleep(0.2)
                 # ========== 3. 立即开始轮询查询 ==========
                 logger.info("🔍 开始轮询查询历史订单...")
 
-                max_attempts = 5  # 最多查询 5 次
+                max_attempts = 10  # 最多查询 10 次
                 found = False
                 
                 for attempt in range(1, max_attempts + 1):
@@ -306,10 +312,12 @@ class OrderLatencyTester:
                         # 检查是否查到
                         if history_data and 'result' in history_data and history_data['result']:
                             # ✅ 查到了！计算延迟
-                            delay_from_order_ms = (query_end - order_place_time) * 1000
-                            query_time_ms = (query_end - query_start) * 1000
+                            query_time_ms = (query_end - query_start) * 1000  # 单次查询耗时
+                            delay_from_order_ms = (query_end - order_place_time) * 1000  # 下单到查到总延迟
                             
                             order_data = history_data['result'][0]
+                            
+                            match_time_ms = (query_end - order_place_end_time) * 1000  # 撮合时间 (ms)
                             
                             logger.info(
                                 f"✅ 第 {attempt} 次查询成功:\n"
@@ -317,11 +325,16 @@ class OrderLatencyTester:
                                 f"   订单状态: {order_data.get('status')}\n"
                                 f"   成交价: ${order_data.get('price', '0')}\n"
                                 f"   成交量: {order_data.get('qty', '0')}\n"
-                                f"   最后1次查询耗时: {query_time_ms:.2f} ms\n"
-                                f"   ⏱️  延迟（下单 → 查到）: {delay_from_order_ms:.2f} ms"
+                                f"   单次查询耗时: {query_time_ms:.2f} ms\n"
+                                f"   下单到查到延迟: {delay_from_order_ms:.2f} ms\n"
+                                f"   订单撮合时间: {match_time_ms:.2f} ms"
                             )
                             
-                            self.api_delays.append(delay_from_order_ms)
+                            # 记录到列表
+                            self.api_query_times.append(query_time_ms)
+                            self.api_order_delays.append(delay_from_order_ms)
+                            self.api_match_times.append(match_time_ms)
+                            
                             found = True
                             break
                         else:
@@ -330,7 +343,7 @@ class OrderLatencyTester:
                                 elapsed = (time.time() - order_place_time) * 1000
                                 logger.info(f"⏳ 第 {attempt} 次查询未找到（已耗时 {elapsed:.0f} ms）...")
                             
-                            await asyncio.sleep(0.1)  # 每 100ms 查询一次
+                            await asyncio.sleep(0.02)  # 每 20ms 查询一次
                     
                     except Exception as e:
                         logger.error(f"❌ 第 {attempt} 次查询异常: {e}")
@@ -351,7 +364,7 @@ class OrderLatencyTester:
                 logger.info("⏳ 等待 1 秒后进行下一次测试...\n")
                 await asyncio.sleep(1)
         
-        # 打印 API 查询延迟统计
+        # 打印 API 延迟统计（平均值）
         self._print_api_summary()
     def _print_ws_summary(self):
         """打印 WebSocket 延迟统计"""
@@ -376,26 +389,30 @@ class OrderLatencyTester:
         logger.info(f"\n{'='*60}\n")
     
     def _print_api_summary(self):
-        """打印 API 查询延迟统计"""
+        """打印 API 延迟统计平均值"""
         logger.info(f"\n{'='*60}")
-        logger.info("📊 历史订单查询延迟统计")
-        logger.info(f"{'='*60}\n")
+        logger.info("📊 API 延迟测试统计（平均值）")
+        logger.info(f"{'='*60}")
         
-        if self.api_delays:
-            avg_delay = sum(self.api_delays) / len(self.api_delays)
-            
-            logger.info(
-                f"🔍 历史订单查询延迟:\n"
-                f"   样本数: {len(self.api_delays)}\n"
-                f"   平均: {avg_delay:.2f} ms\n"
-                f"   最小: {min(self.api_delays):.2f} ms\n"
-                f"   最大: {max(self.api_delays):.2f} ms\n"
-                f"   详细数据: {[f'{d:.2f}' for d in self.api_delays]}"
-            )
+        if self.api_query_times:
+            avg_query = sum(self.api_query_times) / len(self.api_query_times)
+            logger.info(f"   🔍 单次查询耗时平均: {avg_query:.2f} ms (样本: {len(self.api_query_times)})")
         else:
-            logger.warning("⚠️ 无 API 查询延迟数据")
+            logger.info("   🔍 单次查询耗时: 无数据")
         
-        logger.info(f"\n{'='*60}\n")
+        if self.api_order_delays:
+            avg_order_delay = sum(self.api_order_delays) / len(self.api_order_delays)
+            logger.info(f"   ⏱️  下单到查到总延迟平均: {avg_order_delay:.2f} ms (样本: {len(self.api_order_delays)})")
+        else:
+            logger.info("   ⏱️  下单到查到总延迟: 无数据")
+        
+        if self.api_match_times:
+            avg_match = sum(self.api_match_times) / len(self.api_match_times)
+            logger.info(f"   ⚡ 订单撮合时间平均: {avg_match:.2f} ms (样本: {len(self.api_match_times)})")
+        else:
+            logger.info("   ⚡ 订单撮合时间: 无数据")
+        
+        logger.info(f"{'='*60}\n")
 
     async def test_quote_reuse(self, num_tests: int = 1):
         """
@@ -704,9 +721,9 @@ async def main():
         if args.test_type in ['ws', 'both']:
             await tester.test_websocket_latency(num_tests=args.ws_tests)
         
-        if args.test_type in ['api', 'both']:
-            # ✅ 修改：API 测试现在是独立的，直接调用
-            await tester.test_api_query_latency(num_tests=args.api_tests)
+        # if args.test_type in ['api', 'both']:
+        #     # ✅ 修改：API 测试现在是独立的，直接调用
+        #     await tester.test_api_query_latency(num_tests=args.api_tests)
         # 根据参数选择测试类型
         if args.test_type in ['ws', 'both', 'all']:
             await tester.test_websocket_latency(num_tests=args.ws_tests)
