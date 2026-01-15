@@ -528,9 +528,9 @@ class LighterAdapter(ExchangeAdapter):
             if retry_mode == 'aggressive':
                 # ✅ 计算订单价格（和 hedge_monitor 一致）
                 if side_upper == 'BUY':
-                    order_price = Decimal(str(price)) * Decimal('1.0005') if price else self.lighter_best_ask
+                    order_price = Decimal(str(price)) * Decimal('1.005') if price else self.lighter_best_ask
                 else:
-                    order_price = Decimal(str(price)) * Decimal('0.9995') if price else self.lighter_best_bid
+                    order_price = Decimal(str(price)) * Decimal('0.995') if price else self.lighter_best_bid
             else:
                 order_price = Decimal(str(price))
             logger.info(
@@ -605,6 +605,7 @@ class LighterAdapter(ExchangeAdapter):
                 'time_in_force': self.client.lighter_client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
                 'reduce_only': False,
                 'trigger_price': 0,
+                'order_expiry': 0,
             }
             
             logger.info(

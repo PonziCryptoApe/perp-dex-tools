@@ -51,7 +51,14 @@ class VariationalClient(BaseExchangeClient):
         # Authentication
         self.auth_token = None
         # 为 Variational API 使用 cloudscraper
-        self.scraper = cloudscraper.create_scraper()
+        self.scraper = cloudscraper.create_scraper(
+            browser='chrome',                  # 模仿 Chrome
+            enable_tls_fingerprinting=True,    # 启用 TLS 指纹伪装
+            enable_tls_rotation=True,          # 启用 JA3/ cipher 旋转
+            enable_enhanced_spoofing=True,     # 额外 spoofing
+            enable_stealth=False,              # 关闭人类模拟（最大减延迟）
+            compatibility_mode=True, 
+        )
         
         # 初始化日志
         self.logger = TradingLogger(
