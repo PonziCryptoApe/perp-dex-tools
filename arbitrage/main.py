@@ -274,6 +274,7 @@ async def main():
     parser.add_argument('--min-depth-quantity', type=float, default=None, help='最小深度值')
     parser.add_argument('--max-position', type=float, default=None, help='最大仓位，如果不传则使用配置文件中的')
     parser.add_argument('--direction-reverse', type=bool, default=False, help='是表示正向滑点方向才下单，默认先负滑点方向才下单')
+    parser.add_argument('--cooldown-seconds', type=str, default='5', help='下单冷却时间，默认5秒，只通过控制台传参')
     args = parser.parse_args()
     # 加载环境变量
     if args.env_file:
@@ -336,6 +337,7 @@ async def main():
     max_position = Decimal(str(args.max_position)) if args.max_position is not None else Decimal(str(config.max_position))
     direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
+    cooldown_seconds = int(args.cooldown_seconds) if args.cooldown_seconds else 5
 
     logger.info(
         f"\n"
@@ -356,6 +358,7 @@ async def main():
         f"  最大持仓:     {max_position}\n"
         f"  负向滑点方向下单: { '是' if not direction_reverse else '否'}\n"
         f"  动态阈值:     {'启用' if dynamic_threshold.get('enabled', False) else '禁用'}\n"  # ✅ 新增
+        f"  冷却时间:     { cooldown_seconds }s\n"
         f"{'='*60}\n"
     )
     
@@ -420,7 +423,8 @@ async def main():
         accumulate_mode=accumulate_mode,
         max_position=max_position,
         direction_reverse=direction_reverse,
-        dynamic_threshold=dynamic_threshold  # ✅ 传递动态阈值配置
+        dynamic_threshold=dynamic_threshold,  # ✅ 传递动态阈值配置
+        cooldown_seconds=cooldown_seconds
     )
     logger.info("✅ 策略创建成功\n")
     # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========

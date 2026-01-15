@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime
 import logging
+import random
 import time
 from decimal import Decimal
 from typing import Optional
@@ -36,6 +37,8 @@ class HedgeStrategy(BaseStrategy):
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
         direction_reverse: bool = False, # 默认负滑点方向才下单
+        cooldown_range: tuple = (10.0, 10.0),
+        cooldown_seconds: Optional[int] = 5,
         dynamic_threshold: Optional[dict] = None,
     ):
         super().__init__(
@@ -56,6 +59,8 @@ class HedgeStrategy(BaseStrategy):
         self.max_signal_delay_ms_b = 60
         self.min_depth_quantity = min_depth_quantity
         self.direction_reverse = direction_reverse
+        self.cooldown_seconds = cooldown_seconds
+        self.cooldown_range = cooldown_range
 
         # ✅ 使用 PositionManagerService 管理持仓
         self.position_manager = PositionManagerService(
@@ -94,12 +99,9 @@ class HedgeStrategy(BaseStrategy):
         self.log_interval = 5.0  # 每5秒最多输出一次日志
 
         # ✅ 添加冷却期
-        self._last_open_time = 0
-        self._last_close_time = 0
-        if accumulate_mode:
-            self._cooldown_seconds = 0.5  # 累计模式：0.5秒（快速反应）
-        else:
-            self._cooldown_seconds = 5  # 传统模式：5秒
+        # self._last_open_time = 0
+        # self._last_close_time = 0
+        self._last_execution_time = 0
         
         self.signal_stats = {
             # 开仓信号统计
@@ -303,7 +305,9 @@ class HedgeStrategy(BaseStrategy):
         
         # ✅ 检查冷却期
         current_time = time.time()
-        cooldown_remaining = self._cooldown_seconds - (current_time - self._last_open_time)
+        # cooldown_seconds = random.uniform(self.cooldown_range[0], self.cooldown_range[1])
+
+        cooldown_remaining = self.cooldown_seconds - (current_time - self._last_execution_time)
         if cooldown_remaining > 0:
             return
         
@@ -312,7 +316,6 @@ class HedgeStrategy(BaseStrategy):
             # logger.debug("⏳ 另一个操作正在执行，跳过本次信号")
             return
         
-        current_time = time.time()
         base_direction = prices.calculate_direction_b('long')
         direction_ok = base_direction if not self.direction_reverse else not base_direction
         # 判断是否满足开仓阈值
@@ -426,7 +429,7 @@ class HedgeStrategy(BaseStrategy):
                 )
 
                 self.position_manager.set_position(virtual_position)
-                self._last_open_time = time.time()
+                self._last_execution_time = time.time()
                 await asyncio.sleep(0.06)  # 模拟异步行为
                 
                 # 发送飞书通知（可选）
@@ -474,7 +477,7 @@ class HedgeStrategy(BaseStrategy):
                         else:
                             self.position_manager.set_position(position)
 
-                        self._last_open_time = time.time()
+                        self._last_execution_time = time.time()
 
                         summary = self.position_manager.get_position_summary()
 
@@ -533,6 +536,13 @@ class HedgeStrategy(BaseStrategy):
         position = self.position_manager.get_position()
 
         if not self.position_manager.accumulate_mode and position is None:
+            return
+        
+        current_time = time.time()
+        # cooldown_seconds = random.uniform(self.cooldown_range[0], self.cooldown_range[1])
+
+        cooldown_remaining = self.cooldown_seconds - (current_time - self._last_execution_time)
+        if cooldown_remaining > 0:
             return
         
         # ✅ 如果正在执行平仓，跳过
@@ -698,7 +708,7 @@ class HedgeStrategy(BaseStrategy):
                     
                     pnl_pct = self.position_manager.close_position(signal_delay_ms_a, signal_delay_ms_b)
 
-                self._last_close_time = time.time()
+                self._last_execution_time = time.time()
                 
                 # 发送飞书通知（可选）
                 if self.lark_bot:
@@ -738,6 +748,7 @@ class HedgeStrategy(BaseStrategy):
                     
                     if success:
                         self.signal_stats['close']['executed'] += 1
+                        self._last_execution_time = time.time()
 
                         # ✅ 累计模式：减少仓位
                         if self.position_manager.accumulate_mode:
@@ -783,7 +794,6 @@ class HedgeStrategy(BaseStrategy):
                         # 清除持仓
                         # self.position = None
 
-                        self._last_close_time = time.time()
                     else:
                         if current_time - self.last_log_time >= self.log_interval:
                             # ✅ 节流日志：每5秒最多输出一次
