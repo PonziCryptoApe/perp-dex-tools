@@ -39,7 +39,6 @@ pairs:
     quantity: "0.01"
     open_threshold: 0.11
     close_threshold: -0.03
-    min_depth_quantity: "0.001"  # ✅ 新增：最小深度阈值（可选）
     accumulate_mode: true  # 是否启用累计模式
     max_position: 0.03      # 最大仓位阈值
 
@@ -56,7 +55,6 @@ pairs:
     quantity_precision: "0.0001"
     open_threshold: 0.08
     close_threshold: 0
-    min_depth_quantity: "0.00005"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
     max_position: 0.001    # 最大仓位阈值
@@ -81,7 +79,6 @@ pairs:
     quantity_precision: "0.01"
     open_threshold: 0.1
     close_threshold: 0.1
-    min_depth_quantity: "0.1"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
     max_position: 0.3      # 最大仓位阈值    
@@ -105,7 +102,6 @@ pairs:
     quantity_precision: "0.01"
     open_threshold: 0.1
     close_threshold: 0.1
-    min_depth_quantity: "0.1"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
     max_position: 1      # 最大仓位阈值    
@@ -129,7 +125,6 @@ pairs:
     quantity_precision: "0.0001"
     open_threshold: 0.08
     close_threshold: 0.0
-    min_depth_quantity: "0.001"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
     max_position: 0.005      # 最大仓位阈值
@@ -173,11 +168,10 @@ pairs:
     symbol: ETH
     exchange_a: lighter
     exchange_b: variational
-    quantity: "0.005"
-    quantity_precision: "0.0001"
+    quantity: 0.005
+    quantity_precision: 0.0001
     open_threshold: 0.1
     close_threshold: 0.1
-    min_depth_quantity: "0.1"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
     max_position: 0.015      # 最大仓位阈值    
@@ -197,11 +191,10 @@ pairs:
     symbol: SOL
     exchange_a: lighter
     exchange_b: variational
-    quantity: "0.08"
-    quantity_precision: "0.001"
+    quantity: 0.08
+    quantity_precision: 0.001
     open_threshold: 0.1
     close_threshold: 0.1
-    min_depth_quantity: "0.1"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
     max_position: 0.4      # 最大仓位阈值    
@@ -221,11 +214,10 @@ pairs:
     symbol: HYPE
     exchange_a: lighter
     exchange_b: variational
-    quantity: "0.5"
-    quantity_precision: "0.01"
+    quantity: 0.5
+    quantity_precision: 0.01
     open_threshold: 0.1
     close_threshold: 0.1
-    min_depth_quantity: "0.1"  # ✅ 新增：最小深度阈值（可选）
 
     accumulate_mode: true  # 是否启用累计模式
     max_position: 2.5      # 最大仓位阈值    

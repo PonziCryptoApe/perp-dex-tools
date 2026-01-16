@@ -70,8 +70,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
         min_depth_quantity = Decimal(str(pair_data['min_depth_quantity']))
     else:
         # 默认为交易量的 10%，但最小为 0.001
-        default_min_depth = max(quantity * Decimal('0.1'), Decimal('0.0001'))
-        min_depth_quantity = default_min_depth
+        min_depth_quantity = None
 
     variational_config = pair_data.get('variational_config', {})
 

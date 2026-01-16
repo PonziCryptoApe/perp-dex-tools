@@ -261,10 +261,14 @@ async def main():
                        help='列出所有可用的交易对')
     parser.add_argument('--quantity', '-q', type=str, default=None,
                        help='开仓数量（可选，覆盖配置）')
-    parser.add_argument('--open-threshold', type=float, default=None,
+    parser.add_argument('--quantity-precision', '-qp', type=str, default=None, help='下单的数量精度，低于该精度下单会失败')
+    parser.add_argument('--open-threshold', '-ot', type=float, default=None,
                        help='开仓阈值（可选，覆盖配置）')
-    parser.add_argument('--close-threshold', type=float, default=None,
+    parser.add_argument('--close-threshold', '-ct', type=float, default=None,
                        help='平仓阈值（可选，覆盖配置）')
+    parser.add_argument('--min-total-threshold', '-mtt', type=float, default=None, help='最小的阈值和')
+    parser.add_argument('--sample-size', type=int, help='价差样本数最终的值')
+    parser.add_argument('--min-samples', type=int, help='最小样本数，达到该样本数即开始交易')
     parser.add_argument('--env-file', type=str, default=None,
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
@@ -325,18 +329,32 @@ async def main():
     trade_logger = TradeLogger(config.symbol, log_dir)
 
     # 命令行参数覆盖配置
-    quantity = Decimal(args.quantity) if args.quantity else config.quantity
-    quantity_precision = config.quantity_precision
+    quantity = Decimal(str(args.quantity)) if args.quantity else Decimal(str(config.quantity))
+    quantity_precision = Decimal(str(args.quantity_precision)) if args.quantity_precision is not None else Decimal(str(config.quantity_precision))
     open_threshold = args.open_threshold if args.open_threshold is not None else config.open_threshold
     close_threshold = args.close_threshold if args.close_threshold is not None else config.close_threshold
     monitor_only = args.monitor_only  # ✅ 获取 monitor_only 参数
-    min_depth_quantity = Decimal(str(args.min_depth_quantity)) if args.min_depth_quantity is not None else config.min_depth_quantity if hasattr(config, 'min_depth_quantity') else Decimal('0')
+    if args.min_depth_quantity:
+        min_depth_quantity = Decimal(str(args.min_depth_quantity))
+    elif hasattr(config, 'min_depth_quantity') and config.min_depth_quantity is not None:
+        min_depth_quantity = Decimal(str(config.min_depth_quantity))
+    else:
+        min_depth_quantity = quantity
     
     # 读取累计模式配置
     accumulate_mode = config.accumulate_mode
     max_position = Decimal(str(args.max_position)) if args.max_position is not None else Decimal(str(config.max_position))
     direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
+
+    if dynamic_threshold:
+        if args.min_total_threshold is not None:
+            dynamic_threshold["min_total_threshold"] = float(args.min_total_threshold)
+        if args.sample_size is not None:
+            dynamic_threshold["sample_size"] = int(args.sample_size)
+        if args.min_samples is not None:
+            dynamic_threshold['min_samples'] = int(args.min_samples)
+
     cooldown_seconds = int(args.cooldown_seconds) if args.cooldown_seconds else 5
 
     logger.info(
@@ -353,6 +371,9 @@ async def main():
         f"  开仓阈值:     {open_threshold}%\n"
         f"  平仓阈值:     {close_threshold}%\n"
         f"  最小深度:     {min_depth_quantity}\n"
+        f"  最小阈值和:   {dynamic_threshold["min_total_threshold"]}\n"
+        f"  样本数:       {dynamic_threshold["sample_size"]}\n"
+        f"  最小样本数:    {dynamic_threshold['min_samples']}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"
