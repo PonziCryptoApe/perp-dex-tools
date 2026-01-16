@@ -23,6 +23,8 @@ class HedgeStrategy(BaseStrategy):
     def __init__(
         self,
         symbol: str,
+        symbol_a: str,
+        symbol_b: str,
         quantity: Decimal,
         quantity_precision: Decimal,
         open_threshold_pct: float,
@@ -47,7 +49,8 @@ class HedgeStrategy(BaseStrategy):
             quantity=quantity,
             quantity_precision=quantity_precision
         )
-        
+        self.symbol_a = symbol_a
+        self.symbol_b = symbol_b
         self.open_threshold_pct = open_threshold_pct
         self.close_threshold_pct = close_threshold_pct
         self.exchange_a = exchange_a
@@ -161,7 +164,8 @@ class HedgeStrategy(BaseStrategy):
             synced_qty = await self.position_manager.sync_from_exchanges(
                 exchange_a=self.exchange_a,
                 exchange_b=self.exchange_b,
-                symbol=self.symbol
+                symbol_a=self.symbol_a,
+                symbol_b=self.symbol_b
             )
             
             if synced_qty is not None:
@@ -493,7 +497,8 @@ class HedgeStrategy(BaseStrategy):
                         is_consistent = await self.position_manager.verify_and_sync(
                             exchange_a=self.exchange_a,
                             exchange_b=self.exchange_b,
-                            symbol=self.symbol,
+                            symbol_a=self.symbol_a,
+                            symbol_b=self.symbol_b,
                             expected_qty=expected_qty,
                             tolerance=self.quantity_precision * 10
                         )
@@ -773,7 +778,8 @@ class HedgeStrategy(BaseStrategy):
                         is_consistent = await self.position_manager.verify_and_sync(
                             exchange_a=self.exchange_a,
                             exchange_b=self.exchange_b,
-                            symbol=self.symbol,
+                            symbol_a=self.symbol_a,
+                            symbol_b=self.symbol_b,
                             expected_qty=expected_qty,
                             tolerance=self.quantity_precision * 10
                         )

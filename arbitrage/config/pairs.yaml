@@ -231,5 +231,28 @@ pairs:
       min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.005 # 最小阈值和（%）
+
+  lighter_varitonal_lit:
+    enabled: true
+    symbol: LIT
+    exchange_a: lighter
+    exchange_b: variational
+    quantity: 1
+    quantity_precision: 0.01
+    open_threshold: 0.1
+    close_threshold: 0.1
+
+    accumulate_mode: true  # 是否启用累计模式
+    max_position: 2.5      # 最大仓位阈值    
+    # ✅ Variational 特殊配置
+    variational_config:
+      polling_interval: 0.3   # 订单簿轮询间隔（秒）
+
+    dynamic_threshold:
+      enabled: true              # 是否启用
+      sample_size: 500          # 样本容量（固定）
+      min_samples: 10           # 开始计算的最小样本数
+      std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
+      min_total_threshold: 0.03 # 最小阈值和（%）
   
 

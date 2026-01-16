@@ -898,16 +898,23 @@ class LighterAdapter(ExchangeAdapter):
                     f"   Size: {position.position}\n"
                     f"   Entry Price: ${position.avg_entry_price}"
                 )
+                return {
+                    'symbol': symbol,
+                    'side': 'long' if position.sign == 1 else 'short',
+                    'size': Decimal(position.position),
+                    'entry_price': position.avg_entry_price,
+                    'unrealized_pnl': position.unrealized_pnl,
+                    }
             else:
                 logger.info(f"📊 {self.exchange_name} 无持仓: {symbol}")
+                return {
+                    'symbol': symbol,
+                    'side': '--',
+                    'size': 0,
+                    'entry_price': '--',
+                    'unrealized_pnl': 0,
+                }
             
-            return {
-                'symbol': symbol,
-                'side': 'long' if position.sign == 1 else 'short',
-                'size': Decimal(position.position),
-                'entry_price': position.avg_entry_price,
-                'unrealized_pnl': position.unrealized_pnl,
-            }
         except Exception as e:
             logger.error(f"❌ {self.exchange_name} 获取持仓失败: {e}", exc_info=True)
             return None

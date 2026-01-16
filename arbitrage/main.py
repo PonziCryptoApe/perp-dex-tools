@@ -397,18 +397,25 @@ async def main():
         
         if config.exchange_b == 'variational' and hasattr(config, 'variational_config'):
             config_override_b = config.variational_config
+
+        symbol_a = config.symbol
+        symbol_b = config.symbol
+        if config.exchange_a == 'variational' and config.symbol == 'LIT':
+            symbol_a = 'LIGHTER'
+        if config.exchange_b == 'variational' and config.symbol == 'LIT':
+            symbol_b = 'LIGHTER'
         
         # 创建适配器
         exchange_a = await create_exchange_adapter(
             config.exchange_a,
-            config.symbol,
+            symbol_a,
             quantity,
             config_override_a
         )
         
         exchange_b = await create_exchange_adapter(
             config.exchange_b,
-            config.symbol,
+            symbol_b,
             quantity,
             config_override_b
         )
@@ -431,6 +438,8 @@ async def main():
     # Step 4: 创建策略
     strategy = HedgeStrategy(
         symbol=config.symbol,
+        symbol_a=symbol_a,
+        symbol_b=symbol_b,
         quantity=quantity,
         quantity_precision=quantity_precision,
         open_threshold_pct=open_threshold,
@@ -455,7 +464,8 @@ async def main():
             synced_qty = await strategy.position_manager.sync_from_exchanges(
                 exchange_a=exchange_a,
                 exchange_b=exchange_b,
-                symbol=config.symbol
+                symbol_a=symbol_a,
+                symbol_b=symbol_b
             )
             
             if synced_qty is not None and synced_qty != 0:

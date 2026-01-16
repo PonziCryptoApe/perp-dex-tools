@@ -1585,7 +1585,8 @@ class OrderExecutor:
 
     async def check_position_balance(self):
         logger.info("🔍 检查两所仓位平衡情况...")
-        symbol = self.exchange_a.symbol
+        symbol_a = self.exchange_a.symbol
+        symbol_b = self.exchange_b.symbol
         portfolio_a = await self.exchange_a.client.get_portfolio()
 
         if portfolio_a:
@@ -1605,8 +1606,8 @@ class OrderExecutor:
             logger.info(f"📤 交易所B 权益: 账号余额: {balance_b}, upnl: { upnl_b }")
 
         # 检查仓位是否平衡
-        pos_a = await self.exchange_a.get_position(symbol)
-        pos_b = await self.exchange_b.get_position(symbol)
+        pos_a = await self.exchange_a.get_position(symbol_a)
+        pos_b = await self.exchange_b.get_position(symbol_b)
         pos_a_size = pos_a['size'] if pos_a else Decimal('0')
         pos_a_side = pos_a['side'] if pos_a else None
         pos_b_size = pos_b['size'] if pos_b else Decimal('0')
@@ -1620,13 +1621,13 @@ class OrderExecutor:
             logger.info("✅ 仓位平衡，无需调整")
             return
         # 请求订单簿restful接口
-        exchange_a_bid_price, exchange_a_ask_price, _ = await self.exchange_a.client.fetch_bbo_prices(symbol)
+        exchange_a_bid_price, exchange_a_ask_price, _ = await self.exchange_a.client.fetch_bbo_prices(symbol_a)
 
         if pos_a_size > pos_b_size:
             diff_size = pos_a_size - pos_b_size
             if pos_a_side == 'short' and pos_b_side == 'long':
                 # Exchange A 空头多于 Exchange B，平A
-                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol} 以平衡仓位")
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol_a} 以平衡仓位")
                 await self.exchange_a.place_market_order(
                     side='buy',
                     quantity=diff_size,
@@ -1635,7 +1636,7 @@ class OrderExecutor:
                 )
             elif pos_a_side == 'long' and pos_b_side == 'short':
                 # Exchange A 多头多于 Exchange B，多卖出差额
-                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {diff_size} {symbol} 以平衡仓位")
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {diff_size} {symbol_a} 以平衡仓位")
                 await self.exchange_a.place_market_order(
                     side='sell',
                     quantity=diff_size,
@@ -1643,7 +1644,7 @@ class OrderExecutor:
                     retry_mode='aggressive',
                 )
             elif pos_a_side == 'long' and pos_b_side == 'long':
-                logger.info(f'🔄 两边仓位方向相同:long, 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {pos_a_size + pos_b_size} {symbol} 以平衡仓位')
+                logger.info(f'🔄 两边仓位方向相同:long, 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位')
                 await self.exchange_a.place_market_order(
                     side='sell',
                     quantity=pos_a_size + pos_b_size,
@@ -1651,7 +1652,7 @@ class OrderExecutor:
                     retry_mode='aggressive',
                 )
             elif pos_a_side == 'short' and pos_b_side == 'short':
-                logger.info(f'🔄 两边仓位方向相同:short,调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_a_size + pos_b_size} {symbol} 以平衡仓位 ')
+                logger.info(f'🔄 两边仓位方向相同:short,调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位 ')
                 await self.exchange_a.place_market_order(
                     side='buy',
                     quantity=pos_a_size + pos_b_size,
@@ -1662,7 +1663,7 @@ class OrderExecutor:
             diff_size = pos_b_size - pos_a_size
             if pos_a_side == 'short' and pos_b_side == 'long':
                 # Exchange A 空头少于 Exchange B, A 卖出差额
-                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol} 以平衡仓位")
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol_a} 以平衡仓位")
                 await self.exchange_a.place_market_order(
                     side='sell',
                     quantity=diff_size,
@@ -1671,7 +1672,7 @@ class OrderExecutor:
                 )
             elif pos_a_side == 'long' and pos_b_side == 'short':
                 # Exchange A 多头少于 Exchange B，A买入差额
-                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {diff_size} {symbol} 以平衡仓位")
+                logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {diff_size} {symbol_a} 以平衡仓位")
                 await self.exchange_a.place_market_order(
                     side='buy',
                     quantity=diff_size,
@@ -1679,7 +1680,7 @@ class OrderExecutor:
                     retry_mode='aggressive',
                 )
             elif pos_a_side == 'long' and pos_b_side == 'long':
-                logger.info(f'🔄 两边仓位方向相同:long, 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {pos_a_size + pos_b_size} {symbol} 以平衡仓位')
+                logger.info(f'🔄 两边仓位方向相同:long, 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位')
                 await self.exchange_a.place_market_order(
                     side='sell',
                     quantity=pos_a_size + pos_b_size,
@@ -1687,22 +1688,24 @@ class OrderExecutor:
                     retry_mode='aggressive',
                 )
             elif pos_a_side == 'short' and pos_b_side == 'short':
-                logger.info(f'🔄 两边仓位方向相同:short,调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_a_size + pos_b_size} {symbol} 以平衡仓位 ')
+                logger.info(f'🔄 两边仓位方向相同:short,调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位 ')
                 await self.exchange_a.place_market_order(
                     side='buy',
                     quantity=pos_a_size + pos_b_size,
                     price=exchange_a_bid_price,
                     retry_mode='aggressive',
                 )
-        pos_a = await self.exchange_a.get_position(symbol)
-        pos_b = await self.exchange_b.get_position(symbol)
+        pos_a = await self.exchange_a.get_position(symbol_a)
+        pos_b = await self.exchange_b.get_position(symbol_b)
         pos_a_size = pos_a['size'] if pos_a else Decimal('0')
         pos_a_side = pos_a['side']
         pos_b_size = pos_b['size'] if pos_b else Decimal('0')
         pos_b_side = pos_b['side']
         logger.info(f"🔍 重新校验仓位平衡: {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}, "
                     f": {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}")
-        if pos_a_size == pos_b_size and pos_a_side != pos_b_side:
+        if pos_a_size == pos_b_size and pos_a_size == 0:
+            logger.info("✅ 仓位检测后实现仓位平衡，无需调整")
+        elif pos_a_size == pos_b_size and pos_a_side != pos_b_side:
             logger.info("✅ 仓位检测后实现仓位平衡，无需调整")
         else:
             logger.error("❌ 仓位检测后仓位仍不平衡，请手动检查")

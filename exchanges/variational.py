@@ -923,7 +923,13 @@ class VariationalClient(BaseExchangeClient):
             
             # ✅ 未找到该币种的持仓
             self.logger.log(f"No position found for {symbol}", "DEBUG")
-            return None
+            return {
+                'symbol': symbol,
+                'side': '--',
+                'size': 0,
+                'entry_price': '--',
+                'unrealized_pnl': 0
+            }
         
         except Exception as e:
             self.logger.log(f"Error getting position for {symbol}: {e}", "ERROR")

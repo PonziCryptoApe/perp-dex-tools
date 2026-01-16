@@ -356,7 +356,8 @@ class PositionManagerService:
         self,
         exchange_a,
         exchange_b,
-        symbol: str
+        symbol_a: str,
+        symbol_b: str,
     ):
         """
         从交易所同步仓位
@@ -371,8 +372,8 @@ class PositionManagerService:
         """
         try:
             # 获取交易所仓位
-            position_a = await exchange_a.get_position(symbol)
-            position_b = await exchange_b.get_position(symbol)
+            position_a = await exchange_a.get_position(symbol_a)
+            position_b = await exchange_b.get_position(symbol_b)
 
             # 解析仓位数量
             qty_a = Decimal(str(position_a.get('size', 0))) if position_a else Decimal('0')
@@ -427,7 +428,8 @@ class PositionManagerService:
         self,
         exchange_a,
         exchange_b,
-        symbol: str,
+        symbol_a: str,
+        symbol_b: str,
         expected_qty: Decimal,
         tolerance: Decimal = Decimal('0.01')
     ) -> bool:
@@ -446,7 +448,7 @@ class PositionManagerService:
         """
         try:
             # 获取实际仓位
-            actual_qty = await self.sync_from_exchanges(exchange_a, exchange_b, symbol)
+            actual_qty = await self.sync_from_exchanges(exchange_a, exchange_b, symbol_a, symbol_b)
             
             if actual_qty is None:
                 logger.error("❌ 无法获取交易所仓位，跳过校验")
