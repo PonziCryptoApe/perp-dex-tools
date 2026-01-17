@@ -50,6 +50,7 @@ class VariationalClient(BaseExchangeClient):
         
         # Authentication
         self.auth_token = None
+        self.cookies = None
         # 为 Variational API 使用 cloudscraper
         self.scraper = cloudscraper.create_scraper(
             browser='chrome',                  # 模仿 Chrome
@@ -270,6 +271,8 @@ class VariationalClient(BaseExchangeClient):
             # 3. 登录获取 token
             login_response = await self._login_with_signature(signature_hex)
             self.auth_token = login_response.get("token")
+
+            self.cookies = {"vr-token": self.auth_token,"vr-connected-address": self.wallet_address } if self.auth_token else {}
             
             if not self.auth_token:
                 raise ValueError("【VARIATIONAL】Failed to get auth token")
@@ -534,8 +537,8 @@ class VariationalClient(BaseExchangeClient):
         reraise=True)
     async def _fetch_indicative_quote(self, qty: Decimal, contract_id: Optional[str] = None) -> Dict[str, Any]:
         """获取指示性报价"""
-        url = f"{self.api_base}/quotes/simple"
-        
+        url = f"{self.api_base}/quotes/indicative"
+    
         if contract_id:
             ticker = contract_id.split('-')[0]
         else:
@@ -546,12 +549,8 @@ class VariationalClient(BaseExchangeClient):
             "qty": str(qty)
         }
         
-        # 设置 cookies
-        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
-        # self.logger.log(f"【VARIATIONAL】Fetching indicative quote with payload: {payload}", "INFO")
-        # self.logger.log(f"【VARIATIONAL】Using cookies: {cookies}", "INFO")
         try:
-            return await self._make_var_request('POST', url, json=payload, cookies=cookies)
+            return await self._make_var_request('POST', url, json=payload, cookies=self.cookies)
         except Exception as e:
             self.logger.log(f"【VARIATIONAL】Failed to fetch indicative quote: {e}", "ERROR")
             return {}
@@ -600,12 +599,9 @@ class VariationalClient(BaseExchangeClient):
             "use_mark_price": False,
             "is_reduce_only": False
         }
-        
-        # 设置 cookies
-        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
-        
+                
         try:
-            data = await self._make_var_request('POST', url, json=payload, cookies=cookies)
+            data = await self._make_var_request('POST', url, json=payload, cookies=self.cookies)
             self.logger.log(f"【VARIATIONAL】Placed limit order response: {data}", "INFO")
             order_id = data.get('rfq_id')
             if order_id:
@@ -631,11 +627,9 @@ class VariationalClient(BaseExchangeClient):
             "max_slippage": max_slippage,
             "quote_id": quote_id
         }
-         # 设置 cookies
-        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
-        
+
         try:
-            data = await self._make_var_request('POST', url, json=payload, cookies=cookies)
+            data = await self._make_var_request('POST', url, json=payload, cookies=self.cookies)
             self.logger.log(f"【VARIATIONAL】Placed market order response: {data}", "INFO")
             order_id = data.get('rfq_id')
             if not order_id:
@@ -662,11 +656,9 @@ class VariationalClient(BaseExchangeClient):
             "max_slippage": max_slippage,
             "quote_id": quote_id
         }
-         # 设置 cookies
-        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
         
         try:
-            data = await self._make_var_request('POST', url, json=payload, cookies=cookies)
+            data = await self._make_var_request('POST', url, json=payload, cookies=self.cookies)
             self.logger.log(f"【VARIATIONAL】Placed accept order response: {data}", "INFO")
             order_id = data.get('rfq_id')
             if order_id:
@@ -688,12 +680,9 @@ class VariationalClient(BaseExchangeClient):
         """使用 cloudscraper 取消订单"""
         url = f"{self.api_base}/orders/cancel"
         payload = {"rfq_id": order_id}
-        
-        # 设置 cookies
-        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
-        
+                
         try:
-            data = await self._make_var_request('POST', url, json=payload, cookies=cookies)
+            data = await self._make_var_request('POST', url, json=payload, cookies=self.cookies)
             
             if data is None:
                 return OrderResult(success=True, order_id=order_id, status='CANCELED')
@@ -727,9 +716,8 @@ class VariationalClient(BaseExchangeClient):
         """使用 cloudscraper 获取活跃订单"""
         try:
             url = f"{self.api_base}/positions"
-            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
-            data = await self._make_var_request('GET', url, cookies=cookies)
+            data = await self._make_var_request('GET', url, cookies=self.cookies)
             
             # 解析订单数据并转换为 OrderInfo 对象
             orders = []
@@ -799,12 +787,11 @@ class VariationalClient(BaseExchangeClient):
             # params['created_at_lte'] = end_iso
 
             # 设置认证 cookies
-            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
             self.logger.log(f"【VARIATIONAL】Fetching orders history with params: {params}", "INFO")
             
             # 发起请求
-            response_data = await self._make_var_request('GET', url, params=params, cookies=cookies)
+            response_data = await self._make_var_request('GET', url, params=params, cookies=self.cookies)
             # self.logger.log(f"【VARIATIONAL】Orders history response: {response_data}", "INFO")
             # 如果指定了 rfq_id，进行过滤
             if rfq_id and 'result' in response_data:
@@ -837,9 +824,8 @@ class VariationalClient(BaseExchangeClient):
         """使用 cloudscraper 获取账户持仓"""
         try:
             url = f"{self.api_base}/positions"
-            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
-            data = await self._make_var_request('GET', url, cookies=cookies)
+            data = await self._make_var_request('GET', url, cookies=self.cookies)
             
             # 解析持仓数据
             if 'positions' in data:
@@ -873,10 +859,9 @@ class VariationalClient(BaseExchangeClient):
         """
         try:
             url = f"{self.api_base}/positions"
-            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
             # ✅ 调用 API
-            data = await self._make_var_request('GET', url, cookies=cookies)
+            data = await self._make_var_request('GET', url, cookies=self.cookies)
             
             # ✅ 检查返回数据
             if not data:
@@ -1002,9 +987,8 @@ class VariationalClient(BaseExchangeClient):
     
     async def getVariationalVolume(self) -> Decimal:
         url = f"{self.api_base}/portfolio/trade_volume"
-        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
 
-        data = await self._make_var_request('GET', url, cookies=cookies)
+        data = await self._make_var_request('GET', url, cookies=self.cookies)
 
         if 'all_time' in data:
             return Decimal(data['all_time'])
@@ -1012,9 +996,8 @@ class VariationalClient(BaseExchangeClient):
 
     async def getVariationalBalance(self) -> Decimal:
         url = f"{self.api_base}/portfolio?compute_margin=true"
-        cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
-        data = await self._make_var_request('GET', url, cookies=cookies)
+        data = await self._make_var_request('GET', url, cookies=self.cookies)
 
         if 'balance' in data:
             return Decimal(data['balance'])
@@ -1035,9 +1018,8 @@ class VariationalClient(BaseExchangeClient):
         """
         try:
             url = f"{self.api_base}/portfolio?compute_margin=true"
-            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
-            data = await self._make_var_request('GET', url, cookies=cookies)
+            data = await self._make_var_request('GET', url, cookies=self.cookies)
             
             return data
             
@@ -1079,9 +1061,8 @@ class VariationalClient(BaseExchangeClient):
         """
         try:
             url = f"{self.api_base}/portfolio/trade_volume"
-            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
-            data = await self._make_var_request('GET', url, cookies=cookies)
+            data = await self._make_var_request('GET', url, cookies=self.cookies)
             
             return data
             
@@ -1105,7 +1086,7 @@ class VariationalClient(BaseExchangeClient):
             url = f"{self.api_base}/points/summary"
             cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
-            data = await self._make_var_request('GET', url, cookies=cookies)
+            data = await self._make_var_request('GET', url, cookies=self.cookies)
             
             return data
             
@@ -1146,9 +1127,8 @@ class VariationalClient(BaseExchangeClient):
         """
         try:
             url = f"{self.api_base}/points/history?limit=20&offset=0"
-            cookies = {"vr-token": self.auth_token} if self.auth_token else {}
             
-            data = await self._make_var_request('GET', url, cookies=cookies)
+            data = await self._make_var_request('GET', url, cookies=self.cookies)
             return data.get('result', [])
             
         except Exception as e:
