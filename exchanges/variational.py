@@ -261,7 +261,7 @@ class VariationalClient(BaseExchangeClient):
         try:
             # 1. 获取签名数据
             signing_data = await self._fetch_signing_data()
-            message = signing_data["message"]
+            message = signing_data
             self.logger.log(f"【VARIATIONAL】获取签名数据: {message}", "INFO")
 
             # 2. 签名消息
@@ -285,8 +285,20 @@ class VariationalClient(BaseExchangeClient):
         """使用 cloudscraper 获取签名数据"""
         url = f"{self.api_base}/auth/generate_signing_data"
         payload = {"address": self.wallet_address}
+        loop = asyncio.get_event_loop()
         
-        return await self._make_var_request('POST', url, json=payload)
+        try:
+            response = await loop.run_in_executor(
+                None, 
+                lambda: self.scraper.post(url, json=payload)
+            )
+            
+            response.raise_for_status()
+            return response.text
+            
+        except Exception as e:
+            self.logger.log(f"【VARIATIONAL】Variational API request failed: {e}", "ERROR")
+            raise
 
     def _sign_message(self, message: str) -> str:
         """Sign message with private key."""
@@ -522,7 +534,7 @@ class VariationalClient(BaseExchangeClient):
         reraise=True)
     async def _fetch_indicative_quote(self, qty: Decimal, contract_id: Optional[str] = None) -> Dict[str, Any]:
         """获取指示性报价"""
-        url = f"{self.api_base}/quotes/indicative"
+        url = f"{self.api_base}/quotes/simple"
         
         if contract_id:
             ticker = contract_id.split('-')[0]
