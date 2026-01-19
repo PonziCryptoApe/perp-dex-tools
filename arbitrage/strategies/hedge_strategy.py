@@ -516,6 +516,8 @@ class HedgeStrategy(BaseStrategy):
                                 await self._send_open_notification(position, prices)
 
                     else:
+                        await self.executor.check_position_balance()
+
                         # ✅ 节流日志：每5秒最多输出一次
                         if current_time - self.last_log_time >= self.log_interval:
                             logger.debug(
@@ -801,6 +803,8 @@ class HedgeStrategy(BaseStrategy):
                         # self.position = None
 
                     else:
+                        await self.executor.check_position_balance()
+
                         if current_time - self.last_log_time >= self.log_interval:
                             # ✅ 节流日志：每5秒最多输出一次
                             logger.info(
