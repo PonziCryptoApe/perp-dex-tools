@@ -332,7 +332,7 @@ class VariationalAdapter(ExchangeAdapter):
             try:
                 # ✅ 记录下单时间
                 # max_slippage = slippage_levels[attempt]
-                max_slippage = self.slippage or Decimal('0')
+                max_slippage = float(str(self.slippage)) or 0
 
                 # ✅ 第 1 次尝试使用传入的 quote_id，后续重试重新获取
                 if attempt == 0 and quote_id is not None:
