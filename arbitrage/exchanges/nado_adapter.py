@@ -466,8 +466,7 @@ class NadoAdapter(ExchangeAdapter):
             try:
                 # ✅ 记录下单时间
                 self._order_place_time = time.time()
-                # max_slippage = slippage_levels[attempt]
-                max_slippage = 0.0005  # 固定使用 0.05% 滑点
+                max_slippage = self.slippage or Decimal('0')  # 固定使用 0.05% 滑点
                 time_diff = None
                 # ✅ 计算与最后一次订单簿获取的时间差
                 if self._orderbook_fetch_time:

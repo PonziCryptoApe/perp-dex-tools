@@ -59,6 +59,7 @@ async def create_exchange_adapter(
     exchange_name: str,
     symbol: str,
     quantity: Decimal = None,
+    slippage: Decimal = None,
     config_override: dict = None
 ):
     """创建交易所适配器"""
@@ -211,12 +212,15 @@ async def create_exchange_adapter(
     adapter_class = EXCHANGE_ADAPTERS[exchange_name]
     
     # 为适配器准备配置
-    adapter_config = {}
+    adapter_config = {
+        'slippage': slippage
+    }
     
     if exchange_name == 'variational':
         adapter_config = {
             'polling_interval': config_dict.get('polling_interval', 1.0),
-            'query_quantity': quantity
+            'query_quantity': quantity,
+            'slippage': slippage
         }
     
     adapter = adapter_class(symbol, client, config=adapter_config)
@@ -279,6 +283,8 @@ async def main():
     parser.add_argument('--max-position', type=float, default=None, help='最大仓位，如果不传则使用配置文件中的')
     parser.add_argument('--direction-reverse', type=bool, default=False, help='是表示正向滑点方向才下单，默认先负滑点方向才下单')
     parser.add_argument('--cooldown-seconds', type=str, default='5', help='下单冷却时间，默认5秒，只通过控制台传参')
+    parser.add_argument('--exchange-a-slippage', type=float, default=None, help='交易所A的滑点')
+    parser.add_argument('--exchange-b-slippage', type=float, default=None, help='交易所B的滑点')
     args = parser.parse_args()
     # 加载环境变量
     if args.env_file:
@@ -356,6 +362,11 @@ async def main():
             dynamic_threshold['min_samples'] = int(args.min_samples)
 
     cooldown_seconds = int(args.cooldown_seconds) if args.cooldown_seconds else 5
+    # 设置滑点
+    if args.exchange_a_slippage is not None:
+        exchange_a_slippage = Decimal(str(args.exchange_a_slippage))
+    if args.exchange_b_slippage is not None:
+        exchange_b_slippage = Decimal(str(args.exchange_b_slippage))
 
     logger.info(
         f"\n"
@@ -380,6 +391,8 @@ async def main():
         f"  负向滑点方向下单: { '是' if not direction_reverse else '否'}\n"
         f"  动态阈值:     {'启用' if dynamic_threshold.get('enabled', False) else '禁用'}\n"  # ✅ 新增
         f"  冷却时间:     { cooldown_seconds }s\n"
+        f"  交易所 A 滑点: {exchange_a_slippage or '--'}\n"
+        f"  交易所 B 滑点: {exchange_b_slippage or '--'}\n"
         f"{'='*60}\n"
     )
     
@@ -410,6 +423,7 @@ async def main():
             config.exchange_a,
             symbol_a,
             quantity,
+            exchange_a_slippage,
             config_override_a
         )
         
@@ -417,6 +431,7 @@ async def main():
             config.exchange_b,
             symbol_b,
             quantity,
+            exchange_b_slippage,
             config_override_b
         )
         

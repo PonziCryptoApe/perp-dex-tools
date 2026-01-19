@@ -22,6 +22,7 @@ class ExchangeAdapter(ABC):
         self.client = client
         self.config = config or {}
         self.exchange_name = self.__class__.__name__.replace('Adapter', '')
+        self.slippage = self.config.get('slippage', None)
         
         # 订单簿缓存
         self._orderbook: Optional[Dict] = None
