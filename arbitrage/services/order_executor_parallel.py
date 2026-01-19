@@ -1713,7 +1713,7 @@ class OrderExecutor:
             if self.lark_bot:
                 await self.lark_bot.send_text(
                     f"❌ {self.lark_index_text}仓位检测后仓位仍不平衡，需要手动处理仓位！"
-                    f" {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}"
-                    f" {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}"
+                    f" {self.exchange_a.exchange_name} {symbol_a} {pos_a_side} {pos_a_size}"
+                    f" {self.exchange_b.exchange_name} {symbol_b} {pos_b_side} {pos_b_size}"
                 )
     
