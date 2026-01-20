@@ -272,7 +272,6 @@ async def main():
                        help='平仓阈值（可选，覆盖配置）')
     parser.add_argument('--min-total-threshold', '-mtt', type=float, default=None, help='最小的阈值和')
     parser.add_argument('--sample-size', type=int, help='价差样本数最终的值')
-    parser.add_argument('--min-samples', type=int, help='最小样本数，达到该样本数即开始交易')
     parser.add_argument('--env-file', type=str, default=None,
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
@@ -358,9 +357,8 @@ async def main():
             dynamic_threshold["min_total_threshold"] = float(args.min_total_threshold)
         if args.sample_size is not None:
             dynamic_threshold["sample_size"] = int(args.sample_size)
-        if args.min_samples is not None:
-            dynamic_threshold['min_samples'] = int(args.min_samples)
-
+        
+        dynamic_threshold['min_samples'] = dynamic_threshold.get('sample_size', 1000)
     cooldown_seconds = int(args.cooldown_seconds) if args.cooldown_seconds else 5
     # 设置滑点
     if args.exchange_a_slippage is not None:
@@ -384,7 +382,6 @@ async def main():
         f"  最小深度:     {min_depth_quantity}\n"
         f"  最小阈值和:   {dynamic_threshold["min_total_threshold"]}\n"
         f"  样本数:       {dynamic_threshold["sample_size"]}\n"
-        f"  最小样本数:    {dynamic_threshold['min_samples']}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"

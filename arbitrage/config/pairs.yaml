@@ -66,7 +66,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 1000          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.04 # 最小阈值和（%）
   
@@ -89,7 +88,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 1000          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.03 # 最小阈值和（%）
 
@@ -112,7 +110,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 1000          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.06 # 最小阈值和（%）
 
@@ -135,7 +132,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 1000          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.03 # 最小阈值和（%）
   
@@ -159,7 +155,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 500          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.001 # 最小阈值和（%）
 
@@ -182,7 +177,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 500          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.005 # 最小阈值和（%）
 
@@ -205,7 +199,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 500          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.05 # 最小阈值和（%）
   
@@ -228,7 +221,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 500          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.005 # 最小阈值和（%）
 
@@ -251,7 +243,6 @@ pairs:
     dynamic_threshold:
       enabled: true              # 是否启用
       sample_size: 500          # 样本容量（固定）
-      min_samples: 10           # 开始计算的最小样本数
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.03 # 最小阈值和（%）
   
