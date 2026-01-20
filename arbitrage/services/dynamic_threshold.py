@@ -53,6 +53,8 @@ class DynamicThresholdManager:
         # ✅ 数据存储：固定容量，自动保持最新数据
         self.open_spreads = deque(maxlen=sample_size)
         self.close_spreads = deque(maxlen=sample_size)
+        self.time_sample_start = None
+        self.time_sample_end = None
         
         # 当前阈值
         self.current_open_threshold = None
@@ -167,7 +169,14 @@ class DynamicThresholdManager:
         self.open_spreads.append(float(open_spread))
         self.close_spreads.append(float(close_spread))
         self.total_samples_added += 1
-
+        if self.total_samples_added == 1:
+            self.time_sample_start = time.time()
+        if self.total_samples_added == self.sample_size -1:
+            self.time_sample_end = time.time()
+            logger.info(
+                f"⏱️ 收集到 {self.sample_size} 个样本，"
+                f"耗时 {self.time_sample_end - self.time_sample_start:.2f} 秒"
+            )
         # ✅ 记录到文件
         if self.enable_logging:
             now = time.time()
