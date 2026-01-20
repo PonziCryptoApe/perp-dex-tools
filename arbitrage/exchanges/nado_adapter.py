@@ -393,7 +393,8 @@ class NadoAdapter(ExchangeAdapter):
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',  # 'aggressive' or 'opportunistic'
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下开仓单
@@ -412,7 +413,7 @@ class NadoAdapter(ExchangeAdapter):
             return await self.place_market_order(
                 side=side,
                 quantity=quantity,
-                # quote_id=quote_id
+                slippage=slippage
             )
     async def place_close_order(
         self,
@@ -420,7 +421,8 @@ class NadoAdapter(ExchangeAdapter):
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',  # 'aggressive' or 'opportunistic'
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下关仓单
@@ -447,11 +449,10 @@ class NadoAdapter(ExchangeAdapter):
             return await self.place_market_order(
                 side=side,
                 quantity=quantity,
-                # quote_id=quote_id
+                slippage=slippage
             )
-        
-    
-    async def place_market_order(self, side, quantity: Decimal) -> dict:
+
+    async def place_market_order(self, side, quantity: Decimal, slippage: Optional[Decimal] = None) -> dict:
         """
         下市价单（带重试 + 动态滑点）
         
@@ -466,7 +467,9 @@ class NadoAdapter(ExchangeAdapter):
             try:
                 # ✅ 记录下单时间
                 self._order_place_time = time.time()
-                max_slippage = self.slippage or Decimal('0')  # 固定使用 0.05% 滑点
+                max_slippage = slippage or self.slippage  # 固定使用 0.05% 滑点
+                logger.info(f"Placing market order with slippage: {max_slippage}")
+
                 time_diff = None
                 # ✅ 计算与最后一次订单簿获取的时间差
                 if self._orderbook_fetch_time:

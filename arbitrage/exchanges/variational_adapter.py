@@ -253,7 +253,8 @@ class VariationalAdapter(ExchangeAdapter):
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',  # 'aggressive' or 'opportunistic'
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下开仓单
@@ -279,7 +280,8 @@ class VariationalAdapter(ExchangeAdapter):
             logger.info(f"📤 Variational 下市价单: {side} (quote_id: {quote_id})")
             return await self.place_market_order(
                 side=side,
-                quote_id=quote_id
+                quote_id=quote_id,
+                slippage=slippage
             )
     async def place_close_order(
         self,
@@ -287,7 +289,8 @@ class VariationalAdapter(ExchangeAdapter):
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',  # 'aggressive' or 'opportunistic'
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下关仓单
@@ -313,11 +316,12 @@ class VariationalAdapter(ExchangeAdapter):
             logger.info(f"📤 Variational 下市价单: {side} (quote_id: {quote_id})")
             return await self.place_market_order(
                 side=side,
-                quote_id=quote_id
+                quote_id=quote_id,
+                slippage=slippage
             )
-        
-    
-    async def place_market_order(self, side, quote_id):
+
+
+    async def place_market_order(self, side, quote_id, slippage) -> dict:
         """
         下市价单（带重试 + 动态滑点）
         
@@ -327,12 +331,12 @@ class VariationalAdapter(ExchangeAdapter):
         - 第 3 次：滑点 0.10% (0.001)
         """
         max_attempts = 1  # 分别对应 0.01%, 0.05%, 0.10%
-        # slippage_levels = [0.0005]
         for attempt in range(max_attempts):
             try:
                 # ✅ 记录下单时间
                 # max_slippage = slippage_levels[attempt]
-                max_slippage = float(str(self.slippage)) or 0
+                max_slippage = float(str(slippage) if slippage else float(str(self.slippage)))
+                logger.info(f"Placing market order with slippage: {max_slippage}")
 
                 # ✅ 第 1 次尝试使用传入的 quote_id，后续重试重新获取
                 if attempt == 0 and quote_id is not None:

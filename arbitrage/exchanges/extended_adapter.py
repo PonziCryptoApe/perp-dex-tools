@@ -303,7 +303,8 @@ class ExtendedAdapter(ExchangeAdapter):
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下开仓单
@@ -316,14 +317,15 @@ class ExtendedAdapter(ExchangeAdapter):
         注意：Extended 使用 IOC 订单，天然就是"激进"的，
             retry_mode 参数主要用于日志记录和未来扩展
         """
-        return await self.place_market_order(side, quantity, price, retry_mode)
+        return await self.place_market_order(side, quantity, price, retry_mode, slippage)
 
     async def place_close_order(self,
         side: str,
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下平仓单
@@ -336,14 +338,15 @@ class ExtendedAdapter(ExchangeAdapter):
         注意：Extended 使用 IOC 订单，天然就是"激进"的，
             retry_mode 参数主要用于日志记录和未来扩展
         """
-        return await self.place_market_order(side, quantity, price, retry_mode)
+        return await self.place_market_order(side, quantity, price, retry_mode, slippage)
     
     async def place_market_order(
         self,
         side: str,
         quantity: Decimal,
         price: Optional[Decimal] = None,
-        retry_mode: str = 'opportunistic'
+        retry_mode: str = 'opportunistic',
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下市价单
@@ -358,11 +361,13 @@ class ExtendedAdapter(ExchangeAdapter):
         """
         try:
             order_side = OrderSide.BUY if side.upper() == 'BUY' else OrderSide.SELL
+            slippage = slippage if slippage is not None else self.slippage
+            logger.info(f"Placing market order with slippage: {slippage}")
             if retry_mode == 'aggressive':
                 if side.upper() == 'BUY':
-                    order_price = price * Decimal(str(1 - (self.slippage or Decimal('0'))))  # 确保买入
+                    order_price = price * Decimal(str(1 - (slippage or Decimal('0'))))  # 确保买入
                 else:
-                    order_price = price * Decimal(str(1 + (self.slippage or Decimal('0'))))  # 确保卖出
+                    order_price = price * Decimal(str(1 + (slippage or Decimal('0'))))  # 确保卖出
                 order_price = self.client.round_to_tick(order_price)
                 print(f"Adjusted order price for aggressive mode: {order_price}")
             else:

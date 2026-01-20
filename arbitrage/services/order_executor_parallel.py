@@ -22,7 +22,7 @@ class OrderExecutor:
         exchange_b: ExchangeAdapter,
         quantity: Decimal,
         quantity_precision: Decimal,
-        max_retries: int = 3,
+        max_retries: int = 5,
         retry_delay: float = 0.3
     ):
         """
@@ -32,7 +32,7 @@ class OrderExecutor:
             exchange_a: 交易所 A（开空）
             exchange_b: 交易所 B（开多）
             quantity: 交易数量
-            max_retries: 最大重试次数（默认 3）
+            max_retries: 最大重试次数（默认 5）
             retry_delay: 重试延迟（秒，默认 0.3 秒）
         """
         self.exchange_a = exchange_a
@@ -621,7 +621,8 @@ class OrderExecutor:
                         quantity=quantity,
                         price=price,
                         retry_mode=current_retry_mode,
-                        quote_id=current_quote_id
+                        quote_id=current_quote_id,
+                        slippage=Decimal('0.02')
                     )
                 else:  # 'close'
                     result = await exchange.place_close_order(
@@ -629,7 +630,8 @@ class OrderExecutor:
                         quantity=quantity,
                         price=price,
                         retry_mode=current_retry_mode,
-                        quote_id=current_quote_id
+                        quote_id=current_quote_id,
+                        slippage=Decimal('0.02')
                     )
                 # ✅ 检查部分成交
                 if not result.get('success') and result.get('partial_fill'):

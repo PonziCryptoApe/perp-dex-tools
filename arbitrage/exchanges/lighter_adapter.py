@@ -456,7 +456,8 @@ class LighterAdapter(ExchangeAdapter):
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None,
     ) -> dict:
         """
         下开仓单
@@ -469,14 +470,15 @@ class LighterAdapter(ExchangeAdapter):
         注意：Lighter 使用 IOC 订单，天然就是"激进"的，
             retry_mode 参数主要用于日志记录和未来扩展
         """
-        return await self.place_market_order(side, quantity, price, retry_mode)
+        return await self.place_market_order(side, quantity, price, retry_mode, slippage)
 
     async def place_close_order(self,
         side: str,
         quantity: Decimal,
         price: Optional[Decimal] = None,
         retry_mode: str = 'opportunistic',
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下平仓单
@@ -489,14 +491,15 @@ class LighterAdapter(ExchangeAdapter):
         注意：Lighter 使用 IOC 订单，天然就是"激进"的，
             retry_mode 参数主要用于日志记录和未来扩展
         """
-        return await self.place_market_order(side, quantity, price, retry_mode)
-    
+        return await self.place_market_order(side, quantity, price, retry_mode, slippage)
+
     async def place_market_order(
         self,
         side: str,
         quantity: Decimal,
         price: Optional[Decimal] = None,
-        retry_mode: str = 'opportunistic'
+        retry_mode: str = 'opportunistic',
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下市价单（使用限价单 + IOC 模拟）
@@ -525,12 +528,15 @@ class LighterAdapter(ExchangeAdapter):
             client_order_index = int(time.time() * 1000) % 1000000
 
             self._order_status_futures[client_order_index] = future
+            slippage = slippage if slippage is not None else self.slippage
+            logger.info(f"Placing market order with slippage: {slippage}")
+
             if retry_mode == 'aggressive':
                 # ✅ 计算订单价格（和 hedge_monitor 一致）
                 if side_upper == 'BUY':
-                    order_price = Decimal(str(price)) * Decimal(str(1 + (self.slippage or Decimal('0')))) if price else self.lighter_best_ask
+                    order_price = Decimal(str(price)) * Decimal(str(1 + (slippage or Decimal('0')))) if price else self.lighter_best_ask
                 else:
-                    order_price = Decimal(str(price)) * Decimal(str(1 - (self.slippage or Decimal('0')))) if price else self.lighter_best_bid
+                    order_price = Decimal(str(price)) * Decimal(str(1 - (slippage or Decimal('0')))) if price else self.lighter_best_bid
             else:
                 order_price = Decimal(str(price))
             logger.info(
@@ -538,6 +544,7 @@ class LighterAdapter(ExchangeAdapter):
                 f"   市场: {self.market_index}\n"
                 f"   方向: {side_upper}\n"
                 f"   原始数量: {quantity} (type: {type(quantity)})\n"
+                f"   滑点: {slippage}\n"
                 f"   价格: {order_price}\n"
                 f"   base_amount_multiplier: {self.client.base_amount_multiplier}\n"
                 f"   price_multiplier: {self.client.price_multiplier}"

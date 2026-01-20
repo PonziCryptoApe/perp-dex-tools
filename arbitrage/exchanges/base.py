@@ -82,7 +82,8 @@ class ExchangeAdapter(ABC):
         quantity: Decimal,
         price: Optional[Decimal] = None,  # 参考价格（某些交易所需要）
         retry_mode: str = 'aggressive',
-        quote_id: Optional[str] = None
+        quote_id: Optional[str] = None,
+        slippage: Optional[Decimal] = None
     ) -> dict:
         """
         下平仓单
