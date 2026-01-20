@@ -113,6 +113,7 @@ class HedgeStrategy(BaseStrategy):
                 'delay_filtered': 0,     # 因延迟过滤
                 'depth_insufficient': 0, # 因深度不足跳过
                 'depth_adjusted': 0,     # 因深度调整数量
+                'skipped': 0,            # 因仓位达到上限跳过
                 'executed': 0            # 实际执行
             },
             # 平仓信号统计
@@ -120,6 +121,7 @@ class HedgeStrategy(BaseStrategy):
                 'total': 0,
                 'delay_filtered': 0,
                 'depth_insufficient': 0,
+                'skipped': 0,
                 'executed': 0
             }
         }
@@ -257,7 +259,7 @@ class HedgeStrategy(BaseStrategy):
                 logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
                 if current_qty < 0:
                     # ✅ 优先检查平仓信号（如果可以平仓）
-                    if self.position_manager.can_open('long'):
+                    # if self.position_manager.can_open('long'):
                         await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
 
                         # ✅ 如果正在执行，跳过开仓检查
@@ -265,11 +267,11 @@ class HedgeStrategy(BaseStrategy):
                             return
                 
                     # ✅ 检查开仓信号（如果可以开仓）
-                    if self.position_manager.can_open('short'):
+                    # if self.position_manager.can_open('short'):
                         await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 else:
                     # ✅ 优先检查平仓信号（如果可以平仓）
-                    if self.position_manager.can_open('short'):
+                    # if self.position_manager.can_open('short'):
                         await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
 
                         # ✅ 如果正在执行，跳过开仓检查
@@ -277,7 +279,7 @@ class HedgeStrategy(BaseStrategy):
                             return
                 
                     # ✅ 检查开仓信号（如果可以开仓）
-                    if self.position_manager.can_open('long'):
+                    # if self.position_manager.can_open('long'):
                         await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 
             else:
@@ -396,9 +398,10 @@ class HedgeStrategy(BaseStrategy):
                 #     f"   实际数量: {actual_quantity} (调整: {((actual_quantity - self.quantity) / self.quantity * 100):+.2f}%)"
                 # )
                 return
-            
+            self.open_signal_count += 1
+
             logger.info(
-                f"🔔 检测到开仓信号:\n"
+                f"🔔 检测到开仓信号 #{self.open_signal_count}:\n"
                 f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                 f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                 f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
@@ -408,8 +411,6 @@ class HedgeStrategy(BaseStrategy):
                 f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)\n"
                 f"   数量: {actual_quantity}"
             )
-
-            self.open_signal_count += 1
 
             # ✅ 检查是否为监控模式
             if self.monitor_only:
@@ -449,6 +450,8 @@ class HedgeStrategy(BaseStrategy):
                 if self.position_manager.accumulate_mode:
                     if not self.position_manager.can_open('short'):
                         logger.warning("⏳ 开仓操作期间仓位已达阈值，跳过本次开仓")
+                        # 统计次数
+                        self.signal_stats['open']['skipped'] += 1
                         return
                 else:
                     if self.position_manager.has_position():
@@ -562,42 +565,12 @@ class HedgeStrategy(BaseStrategy):
 
         # 判断是否满足平仓阈值
         if spread_pct >= Decimal(str(self.close_threshold_pct)):
+            logger.info(f'当前价差{spread_pct:.2%}满足反向开仓阈值{self.close_threshold_pct:.2%}')
             self.signal_stats['close']['total'] += 1
 
             # 记录信号触发时间
             signal_trigger_time = time.time()
 
-            # ✅ 计算延迟（价格更新 → 信号触发）
-            # signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
-            # signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
-
-            # ✅ 过滤延迟过大的信号
-            # if signal_delay_ms_a > self.max_signal_delay_ms or signal_delay_ms_b > self.max_signal_delay_ms:
-            #     self.signal_stats['close']['delay_filtered'] += 1
-
-            #     # 计算当前盈亏（仅用于日志）
-            #     if position:
-            #         pnl_pct = position.calculate_pnl_pct(
-            #             exchange_a_price=prices.exchange_a_ask,
-            #             exchange_b_price=prices.exchange_b_bid
-            #         )
-            #     else:
-            #         pnl_pct = Decimal('0')
-                
-            #     logger.warning(
-            #         f"⚠️ 反向开仓信号延迟过大，已过滤:\n"
-            #         f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-            #         f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-            #         f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
-            #         f"   {self.exchange_a.exchange_name}_ask_size: {prices.exchange_a_ask_size}\n"
-            #         f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
-            #         f"   {self.exchange_b.exchange_name}_bid_size: {prices.exchange_b_bid_size}\n"
-            #         f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)\n"
-            #         f"   数量: {self.quantity}\n"
-            #         f"   当前盈亏: {pnl_pct:.4f}%\n"
-            #         f"   持仓时长: {position.get_holding_duration() if position else 'N/A'}\n"
-            #     )
-            #     return  # ✅ 丢弃该信号
             # ========== ✅ 新增：检查平仓深度 ==========
             # Exchange A: 买入平空（使用卖一深度）
             depth_a = prices.exchange_a_ask_size
@@ -655,10 +628,9 @@ class HedgeStrategy(BaseStrategy):
 
             # 计算最大延迟
             max_delay_ms = max(signal_delay_ms_a, signal_delay_ms_b)
-            operation_type = "平仓" if position else "反向开仓"
 
             logger.info(
-                f"🔔 {operation_type}信号 #{self.close_signal_count}:\n"
+                f"🔔 检测到反向开仓信号 #{self.close_signal_count}:\n"
                 f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
                 f"   {self.exchange_a.exchange_name}_ask_size: {prices.exchange_a_ask_size}\n"
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
@@ -729,6 +701,8 @@ class HedgeStrategy(BaseStrategy):
                 if self.position_manager.accumulate_mode:
                     if not self.position_manager.can_open('long'):
                         logger.warning("⏳ 反向开仓操作期间超过阈值，跳过本次反向开仓")
+                        # 统计次数
+                        self.signal_stats['close']['skipped'] += 1
                         return
                 else:
                     if not self.position_manager.has_position():
@@ -966,13 +940,15 @@ class HedgeStrategy(BaseStrategy):
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
         adjusted_pct = (stats['depth_adjusted'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
-        
+        skipped_pct = (stats['skipped'] / total * 100) if total > 0 else 0
+
         return (
             f"总信号 {total} | "
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
             f"数量调整 {stats['depth_adjusted']} ({adjusted_pct:.1f}%) | "
-            f"执行 {stats['executed']} ({exec_pct:.1f}%)"
+            f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
+            f"跳过 {stats['skipped']} ({skipped_pct:.1f}%)"
         )
     
     def _format_close_stats(self) -> str:
@@ -986,12 +962,14 @@ class HedgeStrategy(BaseStrategy):
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
-        
+        skipped_pct = (stats['skipped'] / total * 100) if total > 0 else 0
+
         return (
             f"总信号 {total} | "
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
-            f"执行 {stats['executed']} ({exec_pct:.1f}%)"
+            f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
+            f"跳过 {stats['skipped']} ({skipped_pct:.1f}%)"
         )
     
     def _log_stats_if_needed(self):
@@ -1006,7 +984,7 @@ class HedgeStrategy(BaseStrategy):
                     f"\n"
                     f"📊 动态阈值:\n"
                     f"   当前: 开仓{stats.get('current_open', 0):.4f}% "
-                    f"平仓{stats.get('current_close', 0):.4f}% "
+                    f"        平仓{stats.get('current_close', 0):.4f}% "
                     f"(调整{stats['adjustment_count']}次)\n"
                     f"   样本: 开仓{stats['open_samples']} 平仓{stats['close_samples']}\n"
                 )
