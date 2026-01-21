@@ -466,7 +466,8 @@ async def main():
         max_position=max_position,
         direction_reverse=direction_reverse,
         dynamic_threshold=dynamic_threshold,  # ✅ 传递动态阈值配置
-        cooldown_seconds=cooldown_seconds
+        cooldown_seconds=cooldown_seconds,
+        end_time=args.end_time,
     )
     logger.info("✅ 策略创建成功\n")
     # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========
@@ -511,18 +512,19 @@ async def main():
         )
         
         # 保持运行
-        if args.end_time:
-            logger.info(f"⏰ 策略运行至北京时间 {args.end_time}自动停止")
-            end_timestamp = beijing_to_timestamp(args.end_time)
+        # if args.end_time:
+        #     logger.info(f"⏰ 策略运行至北京时间 {args.end_time}自动停止")
+        #     end_timestamp = beijing_to_timestamp(args.end_time)
 
-            while end_timestamp - time.time() > 0:
-                await asyncio.sleep(1)
+        #     while end_timestamp - time.time() > 0:
+        #         await asyncio.sleep(1)
 
-            await strategy.stop()
-        else:
-            while True:
-                await asyncio.sleep(1)
-
+        #     await strategy.stop()
+        # else:
+        #     while True:
+        #         await asyncio.sleep(1)
+        while True:
+            await asyncio.sleep(1)
     except KeyboardInterrupt:
         logger.info("\n👋 收到停止信号")
     
