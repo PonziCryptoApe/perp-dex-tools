@@ -307,7 +307,7 @@ class HedgeStrategy(BaseStrategy):
             if self.end_time_stamp:
                 current_timestamp = time.time()
                 if current_timestamp >= self.end_time_stamp:
-                    logger.info(f"⏰ 达到策略结束时间，停止策略")
+                    logger.info(f"⏰ 达到策略结束时间，开始减仓到0")
                     # 如果仓位不为0，设置最大仓位为0
                     if self.position_manager.get_current_position_qty() != 0:
                         self.position_manager.max_position = 0
@@ -316,7 +316,13 @@ class HedgeStrategy(BaseStrategy):
                         self.position_manager.max_position = 0
                     # 最大仓位为0，并且当前仓位为0，停止策略
                     if self.position_manager.max_position == 0 and self.position_manager.get_current_position_qty() == 0:
-                        logger.info(f"⏰ 达到策略结束时间，停止策略")
+                        logger.info(f"⏰ 达到策略结束时间，仓位减为0，等待5min后拉取B所交易量和权益并停止策略")
+                        await asyncio.sleep(300)  # 等待5分钟
+                        logger.info(f"⏰ 5分钟等待结束，开始获取B所交易量和权益")
+                        # 获取B所的交易量和权益(临时写死，后续写成通用格式)
+                        b_exchange_volume = await self.exchange_b.client.getVariationalVolume()
+                        b_exchange_equity = await self.exchange_b.client.getVariationalBalance()
+                        logger.info(f"📊 B所交易量: {b_exchange_volume}, 权益: {b_exchange_equity}")
                         await self.stop()
 
         except Exception as e:
