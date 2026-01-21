@@ -34,6 +34,7 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 
 setuptools>=80.9.0
+aiolimiter>=1.2.1
 # Nado Python SDK
 nado-protocol>=0.2.7
 psutil>=7.2.1
