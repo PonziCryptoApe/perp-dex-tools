@@ -901,7 +901,7 @@ class LighterAdapter(ExchangeAdapter):
                 logger.info(
                     f"📊 lighter 持仓:\n"
                     f"   Symbol: {position.symbol}\n"
-                    f"   Side: {position.sign}\n"
+                    f"   Side: {'long' if position.sign == 1 else 'short'}\n"
                     f"   Size: {position.position}\n"
                     f"   Entry Price: ${position.avg_entry_price}"
                 )
@@ -916,7 +916,7 @@ class LighterAdapter(ExchangeAdapter):
                 logger.info(f"📊 {self.exchange_name} 无持仓: {symbol}")
                 return {
                     'symbol': symbol,
-                    'side': '--',
+                    'side': 'neutral',
                     'size': 0,
                     'entry_price': '--',
                     'unrealized_pnl': 0,

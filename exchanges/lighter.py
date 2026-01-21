@@ -569,15 +569,6 @@ class LighterClient(BaseExchangeClient):
         return self.config.contract_id, self.config.tick_size
     
     async def get_portfolio(self):
-        # balance_info = await self.perpetual_trading_client.account.get_balance()
-        # if balance_info and balance_info.data:
-        #     self.logger.log(f'balance: {balance_info.data}')
-        #     return {
-        #         'balance': balance_info.data.balance,
-        #         'upnl': balance_info.data.unrealised_pnl
-        #     }
-        # else:
-        #     return None
         balance_info = await self._fetch_accounts_with_retry()
         return {
                 'balance': balance_info.available_balance,

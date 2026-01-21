@@ -1673,6 +1673,29 @@ class OrderExecutor:
                     retry_mode='aggressive',
                     max_retries=5
                 )
+            elif pos_b_side == 'neutral':
+                if pos_a_side == 'long':
+                    logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {diff_size} {symbol_a} 以平衡仓位")
+                    await self._retry_place_order(
+                        exchange=self.exchange_a,
+                        order_type='open',
+                        side='sell',
+                        quantity=diff_size,
+                        price=exchange_a_bid_price,
+                        retry_mode='aggressive',
+                        max_retries=5
+                    )
+                elif pos_a_side == 'short':
+                    logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol_a} 以平衡仓位")
+                    await self._retry_place_order(
+                        exchange=self.exchange_a,
+                        order_type='close',
+                        side='buy',
+                        quantity=diff_size,
+                        price=exchange_a_ask_price,
+                        retry_mode='aggressive',
+                        max_retries=5
+                    )
         if pos_b_size > pos_a_size:
             diff_size = pos_b_size - pos_a_size
             if pos_a_side == 'short' and pos_b_side == 'long':
@@ -1721,6 +1744,30 @@ class OrderExecutor:
                     retry_mode='aggressive',
                     max_retries=5
                 )
+            elif pos_a_side == 'neutral':
+                if pos_b_side == 'long':
+                    logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {pos_b_size} {symbol_b} 以平衡仓位")
+                    await self._retry_place_order(
+                        exchange=self.exchange_a,
+                        order_type='open',
+                        side='sell',
+                        quantity=pos_b_size,
+                        price=exchange_a_bid_price,
+                        retry_mode='aggressive',
+                        max_retries=5
+                    )
+                elif pos_b_side == 'short':
+                    logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_b_size} {symbol_b} 以平衡仓位")
+                    await self._retry_place_order(
+                        exchange=self.exchange_a,
+                        order_type='close',
+                        side='buy',
+                        quantity=pos_b_size,
+                        price=exchange_a_ask_price,
+                        retry_mode='aggressive',
+                        max_retries=5
+                    )
+
         pos_a = await self.exchange_a.get_position(symbol_a)
         pos_b = await self.exchange_b.get_position(symbol_b)
         pos_a_size = pos_a['size'] if pos_a else Decimal('0')
@@ -1731,7 +1778,7 @@ class OrderExecutor:
                     f": {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}")
         if pos_a_size == pos_b_size and pos_a_size == 0:
             logger.info("✅ 仓位检测后实现仓位平衡，无需调整")
-        elif pos_a_size == pos_b_size and pos_a_side != pos_b_side:
+        elif pos_a_size == pos_b_size and ((pos_a_side == 'long' and pos_b_side == 'short') or (pos_a_side == 'short' and pos_b_side == 'long')):
             logger.info("✅ 仓位检测后实现仓位平衡，无需调整")
         else:
             logger.error("❌ 仓位检测后仓位仍不平衡，请手动检查")

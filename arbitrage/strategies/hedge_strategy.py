@@ -1,6 +1,7 @@
 """对冲套利策略"""
 
 import asyncio
+from aiolimiter import AsyncLimiter
 from datetime import datetime
 import logging
 import random
@@ -64,6 +65,11 @@ class HedgeStrategy(BaseStrategy):
         self.direction_reverse = direction_reverse
         self.cooldown_seconds = cooldown_seconds
         self.cooldown_range = cooldown_range
+
+        # ✅ 新增：下单限流器（每60秒最多40次）
+        self.limiter_rate = 30  # 可配置
+        self.limiter_period = 60  # 秒
+        self.order_limiter = AsyncLimiter(self.limiter_rate, self.limiter_period)
 
         # ✅ 使用 PositionManagerService 管理持仓
         self.position_manager = PositionManagerService(
@@ -457,7 +463,17 @@ class HedgeStrategy(BaseStrategy):
                     if self.position_manager.has_position():
                         logger.warning("⏳ 开仓操作期间已有持仓，跳过本次开仓")
                         return
-                
+                    
+                if self.order_limiter:
+                    start_time = time.time()
+                    async with self.order_limiter:
+                        await asyncio.sleep(0.001)
+                    end_time = time.time()
+                    wait_time = end_time - start_time
+                    if wait_time > 0.02: # 超过20毫秒视为限流等待
+                        logger.info(f"⏳ 开仓操作等待限流器: {wait_time*1000:.2f} ms")
+                        return
+
                 self._is_executing = True
                 # if self.position_manager.has_position():
                 #     logger.warning("⏳ 开仓操作期间已有持仓，跳过本次开仓")
@@ -707,6 +723,16 @@ class HedgeStrategy(BaseStrategy):
                 else:
                     if not self.position_manager.has_position():
                         logger.warning("⏳ 获取锁后发现持仓已清空，取消平仓")
+                        return
+                    
+                if self.order_limiter:
+                    start_time = time.time()
+                    async with self.order_limiter:
+                        await asyncio.sleep(0.001)
+                    end_time = time.time()
+                    wait_time = end_time - start_time
+                    if wait_time > 0.02: # 超过20毫秒视为限流等待
+                        logger.info(f"⏳ 反向开仓操作等待限流器: {wait_time*1000:.2f} ms")
                         return
                 self._is_executing = True
 

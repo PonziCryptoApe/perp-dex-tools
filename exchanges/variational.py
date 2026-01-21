@@ -888,7 +888,13 @@ class VariationalClient(BaseExchangeClient):
                     # ✅ 无持仓
                     if size == 0:
                         self.logger.log(f"Found {symbol} position but size is 0", "DEBUG")
-                        return None
+                        return {
+                            'symbol': symbol,
+                            'side': 'neutral',
+                            'size': 0,
+                            'entry_price': '--',
+                            'unrealized_pnl': 0
+                        }
                     
                     # ✅ 判断多空方向
                     side = 'short' if size < 0 else 'long'
@@ -922,7 +928,7 @@ class VariationalClient(BaseExchangeClient):
             self.logger.log(f"No position found for {symbol}", "DEBUG")
             return {
                 'symbol': symbol,
-                'side': '--',
+                'side': None,
                 'size': 0,
                 'entry_price': '--',
                 'unrealized_pnl': 0
