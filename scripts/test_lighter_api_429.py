@@ -67,7 +67,7 @@ async def test_place_429(client: LighterClient, quantity: Decimal, side: str, be
     result = await client.place_limit_order(CONFIG['contract_id'], quantity, test_price, side)
     print(f"下单结果: {result}")
     placement_end = time.time()
-    if not result.get('success'):
+    if not result.success:
         print("下单失败")
         raise Exception("下单失败")
     print(f"下单价格: {test_price}, 数量: {quantity}, 方向: {side}")
