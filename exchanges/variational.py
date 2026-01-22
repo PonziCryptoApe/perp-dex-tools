@@ -928,7 +928,7 @@ class VariationalClient(BaseExchangeClient):
             self.logger.log(f"No position found for {symbol}", "DEBUG")
             return {
                 'symbol': symbol,
-                'side': None,
+                'side': 'neutral',
                 'size': 0,
                 'entry_price': '--',
                 'unrealized_pnl': 0

@@ -68,16 +68,17 @@ class HedgeStrategy(BaseStrategy):
         self.direction_reverse = direction_reverse
         self.cooldown_seconds = cooldown_seconds
         self.cooldown_range = cooldown_range
+        self.signal_total = 0
+        self.signal_delay = 0
 
         # ✅ 新增：结束时间
         self.end_time_stamp = None
         if end_time:
             self.end_time_stamp = beijing_to_timestamp(end_time)
 
-        # ✅ 新增：下单限流器（每60秒最多40次）
-        self.limiter_rate = 30  # 可配置
-        self.limiter_period = 60  # 秒
-        self.order_limiter = AsyncLimiter(self.limiter_rate, self.limiter_period)
+        # ✅ 新增：下单限流器（每60秒最多35次）
+        self.order_limiter_a = AsyncLimiter(35, 60)
+        self.order_limiter_b = AsyncLimiter(600, 60)
 
         # ✅ 使用 PositionManagerService 管理持仓
         self.position_manager = PositionManagerService(
@@ -100,7 +101,9 @@ class HedgeStrategy(BaseStrategy):
             exchange_a=exchange_a,
             exchange_b=exchange_b,
             quantity=quantity,
-            quantity_precision=quantity_precision
+            quantity_precision=quantity_precision,
+            order_limiter_a=self.order_limiter_a,
+            order_limiter_b=self.order_limiter_b
         )
         
         # 持仓管理
@@ -127,7 +130,8 @@ class HedgeStrategy(BaseStrategy):
                 'delay_filtered': 0,     # 因延迟过滤
                 'depth_insufficient': 0, # 因深度不足跳过
                 'depth_adjusted': 0,     # 因深度调整数量
-                'limited': 0,            # 因限流跳过
+                'limited_a': 0,            # 因限流跳过
+                'limited_b': 0,            # 因限流跳过
                 'skipped': 0,            # 因仓位达到上限跳过
                 'executed': 0            # 实际执行
             },
@@ -137,7 +141,8 @@ class HedgeStrategy(BaseStrategy):
                 'delay_filtered': 0,
                 'depth_insufficient': 0,
                 'depth_adjusted': 0,
-                'limited': 0,
+                'limited_a': 0,
+                'limited_b': 0,
                 'skipped': 0,
                 'executed': 0
             }
@@ -222,113 +227,114 @@ class HedgeStrategy(BaseStrategy):
         - 无持仓时：只检查开仓信号
         - 有持仓时：只检查平仓信号
         """
-        if not self.is_running:
-            return
-        is_stale, stale_msg = self.monitor.is_orderbook_stale(self.max_signal_delay_ms / 1000)
-        if is_stale:
-            # logger.warning(f"⚠️ 订单簿过时，丢弃信号: {stale_msg}")
-            return
-        try:
-            # ✅ 记录价格更新的时间
-            price_update_time_a = prices.exchange_a_timestamp
-            price_update_time_b = prices.exchange_b_timestamp
+        while self.is_running:
+            is_stale, stale_msg = self.monitor.is_orderbook_stale(self.max_signal_delay_ms / 1000)
+            if is_stale:
+                # logger.warning(f"⚠️ 订单簿过时，丢弃信号: {stale_msg}")
+                return
+            try:
+                # ✅ 记录价格更新的时间
+                price_update_time_a = prices.exchange_a_timestamp
+                price_update_time_b = prices.exchange_b_timestamp
 
-            # 记录信号触发时间
-            signal_trigger_time = time.time()
-            signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
-            signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
-        
-            signal_flag = False
-            # ✅ 过滤延迟过大的信号
-            if signal_delay_ms_a <= self.max_signal_delay_ms and signal_delay_ms_b <= self.max_signal_delay_ms:
-                signal_flag = True
-            else:
-                logger.warning(f"⚠️ 信号延迟过大: A {signal_delay_ms_a:.2f} ms（阈值: {self.max_signal_delay_ms} ms），"
-                               f" B {signal_delay_ms_b:.2f} ms（阈值: {self.max_signal_delay_ms} ms）")
-                return  # 丢弃该信号
-            # 计算价差
-            spread_pct = prices.calculate_spread_pct()
-            reverse_spread_pct = prices.calculate_reverse_spread_pct()
-            # if self._last_threshold_check_time is None:
-                # self._last_threshold_check_time = time.time()
-            # now = time.time()
-            # ✅ 新增：记录价差并尝试调整阈值
-            if self.threshold_manager and signal_flag:
-                # 添加数据
-                self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
-                
-                # 尝试调整
-                current_qty = self.position_manager.get_current_position_qty()
-                new_open, new_close = self.threshold_manager.try_adjust(
-                    current_qty, 
-                    self.position_manager.max_position
-                )
-                
-                # 更新阈值
-                if new_open is not None:
-                    self.open_threshold_pct = new_open
-                    self.close_threshold_pct = new_close
-                else:
-                    return
-
-            if self.position_manager.accumulate_mode:
-                current_qty = self.position_manager.get_current_position_qty()
-                logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
-                if current_qty < 0:
-                    # ✅ 优先检查平仓信号（如果可以平仓）
-                    await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
-
-                    # ✅ 如果正在执行，跳过开仓检查
-                    if self._executing_lock.locked():
-                        return
+                # 记录信号触发时间
+                signal_trigger_time = time.time()
+                signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
+                signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
             
-                    # ✅ 检查开仓信号（如果可以开仓）
-                    await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                signal_flag = False
+                self.signal_total += 1
+                # ✅ 过滤延迟过大的信号
+                if signal_delay_ms_a <= self.max_signal_delay_ms and signal_delay_ms_b <= self.max_signal_delay_ms:
+                    signal_flag = True
                 else:
-                    # ✅ 优先检查平仓信号（如果可以平仓）
-                    await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    self.signal_delay += 1
+                    logger.warning(f"⚠️ 信号延迟过大: A {signal_delay_ms_a:.2f} ms（阈值: {self.max_signal_delay_ms} ms），"
+                                f" B {signal_delay_ms_b:.2f} ms（阈值: {self.max_signal_delay_ms} ms）")
+                    return  # 丢弃该信号
+                # 计算价差
+                spread_pct = prices.calculate_spread_pct()
+                reverse_spread_pct = prices.calculate_reverse_spread_pct()
+                # if self._last_threshold_check_time is None:
+                    # self._last_threshold_check_time = time.time()
+                # now = time.time()
+                # ✅ 新增：记录价差并尝试调整阈值
+                if self.threshold_manager and signal_flag:
+                    # 添加数据
+                    self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
+                    
+                    # 尝试调整
+                    current_qty = self.position_manager.get_current_position_qty()
+                    new_open, new_close = self.threshold_manager.try_adjust(
+                        current_qty, 
+                        self.position_manager.max_position
+                    )
+                    
+                    # 更新阈值
+                    if new_open is not None:
+                        self.open_threshold_pct = new_open
+                        self.close_threshold_pct = new_close
+                    else:
+                        return
+
+                if self.position_manager.accumulate_mode:
+                    current_qty = self.position_manager.get_current_position_qty()
+                    logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f}")
+                    if current_qty < 0:
+                        # ✅ 优先检查平仓信号（如果可以平仓）
+                        await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
 
                         # ✅ 如果正在执行，跳过开仓检查
-                    if self._executing_lock.locked():
-                        return
+                        if self._executing_lock.locked():
+                            return
                 
-                    # ✅ 检查开仓信号（如果可以开仓）
-                    await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
-                
-            else:
-                # ✅ 根据持仓状态决定检查哪种信号
-                if not self.position_manager.has_position():
-                    # 无持仓，检查开仓信号
-                    await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
-                else:
-                    # 有持仓，检查平仓信号
-                    await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
-            
-            if self.end_time_stamp:
-                current_timestamp = time.time()
-                if current_timestamp >= self.end_time_stamp:
-                    logger.info(f"⏰ 达到策略结束时间，开始减仓到0")
-                    # 如果仓位不为0，设置最大仓位为0
-                    if self.position_manager.get_current_position_qty() != 0:
-                        self.position_manager.max_position = 0
-                    # 如果最大仓位不为0，设置最大仓位为0
-                    if self.position_manager.max_position != 0:
-                        self.position_manager.max_position = 0
-                    # 最大仓位为0，并且当前仓位为0，停止策略
-                    if self.position_manager.max_position == 0 and self.position_manager.get_current_position_qty() == 0:
-                        logger.info(f"⏰ 达到策略结束时间，仓位减为0，等待5min后拉取B所交易量和权益并停止策略")
-                        await asyncio.sleep(300)  # 等待5分钟
-                        logger.info(f"⏰ 5分钟等待结束，开始获取B所交易量和权益")
-                        # 获取B所的交易量和权益(临时写死，后续写成通用格式)
-                        b_exchange_volume = await self.exchange_b.client.getVariationalVolume()
-                        b_exchange_equity = await self.exchange_b.client.getVariationalBalance()
-                        logger.info(f"📊 B所交易量: {b_exchange_volume}, 权益: {b_exchange_equity}")
-                        await self.stop()
+                        # ✅ 检查开仓信号（如果可以开仓）
+                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    else:
+                        # ✅ 优先检查平仓信号（如果可以平仓）
+                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
 
-        except Exception as e:
-            logger.error(f"❌ 价格更新处理失败: {e}")
-            import traceback
-            traceback.print_exc()
+                            # ✅ 如果正在执行，跳过开仓检查
+                        if self._executing_lock.locked():
+                            return
+                    
+                        # ✅ 检查开仓信号（如果可以开仓）
+                        await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    
+                else:
+                    # ✅ 根据持仓状态决定检查哪种信号
+                    if not self.position_manager.has_position():
+                        # 无持仓，检查开仓信号
+                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    else:
+                        # 有持仓，检查平仓信号
+                        await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                
+                if self.end_time_stamp:
+                    current_timestamp = time.time()
+                    if current_timestamp >= self.end_time_stamp:
+                        logger.info(f"⏰ 达到策略结束时间，开始减仓到0")
+                        # 如果仓位不为0，设置最大仓位为0
+                        if self.position_manager.get_current_position_qty() != 0:
+                            self.position_manager.max_position = 0
+                        # 如果最大仓位不为0，设置最大仓位为0
+                        if self.position_manager.max_position != 0:
+                            self.position_manager.max_position = 0
+                        # 最大仓位为0，并且当前仓位为0，停止策略
+                        if self.position_manager.max_position == 0 and self.position_manager.get_current_position_qty() == 0:
+                            logger.info(f"⏰ 达到策略结束时间，仓位减为0，等待5min后拉取B所交易量和权益并停止策略")
+                            await asyncio.sleep(300)  # 等待5分钟
+                            logger.info(f"⏰ 5分钟等待结束，开始获取B所交易量和权益")
+                            # 获取B所的交易量和权益(临时写死，后续写成通用格式)
+                            b_exchange_volume = await self.exchange_b.client.getVariationalVolume()
+                            b_exchange_equity = await self.exchange_b.client.getVariationalBalance()
+                            logger.info(f"📊 B所交易量: {b_exchange_volume:.2f}, 权益: {b_exchange_equity:.2f}")
+                            await self.stop()
+
+            except Exception as e:
+                logger.error(f"❌ 价格更新处理失败: {e}")
+                import traceback
+                traceback.print_exc()
 
     async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
@@ -492,17 +498,25 @@ class HedgeStrategy(BaseStrategy):
                         logger.warning("⏳ 开仓操作期间已有持仓，跳过本次开仓")
                         return
                     
-                if self.order_limiter:
-                    start_time = time.time()
-                    async with self.order_limiter:
-                        await asyncio.sleep(0.001)
-                    end_time = time.time()
-                    wait_time = end_time - start_time
-                    if wait_time > 0.02: # 超过20毫秒视为限流等待
-                        logger.info(f"⏳ 开仓操作等待限流器: {wait_time*1000:.2f} ms")
-                        self.signal_stats['open']['limited'] += 1
+                if self.order_limiter_a:
+                    if self.order_limiter_a.has_capacity():
+                        logger.info(f"✅ 开仓操作通过限流器（Exchange A）")
+                        await self.order_limiter_a.acquire()
+                        logger.info(f"✅ 开仓操作已通过限流器（Exchange A）")
+                    else:
+                        logger.info(f"⏳ 开仓操作限流器限流中，直接返回（Exchange A）")
+                        self.signal_stats['open']['limited_a'] += 1
                         return
-
+                if self.order_limiter_b:
+                    if self.order_limiter_b.has_capacity():
+                        logger.info(f"✅ 开仓操作通过限流器（Exchange B）")
+                        await self.order_limiter_b.acquire()
+                        logger.info(f"✅ 开仓操作已通过限流器（Exchange B）")
+                    else:
+                        logger.info(f"⏳ 开仓操作限流器限流中，直接返回（Exchange B）")
+                        self.signal_stats['open']['limited_b'] += 1
+                        return
+                    
                 self._is_executing = True
                 # if self.position_manager.has_position():
                 #     logger.warning("⏳ 开仓操作期间已有持仓，跳过本次开仓")
@@ -754,15 +768,23 @@ class HedgeStrategy(BaseStrategy):
                         logger.warning("⏳ 获取锁后发现持仓已清空，取消平仓")
                         return
                     
-                if self.order_limiter:
-                    start_time = time.time()
-                    async with self.order_limiter:
-                        await asyncio.sleep(0.001)
-                    end_time = time.time()
-                    wait_time = end_time - start_time
-                    if wait_time > 0.02: # 超过20毫秒视为限流等待
-                        self.signal_stats['close']['limited'] += 1
-                        logger.info(f"⏳ 反向开仓操作等待限流器: {wait_time*1000:.2f} ms")
+                if self.order_limiter_a:
+                    if self.order_limiter_a.has_capacity():
+                        logger.info(f"✅ 反向开仓操作开始通过限流器（Exchange A）")
+                        await self.order_limiter_a.acquire()
+                        logger.info(f"✅ 反向开仓操作已通过限流器（Exchange A）")
+                    else:
+                        logger.info(f"⏳ 反向开仓操作限流器限流中，直接返回（Exchange A）")
+                        self.signal_stats['close']['limited_a'] += 1
+                        return
+                if self.order_limiter_b:
+                    if self.order_limiter_b.has_capacity():
+                        logger.info(f"✅ 反向开仓操作开始通过限流器（Exchange B）")
+                        await self.order_limiter_b.acquire()
+                        logger.info(f"✅ 反向开仓操作已通过限流器（Exchange B）")
+                    else:
+                        logger.info(f"⏳ 反向开仓操作限流器限流中，直接返回（Exchange B）")
+                        self.signal_stats['close']['limited_b'] += 1
                         return
                 self._is_executing = True
 
@@ -996,7 +1018,8 @@ class HedgeStrategy(BaseStrategy):
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
         adjusted_pct = (stats['depth_adjusted'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
-        limited_pct = (stats['limited'] / total * 100) if total > 0 else 0
+        limited_a_pct = (stats['limited_a'] / total * 100) if total > 0 else 0
+        limited_b_pct = (stats['limited_b'] / total * 100) if total > 0 else 0
         skipped_pct = (stats['skipped'] / total * 100) if total > 0 else 0
 
         return (
@@ -1005,7 +1028,8 @@ class HedgeStrategy(BaseStrategy):
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
             # f"数量调整 {stats['depth_adjusted']} ({adjusted_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
-            f"限流 {stats['limited']} ({limited_pct:.1f}%) | "
+            f"限流A {stats['limited_a']} ({limited_a_pct:.1f}%) | "
+            f"限流B {stats['limited_b']} ({limited_b_pct:.1f}%) | "
             f"跳过 {stats['skipped']} ({skipped_pct:.1f}%)"
         )
     
@@ -1020,16 +1044,20 @@ class HedgeStrategy(BaseStrategy):
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
-        limited_pct = (stats['limited'] / total * 100) if total > 0 else 0
+        limited_a_pct = (stats['limited_a'] / total * 100) if total > 0 else 0
+        limited_b_pct = (stats['limited_b'] / total * 100) if total > 0 else 0
         skipped_pct = (stats['skipped'] / total * 100) if total > 0 else 0
+        sample_time_length = self.threshold_manager.get_time_length() if self.threshold_manager else 0
 
         return (
             f"总信号 {total} | "
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
-            f"限流 {stats['limited']} ({limited_pct:.1f}%) | "
-            f"跳过 {stats['skipped']} ({skipped_pct:.1f}%)"
+            f"限流A {stats['limited_a']} ({limited_a_pct:.1f}%) | "
+            f"限流B {stats['limited_b']} ({limited_b_pct:.1f}%) | "
+            f"跳过 {stats['skipped']} ({skipped_pct:.1f}%) | "
+            f"样本时间长度 {sample_time_length:.2f} 秒"
         )
     
     def _log_stats_if_needed(self):
@@ -1059,6 +1087,8 @@ class HedgeStrategy(BaseStrategy):
                 f"🔴 平仓信号:\n"
                 f"   {self._format_close_stats()}\n"
                 f"{threshold_info}"
+                f" 总信号个数: {self.signal_total}\n"
+                f" 延迟信号个数: {self.signal_delay}\n"
                 f"{'='*60}"
             )
             self._last_stats_log_time = current_time

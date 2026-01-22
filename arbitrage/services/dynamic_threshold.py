@@ -53,6 +53,7 @@ class DynamicThresholdManager:
         # ✅ 数据存储：固定容量，自动保持最新数据
         self.open_spreads = deque(maxlen=sample_size)
         self.close_spreads = deque(maxlen=sample_size)
+        self.time_spreads = deque(maxlen=sample_size)
         self.time_sample_start = None
         self.time_sample_end = None
         
@@ -168,6 +169,7 @@ class DynamicThresholdManager:
         # ✅ deque 会自动移除最早的数据（当达到 maxlen 时）
         self.open_spreads.append(float(open_spread))
         self.close_spreads.append(float(close_spread))
+        self.time_spreads.append(time.time())
         self.total_samples_added += 1
         if self.total_samples_added == 1:
             self.time_sample_start = time.time()
@@ -390,7 +392,11 @@ class DynamicThresholdManager:
             'close_max': float(np.max(close_values)),
             'status': 'active'
         }
-    
+    def get_time_length(self) -> float:
+        if len(self.time_spreads) >= self.sample_size:
+            return self.time_spreads[-1] - self.time_spreads[0]
+        return 0.0
+
     def export_all_data(self, output_dir: Optional[str] = None):
         """
         导出所有数据（价差 + 调整记录 + 统计摘要）
