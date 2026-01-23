@@ -571,7 +571,7 @@ class LighterClient(BaseExchangeClient):
     async def get_portfolio(self):
         balance_info = await self._fetch_accounts_with_retry()
         return {
-                'balance': balance_info.available_balance,
+                'balance': balance_info.collateral,
                 'upnl': '-'
             }
     @query_retry(reraise=True)
