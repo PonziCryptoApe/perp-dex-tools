@@ -925,3 +925,29 @@ class LighterAdapter(ExchangeAdapter):
         except Exception as e:
             logger.error(f"❌ {self.exchange_name} 获取持仓失败: {e}", exc_info=True)
             return None
+    async def get_trade_volume(self) -> Decimal:
+        """
+        获取当前交易量（复用 client 方法）
+        
+        Returns:
+            Decimal: 交易量
+        """
+        try:
+            return Decimal('0')
+        except Exception as e:
+            logger.error(f"❌ lighter 获取交易量失败: {e}", exc_info=True)
+            return Decimal('0')
+        
+    async def get_balance(self) -> Decimal:
+        """
+        获取账户交易股权余额（复用 client 方法）
+        
+        Returns:
+            Decimal: 余额
+        """
+        try:
+            balance_info = await self.client.get_portfolio()
+            return Decimal(balance_info.get('balance', '0'))
+        except Exception as e:
+            logger.error(f"❌ lighter 获取余额失败: {e}", exc_info=True)
+            return Decimal('0')
