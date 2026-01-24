@@ -809,13 +809,13 @@ class VariationalAdapter(ExchangeAdapter):
         ✅ 参考 hedge_mode_var.py:order_update_handler()
         """
         try:
-            logger.debug(f"📊 WebSocket 持仓更新: positions={positions}")
-            logger.debug(f"📊 当前状态: position_is_full={self.position_is_full}, "
+            # logger.info(f"📊 WebSocket 持仓更新: positions={positions}")
+            logger.info(f"📊 当前状态: position_is_full={self.position_is_full}, "
                              f"current_order_id={getattr(self, 'current_order_id', None)}")
 
             # ✅ 初始状态：仓位为空
             if not positions and self.position_is_full is False:
-                logger.debug("初始状态，持仓为空，无需处理")
+                logger.info("初始状态，持仓为空，无需处理")
                 return
             
             # ✅ 平仓成功
@@ -843,7 +843,7 @@ class VariationalAdapter(ExchangeAdapter):
                 # ✅ 部分成交
                 if Decimal('0') < self.position_size < self.query_quantity and not self.position_is_full:
                     self.order_status = 'PARTIALLY_FILLED'
-                    logger.info(f"部分成交: {self.position_size} / {self.query_quantity}")
+                    logger.info(f"{self.current_order_id} 部分成交: {self.position_size} / {self.query_quantity}")
                     return
                 
                 # ✅ 完全成交
@@ -852,7 +852,7 @@ class VariationalAdapter(ExchangeAdapter):
                     self.order_status = 'FILLED'
                     
                     price = Decimal(position_data.get('position_info', {"avg_entry_price": "0"}).get('avg_entry_price', '0'))
-                    logger.info(f"✅ 完全成交: {self.query_quantity} @ {price}")
+                    logger.info(f"✅ {self.current_order_id} 完全成交: {self.query_quantity} @ {price}")
                     # ✅ 通知等待者
                     if hasattr(self, 'current_order_id') and self.current_order_id:
                         if not hasattr(self, '_order_final_status'):
