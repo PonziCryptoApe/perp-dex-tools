@@ -257,7 +257,7 @@ class PriceMonitorService:
         """交易所 A 订单簿更新"""
         self.orderbook_a = orderbook
         self.orderbook_a_updates += 1
-        self.last_orderbook_a_time = time.time()
+        self.last_orderbook_a_time = time.time() # 上一次得到订单薄的本地时间
         
         # 记录详细日志（仅在 DEBUG 模式）
         if logger.isEnabledFor(logging.DEBUG):
@@ -276,7 +276,7 @@ class PriceMonitorService:
         """交易所 B 订单簿更新"""
         self.orderbook_b = orderbook
         self.orderbook_b_updates += 1
-        self.last_orderbook_b_time = time.time()
+        self.last_orderbook_b_time = time.time() # 上一次得到订单薄的本地时间
         
         # 记录详细日志（仅在 DEBUG 模式）
         if logger.isEnabledFor(logging.DEBUG):
