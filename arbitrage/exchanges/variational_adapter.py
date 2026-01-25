@@ -453,8 +453,8 @@ class VariationalAdapter(ExchangeAdapter):
                 logger.info(f" 等待200ms后获取订单{rfq_id} 状态...")
                 await asyncio.sleep(0.2)  # 确保状态更新完成
                 
-                max_order_retries = 20
-                retry_interval = 0.01  # 5 ms
+                max_order_retries = 40
+                retry_interval = 0.01  # 10 ms
                 order_data = None
                 final_status = None
                 retries = 0
@@ -474,6 +474,7 @@ class VariationalAdapter(ExchangeAdapter):
                                 break
 
                         if attempt_idx < max_order_retries - 1:
+                            retry_interval = 0.01 if attempt_idx < 10 else 0.05
                             logger.info(f"⏳ 订单 {rfq_id} 尚未入库，{retry_interval}s 后重试 ({attempt_idx + 1}/{max_order_retries})")
                             await asyncio.sleep(retry_interval)
                     except Exception as e:
@@ -810,8 +811,8 @@ class VariationalAdapter(ExchangeAdapter):
         """
         try:
             # logger.info(f"📊 WebSocket 持仓更新: positions={positions}")
-            logger.info(f"📊 当前状态: position_is_full={self.position_is_full}, "
-                             f"current_order_id={getattr(self, 'current_order_id', None)}")
+            # logger.info(f"📊 当前状态: position_is_full={self.position_is_full}, "
+            #                  f"current_order_id={getattr(self, 'current_order_id', None)}")
 
             # ✅ 初始状态：仓位为空
             if not positions and self.position_is_full is False:

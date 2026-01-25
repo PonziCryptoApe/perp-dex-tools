@@ -516,7 +516,7 @@ class HedgeStrategy(BaseStrategy):
                         
                         if not is_consistent:
                             logger.warning(f"⚠️ 开仓后仓位校验不一致，已自动修正")           
-                        logger.info("🔍 反向开仓后检查仓位平衡...")
+                        logger.info("🔍 开仓后检查仓位平衡...")
                         await self.executor.check_position_balance()
 
                         # 发送飞书通知
