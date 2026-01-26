@@ -816,7 +816,7 @@ class VariationalAdapter(ExchangeAdapter):
 
             # ✅ 初始状态：仓位为空
             if not positions and self.position_is_full is False:
-                logger.info("初始状态，持仓为空，无需处理")
+                # logger.info("初始状态，持仓为空，无需处理")
                 return
             
             # ✅ 平仓成功

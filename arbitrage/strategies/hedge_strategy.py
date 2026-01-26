@@ -6,6 +6,8 @@ from datetime import datetime
 import logging
 import random
 import time
+import yaml
+import os
 from decimal import Decimal
 from typing import Optional
 
@@ -70,6 +72,12 @@ class HedgeStrategy(BaseStrategy):
         self.cooldown_range = cooldown_range
         self.signal_total = 0
         self.signal_delay = 0
+
+        self.start_vol_a = 0
+        self.start_equity_a = 0
+        self.start_vol_b = 0
+        self.start_equity_b = 0
+        self.config_yaml_path = "./arbitrage/config/config.yaml"
 
         # ✅ 新增：结束时间
         self.end_time_stamp = None
@@ -150,6 +158,10 @@ class HedgeStrategy(BaseStrategy):
         # ✅ 定期输出统计（可选）
         self._last_stats_log_time = 0
         self._stats_log_interval = 60  # 每 60 秒输出一次统计
+        self._equity_log_interval = 15 * 60  # 每 15 分钟输出一次权益和交易量
+        self._last_equity_log_time = None
+        self._last_yaml_check_time = None
+        self._yaml_check_interval = 60  # 每 60 秒检查一次 YAML 配置文件
         # self._last_threshold_check_time = None
         # 动态阈值管理器
         dt_config = dynamic_threshold
@@ -201,7 +213,12 @@ class HedgeStrategy(BaseStrategy):
                 )
             else:
                 logger.warning("⚠️ 仓位同步失败，使用初始值 0")
-        
+        logger.info("🔍 开始获取初始权益和交易量")
+        a_exchange_volume, a_exchange_equity, b_exchange_volume, b_exchange_equity = await self.get_equity_and_volume()
+        self.start_vol_a = a_exchange_volume
+        self.start_equity_a = a_exchange_equity
+        self.start_vol_b = b_exchange_volume
+        self.start_equity_b = b_exchange_equity
         # 订阅价格更新
         self.monitor.subscribe(self._on_price_update)
         
@@ -220,7 +237,17 @@ class HedgeStrategy(BaseStrategy):
         await self.monitor.stop()
         
         logger.info(f"✅ 策略已停止: {self.strategy_name}")
-    
+
+    async def get_equity_and_volume(self):
+        """获取交易所的权益和交易量"""
+        a_exchange_volume = await self.exchange_a.get_trade_volume()
+        a_exchange_equity = await self.exchange_a.get_balance()
+        b_exchange_volume = await self.exchange_b.get_trade_volume()
+        b_exchange_equity = await self.exchange_b.get_balance()
+        logger.info(f"📊 A所交易量: '----', 权益: {a_exchange_equity:.2f}")
+        logger.info(f"📊 B所交易量: {b_exchange_volume:.2f}, 权益: {b_exchange_equity:.2f}")
+        return a_exchange_volume, a_exchange_equity, b_exchange_volume, b_exchange_equity
+
     async def _on_price_update(self, prices: PriceSnapshot):
         """
         处理价格更新
@@ -328,14 +355,13 @@ class HedgeStrategy(BaseStrategy):
                         logger.info(f"⏰ 达到策略结束时间，仓位减为0，等待5min后拉取B所交易量和权益并停止策略")
                         await asyncio.sleep(300)  # 等待5分钟
                         logger.info(f"⏰ 5分钟等待结束，开始获取B所交易量和权益")
-                        # 获取A所的交易量和权益
-                        a_exchange_volume = await self.exchange_a.get_trade_volume()
-                        a_exchange_equity = await self.exchange_a.get_balance()
-                        logger.info(f"📊 A所交易量: ---, 权益: {a_exchange_equity:.2f}")
-                        # 获取B所的交易量和权益
-                        b_exchange_volume = await self.exchange_b.get_trade_volume()
-                        b_exchange_equity = await self.exchange_b.get_balance()
-                        logger.info(f"📊 B所交易量: {b_exchange_volume:.2f}, 权益: {b_exchange_equity:.2f}")
+
+                        volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
+                        logger.info(
+                            f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f}"
+                            f"   预估损耗: ${((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2):.2f}"
+                        )
+                        
                         await self.stop()
 
         except Exception as e:
@@ -536,9 +562,12 @@ class HedgeStrategy(BaseStrategy):
                                 f"(开仓阈值: {self.open_threshold_pct}%) - 监控开仓中..."
                             )
                             self.last_log_time = current_time
+                    self.check_yaml_config_updates()
+
                 finally:
                     self._is_executing = False
             self._log_stats_if_needed()
+            await self._log_equity_and_volume_if_needed()
 
     async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
@@ -765,9 +794,37 @@ class HedgeStrategy(BaseStrategy):
                                 f"(反向开仓阈值: {self.close_threshold_pct}%) - 监控反向开仓中..."
                             )
                             self.last_log_time = current_time
+                    self.check_yaml_config_updates()
                 finally:
                     self._is_executing = False
             self._log_stats_if_needed()
+            await self._log_equity_and_volume_if_needed()
+
+    def check_yaml_config_updates(self):
+        """检查 YAML 配置文件更新"""
+        current_path = os.getcwd()
+        config_path = self.config_yaml_path
+        if not os.path.exists(config_path):
+            return
+        logger.info(f"🔍 检查 YAML 配置文件更新: {config_path}")
+         # 检查间隔
+        if self._last_yaml_check_time is None:
+            self._last_yaml_check_time = time.time()
+        elif time.time() - self._last_yaml_check_time >= self._yaml_check_interval:
+            self._last_yaml_check_time = time.time()
+
+            try:
+                with open(config_path, 'r') as f:
+                    new_config = yaml.safe_load(f)
+                enabled = new_config.get('enabled', False)
+                if enabled:
+                    new_max_position = Decimal(str(new_config.get('max_position', self.position_manager.max_position)))
+                    if new_max_position != self.position_manager.max_position:
+                        logger.info(f"🔄 从 YAML 配置更新 max_position: {self.position_manager.max_position} --> {new_max_position}")
+                        self.position_manager.max_position = new_max_position
+                    
+            except Exception as e:
+                logger.error(f"⚠️ 检查 YAML 配置文件时出错: {e}")
 
     def _create_dummy_position(self) -> Position:
         """创建虚拟 Position（累计模式用）"""
@@ -1013,3 +1070,21 @@ class HedgeStrategy(BaseStrategy):
                 )
             }
         }
+    
+    async def _log_equity_and_volume_if_needed(self):
+        """定期记录账户权益和交易量"""
+        current_time = time.time()
+        if self._last_equity_log_time is None:
+            self._last_equity_log_time = current_time
+        
+        if current_time - self._last_equity_log_time >= self._equity_log_interval:
+            try:
+                volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
+
+                logger.info(
+                    f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f}"
+                    f"   预估损耗: ${((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2):.2f}"
+                )
+            except Exception as e:
+                logger.error(f"❌ 获取账户权益或交易量失败: {e}")
+            self._last_equity_log_time = current_time
