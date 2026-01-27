@@ -245,5 +245,69 @@ pairs:
       sample_size: 500          # 样本容量（固定）
       std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
       min_total_threshold: 0.03 # 最小阈值和（%）
-  
 
+  lighter_varitonal_sui:
+    enabled: true
+    symbol: SUI
+    exchange_a: lighter
+    exchange_b: variational
+    quantity: 35
+    quantity_precision: 0.1
+    open_threshold: 0.1
+    close_threshold: 0.1
+
+    accumulate_mode: true  # 是否启用累计模式
+    max_position: 700      # 最大仓位阈值    
+    # ✅ Variational 特殊配置
+    variational_config:
+      polling_interval: 0.3   # 订单簿轮询间隔（秒）
+
+    dynamic_threshold:
+      enabled: true              # 是否启用
+      sample_size: 500          # 样本容量（固定）
+      std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
+      min_total_threshold: 0.05 # 最小阈值和（%）
+      
+  lighter_varitonal_doge:
+    enabled: true
+    symbol: DOGE
+    exchange_a: lighter
+    exchange_b: variational
+    quantity: 400
+    quantity_precision: 1
+    open_threshold: 0.1
+    close_threshold: 0.1
+
+    accumulate_mode: true  # 是否启用累计模式
+    max_position: 300      # 最大仓位阈值    
+    # ✅ Variational 特殊配置
+    variational_config:
+      polling_interval: 0.3   # 订单簿轮询间隔（秒）
+
+    dynamic_threshold:
+      enabled: true              # 是否启用
+      sample_size: 500          # 样本容量（固定）
+      std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
+      min_total_threshold: 0.04 # 最小阈值和（%）
+
+  lighter_varitonal_paxg:
+    enabled: true
+    symbol: PAXG
+    exchange_a: lighter
+    exchange_b: variational
+    quantity: 0.01
+    quantity_precision: 0.0001
+    open_threshold: 0.1
+    close_threshold: 0.1
+
+    accumulate_mode: true  # 是否启用累计模式
+    max_position: 0.2      # 最大仓位阈值    
+    # ✅ Variational 特殊配置
+    variational_config:
+      polling_interval: 0.3   # 订单簿轮询间隔（秒）
+
+    dynamic_threshold:
+      enabled: true              # 是否启用
+      sample_size: 500          # 样本容量（固定）
+      std_multiplier: 1          # 标准差倍数（阈值 = 均值 + N*标准差）
+      min_total_threshold: 0.02 # 最小阈值和（%）
