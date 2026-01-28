@@ -340,6 +340,7 @@ class HedgeStrategy(BaseStrategy):
                     # 有持仓，检查平仓信号
                     await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
             
+            self.check_yaml_config_updates()
             if self.end_time_stamp:
                 current_timestamp = time.time()
                 if current_timestamp >= self.end_time_stamp:
@@ -359,7 +360,7 @@ class HedgeStrategy(BaseStrategy):
                         volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
                         logger.info(
                             f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f}"
-                            f"   预估损耗: ${((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2):.2f}"
+                            f"   预估损耗: {((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2) * 100:.4f}%"
                         )
                         
                         await self.stop()
@@ -562,7 +563,6 @@ class HedgeStrategy(BaseStrategy):
                                 f"(开仓阈值: {self.open_threshold_pct}%) - 监控开仓中..."
                             )
                             self.last_log_time = current_time
-                    self.check_yaml_config_updates()
 
                 finally:
                     self._is_executing = False
@@ -794,7 +794,6 @@ class HedgeStrategy(BaseStrategy):
                                 f"(反向开仓阈值: {self.close_threshold_pct}%) - 监控反向开仓中..."
                             )
                             self.last_log_time = current_time
-                    self.check_yaml_config_updates()
                 finally:
                     self._is_executing = False
             self._log_stats_if_needed()

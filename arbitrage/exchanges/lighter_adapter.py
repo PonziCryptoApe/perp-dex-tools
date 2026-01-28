@@ -6,6 +6,7 @@ import json
 import os
 import random
 import time
+import lighter
 import websockets
 from decimal import Decimal
 from typing import Optional, Callable, Dict
@@ -225,9 +226,9 @@ class LighterAdapter(ExchangeAdapter):
             orders = data.get("orders", {}).get(str(self.market_index), [])
             for order_data in orders:
                 logger.info(f"---------order-data---------{order_data}")
-                if order_data.get('status') == "filled":
                 # 调用订单更新 handler
-                    self._on_order_update(order_data)
+                self._on_order_update(order_data)
+                
         else:
             # 未知消息类型
             if self.message_count <= 5:
@@ -648,11 +649,10 @@ class LighterAdapter(ExchangeAdapter):
                     'order_id': None,
                     'error': 'Order submission returned None'
                 }
-            
-            logger.info(f"✅ {self.exchange_name} 下单成功: tx_hash={tx_hash}")
+            wait_start_time = time.time()
+            logger.info(f"✅ {self.exchange_name} 下单完成: tx_hash={tx_hash}, 下单耗时:{(wait_start_time - order_start_time) * 1000:.2f}ms")
 
             # ✅ 等待订单状态（WebSocket 更新）
-            wait_start_time = time.time()
             logger.info(f"⏳ 开始等待订单状态: client_idx={client_order_index}")
             # 下单成功后，判断订单是否成交
             try:
@@ -662,20 +662,15 @@ class LighterAdapter(ExchangeAdapter):
                 filled_size_from_ws = Decimal(status_data.get('filled_size', '0'))
                 price_from_ws = status_data.get('price', order_price)
                 
-                logger.info(f"订单状态: client_idx={client_order_index} -> {status} (order_id={real_order_id})")
+                logger.info(f"{self.exchange_name} 订单状态: client_idx={client_order_index} -> {status} (order_id={real_order_id})")
                 wait_end_time = time.time()
                 wait_duration = (wait_end_time - wait_start_time) * 1000
-                logger.info(f"⏱️ 等待状态耗时: {wait_duration:.2f} ms, 状态: {status}")
+                logger.info(f"⏱️ {self.exchange_name} 等待状态耗时: {wait_duration:.2f} ms, 状态: {status}")
                 
                 total_duration = (wait_end_time - order_start_time) * 1000
-                logger.info(f"⏱️ 下单总耗时: {total_duration:.2f} ms")
-                
-                # ✅ 状态标准化（匹配 extended 逻辑）
-                if status == 'OPEN' and filled_size_from_ws > 0:
-                    status = 'PARTIALLY_FILLED'
-
-                
-                if status in ['CANCELED', 'CANCELLED']:  # Lighter 可能用 CANCELLED
+                logger.info(f"⏱️ {self.exchange_name} 下单总耗时: {total_duration:.2f} ms")
+    
+                if status in ['CANCELED']:
                     if filled_size_from_ws > 0:
                         logger.warning(
                             f"⚠️ 部分成交后取消（WebSocket 数据）:\n"
@@ -685,9 +680,9 @@ class LighterAdapter(ExchangeAdapter):
                         )
                         
                         return {
-                            'success': False,  # 部分成交标记失败，上层处理
+                            'success': False,
                             'order_id': real_order_id,
-                            'error': 'Order CANCELED (partial fill)',
+                            'error': 'Order CANCELED',
                             'filled_price': price_from_ws,
                             'filled_quantity': filled_size_from_ws,
                             'partial_fill': True,
@@ -696,7 +691,7 @@ class LighterAdapter(ExchangeAdapter):
                             'execution_duration_ms': wait_duration,
                         }
                     else:
-                        logger.info(f"✅ 订单已取消，未成交: {real_order_id}")
+                        logger.info(f"✅ 订单已取消: {real_order_id}")
                         return {
                             'success': False,
                             'order_id': real_order_id,
@@ -708,19 +703,7 @@ class LighterAdapter(ExchangeAdapter):
                             'execution_duration_ms': wait_duration,
                         }
                 
-                if status in ['REJECTED']:
-                    return {
-                        'success': False,
-                        'order_id': real_order_id,
-                        'error': f'Order {status}',
-                        'filled_price': Decimal('0'),
-                        'filled_quantity': Decimal('0'),
-                        'timestamp': time.time(),
-                        'place_duration_ms': place_duration,
-                        'execution_duration_ms': wait_duration,
-                    }
-                
-                if status in ['OPEN', 'PARTIALLY_FILLED', 'FILLED']:
+                if status in ['FILLED']:
                     # ✅ 对于 Lighter，成交价使用订单价（limit IOC）
                     filled_price = price_from_ws
                     filled_quantity = filled_size_from_ws if filled_size_from_ws > 0 else quantity  # 后备全成交
@@ -746,8 +729,31 @@ class LighterAdapter(ExchangeAdapter):
                         'execution_duration_ms': wait_duration,
                         'partial_fill': status == 'PARTIALLY_FILLED'
                     }
-                
-                # 未知状态
+                if status in ['CANCELED-NOT-ENOUGH-LIQUIDITY']:
+                    logger.info(f"✅ 订单因流动性不足已取消，未成交: {real_order_id}")
+                    return {
+                        'success': False,
+                        'order_id': real_order_id,
+                        'error': 'Order CANCELED DUE LIQUIDITY (no fill)',
+                        'filled_price': Decimal('0'),
+                        'filled_quantity': Decimal('0'),
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': wait_duration,
+                    }
+                if status in ['CANCELED-POSITION_NOT_ALLOWED', 'CANCELED-MARGIN-NOT-ALLOWED', 'CANCELED-TOO-MUCH-SLIPPAGE',
+                              'CANCELED-SELF-TRADE', 'CANCELED-EXPIRED', 'CANCELED-OCO', 'CANCELED-CHILD', 'CANCELED-LIQUIDATION']:
+                    return {
+                        'success': False,
+                        'order_id': real_order_id,
+                        'error': f'Unknown status: {status}',
+                        'filled_price': Decimal('0'),
+                        'filled_quantity': Decimal('0'),
+                        'timestamp': time.time(),
+                        'place_duration_ms': place_duration,
+                        'execution_duration_ms': wait_duration,
+                    }
+                    # 未知状态
                 logger.warning(f"⚠️ 未知订单状态: {status}")
                 return {
                     'success': False,
@@ -761,6 +767,7 @@ class LighterAdapter(ExchangeAdapter):
                 }
             except asyncio.TimeoutError:
                 logger.warning(f"⏰ 订单状态超时 (client_idx={client_order_index})，假设部分成交或失败")
+                logger.info(f"⏱️ {self.exchange_name} 从下单到超时共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
                 # ✅ 后备：轮询 get_active_orders 检查
                 active_orders = await self.client.get_active_orders(self.client.config.contract_id)
                 matching_order = None
@@ -796,6 +803,8 @@ class LighterAdapter(ExchangeAdapter):
             
             except Exception as wait_e:
                 logger.error(f"❌ 等待状态异常: {wait_e}")
+                logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
+
                 return {
                     'success': False,
                     'order_id': tx_hash,
@@ -806,81 +815,25 @@ class LighterAdapter(ExchangeAdapter):
                     'place_duration_ms': place_duration,
                     'execution_duration_ms': wait_duration,
                 }
-        except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 下单失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                'success': False,
-                'order_id': None,
-                'error': str(e)
-            }
+        except lighter.exceptions.ApiException as le:
+            logger.info(f"⏱️ {self.exchange_name} 从下单到API错误共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
 
-    async def place_market_order1(
-        self,
-        side: str,
-        quantity: Decimal,
-        price: Optional[Decimal] = None
-    ) -> dict:
-        """下市价单"""
-        try:
-            logger.debug(
-                f"📤 {self.exchange_name} 下单: {side} {quantity} @ ${price}"
-            )
-
-            order_result = await self.client.place_limit_order(
-                contract_id=self.market_index,
-                quantity=Decimal(quantity),
-                price=Decimal(price),
-                side=side,
-                # time_in_force='IOC'  # 立即成交或取消
-            )
-            # ✅ 调试：打印 order_result 的类型和属性
-            logger.info(
-                f"🔍 order_result 类型: {type(order_result)}\n"
-                f"   属性: {dir(order_result)}"
-            )
-            if order_result:
-                # 检查是否成功
-                if order_result.success:
-                    logger.info(
-                        f"✅ {self.exchange_name} 下单成功:\n"
-                        f"   order_id: {order_result.order_id}\n"
-                        f"   side: {order_result.side}\n"
-                        f"   size: {order_result.size}\n"
-                        f"   price: {order_result.price}\n"
-                        f"   status: {order_result.status}\n"
-                        f"   filled_size: {order_result.filled_size}"
-                    )
-                    return {
-                        'success': True,
-                        'order_id': order_result.order_id,
-                        'error': None
-                    }
-                else:
-                    # 下单失败
-                    error_msg = order_result.error_message or "Unknown error"
-                    logger.error(
-                        f"❌ {self.exchange_name} 下单失败:\n"
-                        f"   error: {error_msg}\n"
-                        f"   status: {order_result.status}"
-                    )
-                    return {
-                        'success': False,
-                        'order_id': None,
-                        'error': error_msg
-                    }
-            else:
-                error_msg = "Order result is None"
-                logger.error(f"❌ {self.exchange_name} 下单失败: {error_msg}")
+            if hasattr(le, 'body') and le.body:
+                error_msg = f"Lighter API Exception: {le.body}"
+                data = json.loads(le.body)
+                error_code = data.get('code', 'Unknown')
+                error_msg = data.get('message', str(le))
+                logger.error(f"❌ {self.exchange_name} 下单 API 错误: {error_code} - {error_msg}")
                 return {
                     'success': False,
                     'order_id': None,
-                    'error': error_msg
+                    'error': f' {error_msg}',
+                    'code': error_code
                 }
-        
+                
         except Exception as e:
             logger.error(f"❌ {self.exchange_name} 下单失败: {e}")
+            logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
             import traceback
             traceback.print_exc()
             return {
@@ -888,7 +841,7 @@ class LighterAdapter(ExchangeAdapter):
                 'order_id': None,
                 'error': str(e)
             }
-    
+
     def get_latest_orderbook(self) -> Optional[Dict]:
         """获取最新订单簿"""
         return self._orderbook

@@ -330,6 +330,8 @@ class VariationalAdapter(ExchangeAdapter):
         - 第 2 次：滑点 0.05% (0.0005)
         - 第 3 次：滑点 0.10% (0.001)
         """
+        order_start_time = time.time()
+
         max_attempts = 1  # 分别对应 0.01%, 0.05%, 0.10%
         for attempt in range(max_attempts):
             try:
@@ -421,6 +423,8 @@ class VariationalAdapter(ExchangeAdapter):
                 logger.info(f"📊 Market order raw response: {result}")
                 place_end = time.time()
                 place_duration = (place_end - self._order_place_time) * 1000  # 毫秒
+                logger.info(f"✅ {self.exchange_name} 下单完成, 下单耗时:{place_duration:.2f}ms")
+
                 # ✅ 检查返回格式
                 if not result.success:
                     error_msg = result.error_message or "Unknown error"
@@ -442,8 +446,7 @@ class VariationalAdapter(ExchangeAdapter):
                     }
                 
                 rfq_id = result.order_id
-                logger.info(f"📤 市价单已发送: {rfq_id}")
-
+                logger.info(f"⏳ 开始等待订单状态 rfq_id={rfq_id}")
 
                 # ✅ 2. 等待 WebSocket 推送订单状态（适配器层负责）
                 self.current_order_id = rfq_id
@@ -469,7 +472,9 @@ class VariationalAdapter(ExchangeAdapter):
                             if matched_orders:
                                 order_data = matched_orders[0]
                                 final_status = order_data.get('status')
-                                logger.info(f"📊 第 {attempt_idx + 1} 次尝试成功获取订单状态: {final_status}")
+                                
+                                logger.info(f"📊 第 {attempt_idx + 1} 次尝试成功获取订单状态: {final_status}, 等待状态耗时: {(time.time() - place_end) * 1000:.2f}ms")
+                                logger.info(f"⏱️ {self.exchange_name} 下单总耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
                                 retries = attempt_idx + 1
                                 break
 
@@ -482,6 +487,9 @@ class VariationalAdapter(ExchangeAdapter):
                         await asyncio.sleep(retry_interval)
 
                 execution_duration = (time.time() - place_end) * 1000  # 毫秒
+                logger.info(f"⏱️ {self.exchange_name} 等待状态耗时: { execution_duration }ms, 状态: { final_status }")
+                logger.info(f"⏱️ {self.exchange_name} 下单总耗时: {(time.time() - order_start_time) * 1000}ms")
+
                 if not final_status:
                     logger.error(f"❌ 达到最大重试次数，仍无法获取订单 {rfq_id} 的信息")
                     return {
@@ -545,6 +553,8 @@ class VariationalAdapter(ExchangeAdapter):
                     }
             except Exception as e:
                 logger.error(f"❌ place_market_order 异常: {e}")
+                logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
+
                 import traceback
                 traceback.print_exc()
                 
