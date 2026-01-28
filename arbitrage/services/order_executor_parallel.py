@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime
+import json
 import logging
 from decimal import Decimal
 import os
@@ -9,6 +10,7 @@ import time
 from typing import Tuple, Optional
 
 from aiolimiter import AsyncLimiter
+import lighter
 
 from ..models.position import Position
 from ..exchanges.base import ExchangeAdapter
@@ -48,8 +50,9 @@ class OrderExecutor:
         self.retry_delay = retry_delay
         self.order_limiter_a = order_limiter_a
         self.order_limiter_b = order_limiter_b
-        self.sleep_timestamp = None
         self.sleep_interval = 30
+        self.sleep_interval_enhance = 61
+        self.sleep_retries = 0
         self.lark_token = os.getenv("LARK_TOKEN_SERIOUS")
         self.lark_index_text = f'【{os.getenv("ENV_INDEX")}】' if os.getenv("ENV_INDEX", None) else ''
         if self.lark_token:
@@ -79,186 +82,6 @@ class OrderExecutor:
             )
         
         return normalized
-    
-    async def _balance_positions_1(
-        self,
-        target_quantity: Decimal,
-        filled_qty_a: Decimal,
-        filled_qty_b: Decimal,
-        side_a: str,
-        side_b: str,
-        price_a: Decimal,
-        price_b: Decimal,
-        operation_type: str  # 'open' 或 'close'
-    ) -> Tuple[Decimal, Decimal]:
-        """
-        平衡仓位（处理部分成交不匹配）
-        
-        Args:
-            target_quantity: 目标数量
-            filled_qty_a: Exchange A 实际成交量
-            filled_qty_b: Exchange B 实际成交量
-            side_a: Exchange A 方向
-            side_b: Exchange B 方向
-            price_a: Exchange A 价格
-            price_b: Exchange B 价格
-            operation_type: 操作类型
-        
-        Returns:
-            (最终 Exchange A 数量, 最终 Exchange B 数量)
-        """
-        # ✅ 计算差异
-        diff_a = target_quantity - filled_qty_a
-        diff_b = target_quantity - filled_qty_b
-        
-        # ✅ 如果完全匹配，直接返回
-        if diff_a == 0 and diff_b == 0:
-            logger.info(f"✅ 仓位平衡，无需调整")
-            return filled_qty_a, filled_qty_b
-        
-        logger.warning(
-            f"⚠️ 检测到仓位不平衡:\n"
-            f"   目标数量: {target_quantity}\n"
-            f"   {self.exchange_a.exchange_name}: {filled_qty_a} (差异: {diff_a:+})\n"
-            f"   {self.exchange_b.exchange_name}: {filled_qty_b} (差异: {diff_b:+})"
-        )
-        
-        # ✅ 策略 1: 补齐未成交部分（优先）
-        balanced_qty_a = filled_qty_a
-        balanced_qty_b = filled_qty_b
-        
-        # ✅ Exchange A 需要补单
-        if diff_a > 0:
-            logger.info(f"🔄 补单 {self.exchange_a.exchange_name}: {diff_a}")
-            
-            try:
-                result_a = await self._retry_place_order(
-                    exchange=self.exchange_a,
-                    side=side_a,
-                    quantity=diff_a,
-                    price=price_a,
-                    order_type=operation_type,
-                    retry_mode='aggressive',  # ✅ 激进模式，提高成交率
-                    order_limiter=self.order_limiter_a
-                )
-
-                if result_a['success']:
-                    balanced_qty_a += result_a.get('filled_quantity', Decimal('0'))
-                    logger.info(
-                        f"✅ 补单成功: {self.exchange_a.exchange_name} "
-                        f"+{result_a['filled_quantity']} → 总计 {balanced_qty_a}"
-                    )
-                else:
-                    logger.error(f"❌ 补单失败: {self.exchange_a.exchange_name}")
-            
-            except Exception as e:
-                logger.error(f"❌ 补单异常: {self.exchange_a.exchange_name} - {e}")
-        
-        # ✅ Exchange B 需要补单
-        if diff_b > 0:
-            logger.info(f"🔄 补单 {self.exchange_b.exchange_name}: {diff_b}")
-            
-            try:
-                result_b = await self._retry_place_order(
-                    exchange=self.exchange_b,
-                    side=side_b,
-                    quantity=diff_b,
-                    price=price_b,
-                    order_type=operation_type,
-                    retry_mode='aggressive',
-                    order_limiter=self.order_limiter_b
-                )
-
-                if result_b['success']:
-                    balanced_qty_b += result_b.get('filled_quantity', Decimal('0'))
-                    logger.info(
-                        f"✅ 补单成功: {self.exchange_b.exchange_name} "
-                        f"+{result_b['filled_quantity']} → 总计 {balanced_qty_b}"
-                    )
-                else:
-                    logger.error(f"❌ 补单失败: {self.exchange_b.exchange_name}")
-            
-            except Exception as e:
-                logger.error(f"❌ 补单异常: {self.exchange_b.exchange_name} - {e}")
-        
-        # ✅ 策略 2: 如果补单后仍不匹配，平掉多余部分
-        final_diff = balanced_qty_a - balanced_qty_b
-        
-        if abs(final_diff) > Decimal('0.001'):  # 容差 0.001
-            logger.warning(
-                f"⚠️ 补单后仍不平衡:\n"
-                f"   {self.exchange_a.exchange_name}: {balanced_qty_a}\n"
-                f"   {self.exchange_b.exchange_name}: {balanced_qty_b}\n"
-                f"   差异: {final_diff:+}"
-            )
-            
-            # ✅ 平掉多余部分
-            if final_diff > 0:
-                # Exchange A 多了，平掉多余部分
-                excess = final_diff
-                logger.info(f"🔄 平掉 {self.exchange_a.exchange_name} 多余部分: {excess}")
-                
-                # 反向操作（开仓 → 平仓，平仓 → 开仓）
-                reverse_side = 'sell' if side_a == 'buy' else 'buy'
-                
-                try:
-                    result_a = await self._retry_place_order(
-                        exchange=self.exchange_a,
-                        side=reverse_side,
-                        quantity=excess,
-                        price=price_a,
-                        order_type='balance',  # ✅ 标记为平衡操作
-                        retry_mode='aggressive',
-                        order_limiter=self.order_limiter_a
-                    )
-
-                    if result_a['success']:
-                        balanced_qty_a -= result_a.get('filled_quantity', Decimal('0'))
-                        logger.info(
-                            f"✅ 平仓成功: {self.exchange_a.exchange_name} "
-                            f"-{result_a['filled_quantity']} → 剩余 {balanced_qty_a}"
-                        )
-                
-                except Exception as e:
-                    logger.error(f"❌ 平仓异常: {self.exchange_a.exchange_name} - {e}")
-            
-            elif final_diff < 0:
-                # Exchange B 多了，平掉多余部分
-                excess = abs(final_diff)
-                logger.info(f"🔄 平掉 {self.exchange_b.exchange_name} 多余部分: {excess}")
-                
-                reverse_side = 'sell' if side_b == 'buy' else 'buy'
-                
-                try:
-                    result_b = await self._retry_place_order(
-                        exchange=self.exchange_b,
-                        side=reverse_side,
-                        quantity=excess,
-                        price=price_b,
-                        order_type='balance',
-                        retry_mode='aggressive',
-                        order_limiter=self.order_limiter_b
-                    )
-
-                    if result_b['success']:
-                        balanced_qty_b -= result_b.get('filled_quantity', Decimal('0'))
-                        logger.info(
-                            f"✅ 平仓成功: {self.exchange_b.exchange_name} "
-                            f"-{result_b['filled_quantity']} → 剩余 {balanced_qty_b}"
-                        )
-                
-                except Exception as e:
-                    logger.error(f"❌ 平仓异常: {self.exchange_b.exchange_name} - {e}")
-        
-        # ✅ 返回最终平衡后的数量
-        logger.info(
-            f"✅ 仓位平衡完成:\n"
-            f"   {self.exchange_a.exchange_name}: {filled_qty_a} → {balanced_qty_a}\n"
-            f"   {self.exchange_b.exchange_name}: {filled_qty_b} → {balanced_qty_b}\n"
-            f"   最终差异: {abs(balanced_qty_a - balanced_qty_b)}"
-        )
-        
-        return balanced_qty_a, balanced_qty_b
     
     async def _balance_positions(
         self,
@@ -291,9 +114,6 @@ class OrderExecutor:
         Returns:
             (最终 Exchange A 数量, 最终 Exchange B 数量)
         """
-        is_needed = self.check_sleep_is_needed()
-        if is_needed:
-            return
         # ✅ 1. 检查是否完全匹配
         diff_a = target_quantity - filled_qty_a
         diff_b = target_quantity - filled_qty_b
@@ -605,7 +425,7 @@ class OrderExecutor:
                         logger.info(f"⏳ 重试订单等待速率限制器...")
                         await order_limiter.acquire()
                         logger.info(f"✅ 重试订单速率限制器结束等待")
-                    orderbook = exchange.get_latest_orderbook()
+                    orderbook = await exchange.get_latest_orderbook()
                     if orderbook:
                         # ✅ 更新 quote_id（如果有）
                         if orderbook.get('quote_id'):
@@ -638,25 +458,27 @@ class OrderExecutor:
                     logger.warning(f"⚠️ 获取最新价格失败: {e}，使用初始价格 ${initial_price}")
                 current_retry_mode = retry_mode
                 logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 获取订单簿耗时为: {(time.time() - retry_start_time) *1000:.2f}ms")
-
-                if order_type == 'open':
-                    result = await exchange.place_open_order(
-                        side=side,
-                        quantity=quantity,
-                        price=price,
-                        retry_mode=current_retry_mode,
-                        quote_id=current_quote_id,
-                        slippage=Decimal('0.02')
-                    )
-                else:  # 'close'
-                    result = await exchange.place_close_order(
-                        side=side,
-                        quantity=quantity,
-                        price=price,
-                        retry_mode=current_retry_mode,
-                        quote_id=current_quote_id,
-                        slippage=Decimal('0.02')
-                    )
+                try:
+                    if order_type == 'open':
+                        result = await exchange.place_open_order(
+                            side=side,
+                            quantity=quantity,
+                            price=price,
+                            retry_mode=current_retry_mode,
+                            quote_id=current_quote_id,
+                            slippage=Decimal('0.02')
+                        )
+                    else:  # 'close'
+                        result = await exchange.place_close_order(
+                            side=side,
+                            quantity=quantity,
+                            price=price,
+                            retry_mode=current_retry_mode,
+                            quote_id=current_quote_id,
+                            slippage=Decimal('0.02')
+                        )
+                except lighter.exceptions.ApiException as le:
+                    await self.handleLgApiExcep(le)
                 logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 获取下单订单状态的时间为: {time.time() - retry_start_time}")
                 logger.info(f" 从第一次重试开始，到获取到下单状态的时间为: { time.time() - start_time}")
                 # ✅ 检查部分成交
@@ -679,7 +501,7 @@ class OrderExecutor:
                         'execution_duration_ms': result.get('execution_duration_ms'),
                         'attempt': attempt # ✅ 实际尝试次数
                     }
-            
+                self.sleep_retries = 0
                 if result.get('success'):
                     logger.info(
                         f"✅ 下单成功: {exchange.exchange_name} | "
@@ -696,14 +518,7 @@ class OrderExecutor:
                         f"类型: {order_type} | 方向: {side} | "
                         f"尝试次数: {attempt}/{max_retries} | "
                         f"错误: {result.get('error')}"
-                    )
-                    if result.get('code') =='23000':  # 示例：特定错误码不重试
-                        logger.error(
-                            f"❌ Too many requests {result.get('code')}，停止重试"
-                        )
-                        if self.sleep_timestamp is None:
-                            self.sleep_timestamp = time.time()
-                        break
+                    )                                
             except Exception as e:
                 logger.error(
                     f"❌ 下单异常: {exchange.exchange_name} | "
@@ -726,22 +541,7 @@ class OrderExecutor:
             'timestamp': time.time(),
             'attempt': max_retries
         }
-    
-    def check_sleep_is_needed(self) -> bool:
-        """检查是否处于休眠状态以避免速率限制"""
-        if self.sleep_timestamp is not None:
-            elapsed = time.time() - self.sleep_timestamp
-            if elapsed < self.sleep_interval:
-                logger.info(
-                    f"⏳ 仍处于休眠状态，已休眠 {elapsed:.2f} 秒，"
-                    f"需等待 {self.sleep_interval - elapsed:.2f} 秒以避免速率限制..."
-                )
-                return True
-            else:
-                logger.info("✅ 休眠结束，恢复正常交易")
-                self.sleep_timestamp = None
-        return False
-    
+
     async def execute_open(
         self,
         exchange_a_price: Decimal,
@@ -768,9 +568,6 @@ class OrderExecutor:
         Returns:
             (success: bool, position: Optional[Position])
         """
-        is_needed = self.check_sleep_is_needed()
-        if is_needed:
-            return False, None
         order_quantity = actual_quantity if actual_quantity is not None else self.quantity
 
         order_quantity = self._normalize_quantity(order_quantity, "开仓数量")
@@ -812,22 +609,16 @@ class OrderExecutor:
                     quote_id=exchange_b_quote_id
                 )
             )
-            # ✅ Exchange A 开空（卖出）
-            order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
 
+            try:
+                order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
+            except lighter.exceptions.ApiException as le:
+                await self.handleLgApiExcep(le)
             success_a = order_a_result.get('success', False) or (
                 order_a_result.get('partial_fill', False)
             )
 
             success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
-
-            if not success_a and hasattr(order_a_result, 'code') and order_a_result.get('code') == '23000':
-                logger.error(
-                    f"❌ Too many requests {order_a_result.get('code')}，停止开仓"
-                )
-                if self.sleep_timestamp is None:
-                    self.sleep_timestamp = time.time()
-                return False, None
             
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
@@ -1125,9 +916,6 @@ class OrderExecutor:
         Returns:
             (success: bool, position: Optional[Position])
         """
-        is_needed = self.check_sleep_is_needed()
-        if is_needed:
-            return False, None
         # ✅ 记录开始执行时间
         execution_start_time = time.time()
         # ✅ 确定平仓数量
@@ -1180,20 +968,14 @@ class OrderExecutor:
                     quote_id=exchange_b_quote_id
                 )
             )
-
-            # ✅ Exchange A 平空（买入）
-            order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
-
+            try:
+                order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
+            except lighter.exceptions.ApiException as le:
+                await self.handleLgApiExcep(le)
+                
             success_a = order_a_result.get('success', False) or order_a_result.get('partial_fill', False)
             success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
 
-            if not success_a and hasattr(order_a_result, 'code') and order_a_result.get('code') == '23000':
-                logger.error(
-                    f"❌ Too many requests {order_a_result.get('code')}，停止反向开仓"
-                )
-                if self.sleep_timestamp is None:
-                    self.sleep_timestamp = time.time()
-                return False, None
             # ✅ 2. 根据结果处理
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
@@ -1315,43 +1097,6 @@ class OrderExecutor:
                         f"   🕒 交易所A耗时: {(order_a_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
                         f"   🕒 交易所B耗时: {(order_b_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
                     )
-                    # ✅ 获取实际成交价格
-                    # actual_price_a = order_a_result.get('filled_price')
-                    # actual_price_b = retry_result_b.get('filled_price')
-                    
-                    # execution_end_time = time.time()
-                    # execution_delay_ms = (execution_end_time - execution_start_time) * 1000
-                    
-                    # if signal_trigger_time:
-                    #     total_delay_ms = (execution_end_time - signal_trigger_time) * 1000
-                    # else:
-                    #     total_delay_ms = None
-                    
-                    # # ✅ 更新 Position 对象
-                    # position.exchange_a_signal_exit_price = exchange_a_price
-                    # position.exchange_b_signal_exit_price = exchange_b_price
-                    
-                    # position.exchange_a_exit_price = actual_price_a
-                    # position.exchange_b_exit_price = actual_price_b
-                    
-                    # position.exchange_a_filled_exit_price = actual_price_a
-                    # position.exchange_b_filled_exit_price = actual_price_b
-                    
-                    # position.exchange_a_exit_order_id = order_a_result.get('order_id')
-                    # position.exchange_b_exit_order_id = retry_result_b.get('order_id')
-                    
-                    # position.exit_time = datetime.now()
-                    # position.signal_exit_time = signal_trigger_time
-                    # position.exit_execution_delay_ms = total_delay_ms
-                    
-                    # logger.info(
-                    #     f"✅ 平仓成功（B 所重试成功）:\n"
-                    #     f"   {self.exchange_a.exchange_name}: {order_a_result.get('order_id')}\n"
-                    #     f"   {self.exchange_b.exchange_name}: {retry_result_b.get('order_id')}\n"
-                    #     f"   ⏱️ 总耗时: {execution_delay_ms:.2f} ms"
-                    # )
-                    
-                    # return True, position
                 else:
                     logger.critical(
                         f"🚨 {self.exchange_b.exchange_name} 平仓失败（重试后仍失败），"
@@ -1364,6 +1109,7 @@ class OrderExecutor:
                     return False, None
             # 情况 4️⃣: 两所都成功 → 完成
             if success_a and success_b:
+                self.sleep_retries = 0
                 # ✅ 3. 到这里两所都成功了，检查成交数量
                 filled_qty_a = order_a_result.get('filled_quantity', position.quantity)
                 filled_qty_b = order_b_result.get('filled_quantity', position.quantity)
@@ -1483,6 +1229,7 @@ class OrderExecutor:
                     )
 
                 return True, position
+        
         except Exception as e:
             logger.critical(
                 f"🚨 平仓执行异常: {str(e)}"
@@ -1618,9 +1365,6 @@ class OrderExecutor:
             )
 
     async def check_position_balance(self):
-        is_needed = self.check_sleep_is_needed()
-        if is_needed:
-            return
         logger.info("🔍 检查两所仓位平衡情况...")
         symbol_a = self.exchange_a.symbol
         symbol_b = self.exchange_b.symbol
@@ -1824,4 +1568,14 @@ class OrderExecutor:
                     f" {self.exchange_a.exchange_name} {symbol_a} {pos_a_side} {pos_a_size}"
                     f" {self.exchange_b.exchange_name} {symbol_b} {pos_b_side} {pos_b_size}"
                 )
-    
+
+    async def handleLgApiExcep(self, e):
+        if hasattr(e, 'body') and e.body:
+            data = json.loads(e.body)
+            error_code = data.get('code', 'Unknown')
+            error_msg = data.get('message', str(e))
+            logger.error(f"❌ {self.exchange_name} 下单 API 错误: {error_code} - {error_msg}")
+            if error_code =='23000':
+                self.sleep_retries = self.sleep_retries + 1
+                logger.info(f"{error_msg}, 等待{self.sleep_interval}s")
+                await asyncio.sleep(self.sleep_interval if self.sleep_retries == 1 else self.sleep_interval_enhance)

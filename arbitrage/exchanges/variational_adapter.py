@@ -243,9 +243,9 @@ class VariationalAdapter(ExchangeAdapter):
             logger.debug(f"获取 Variational 订单簿失败: {e}")
             return None
     
-    def get_latest_orderbook(self) -> Optional[Dict]:
+    async def get_latest_orderbook(self) -> Optional[Dict]:
         """获取最新订单簿"""
-        return self._orderbook
+        return await self.fetch_orderbook()
     
     async def place_open_order(
         self,
@@ -323,250 +323,150 @@ class VariationalAdapter(ExchangeAdapter):
 
     async def place_market_order(self, side, quote_id, slippage) -> dict:
         """
-        下市价单（带重试 + 动态滑点）
-        
-        重试策略：
-        - 第 1 次：滑点 0.01% (0.0001)
-        - 第 2 次：滑点 0.05% (0.0005)
-        - 第 3 次：滑点 0.10% (0.001)
+        下市价单
         """
         order_start_time = time.time()
 
-        max_attempts = 1  # 分别对应 0.01%, 0.05%, 0.10%
-        for attempt in range(max_attempts):
-            try:
-                # ✅ 记录下单时间
-                # max_slippage = slippage_levels[attempt]
-                max_slippage = float(str(slippage) if slippage else float(str(self.slippage)))
-                logger.info(f"Placing market order with slippage: {max_slippage}")
+        try:
+            # ✅ 记录下单时间
+            max_slippage = float(str(slippage) if slippage else float(str(self.slippage)))
+            logger.info(f"Placing market order with slippage: {max_slippage}")
+                
+            self._order_place_time = time.time()
 
-                # ✅ 第 1 次尝试使用传入的 quote_id，后续重试重新获取
-                if attempt == 0 and quote_id is not None:
-                    current_quote_id = quote_id
-                    logger.info(f"📤 第 {attempt + 1} 次尝试：使用传入的 quote_id: {current_quote_id[:8]}...")
-                else:
-                    # ✅ 重新获取最新的 quote_id
-                    logger.info(f"🔄 第 {attempt + 1} 次尝试：重新获取 quote_id...")
-                    
-                    try:
-                        start_time = time.time()
-                        # ✅ 调用 Variational API 获取最新报价
-                        quote_data = await self.client._fetch_indicative_quote(
-                            quantity=str(self.query_quantity),
-                            contract_id=self.contract_id
-                        )
-                        
-                        if not quote_data or 'quote_id' not in quote_data:
-                            logger.error(f"❌ 获取 quote_id 失败: {quote_data}")
-                            if attempt < max_attempts - 1:
-                                await asyncio.sleep(0.5)
-                                continue
-                            return {
-                                'success': False,
-                                'order_id': None,
-                                'error': 'Failed to fetch quote_id',
-                                'timestamp': time.time()
-                            }
-                        
-                        current_quote_id = quote_data['quote_id']
-                        
-                        # ✅ 同时获取最新价格（用于日志）
-                        latest_price = quote_data.get('price')
-                        logger.info(
-                            f"✅ 获取到新的 quote_id: {current_quote_id[:8]}...\n"
-                            f"   最新价格: ${latest_price}"
-                            f"   获取时间: {(time.time() - start_time):.3f}"
-                        )
-                    
-                    except Exception as e:
-                        logger.error(f"❌ 获取 quote_id 异常: {e}")
-                        if attempt < max_attempts - 1:
-                            await asyncio.sleep(0.5)
-                            continue
-                        return {
-                            'success': False,
-                            'order_id': None,
-                            'error': f'Failed to fetch quote_id: {e}',
-                            'timestamp': time.time()
-                        }
-                self._order_place_time = time.time()
-
-                # ✅ 计算与最后一次订单簿获取的时间差
-                if self._orderbook_fetch_time:
-                    time_diff = (self._order_place_time - self._orderbook_fetch_time) * 1000  # 毫秒
-                    self._time_diffs.append(time_diff)
-                    
-                    logger.info(
-                        f"⏱️ 订单簿获取 → 下单时间差: {time_diff:.2f} ms\n"
-                        f"   订单簿时间: {self._orderbook_fetch_time:.3f}\n"
-                        f"   下单时间:   {self._order_place_time:.3f}"
-                    )
-                    
-                    # ✅ 警告：时间差过大
-                    if time_diff > 1000:  # 超过 1 秒
-                        logger.warning(f"⚠️ 订单簿数据过旧！时间差: {time_diff:.0f} ms")
+            # ✅ 计算与最后一次订单簿获取的时间差
+            if self._orderbook_fetch_time:
+                time_diff = (self._order_place_time - self._orderbook_fetch_time) * 1000  # 毫秒
+                self._time_diffs.append(time_diff)
                 
                 logger.info(
-                    f"📤 尝试下单 {attempt + 1}/{max_attempts}:\n"
-                    f"   方向: {side}\n"
-                    f"   quote_id: {current_quote_id[:8]}...\n"
-                    f"   最大滑点: {max_slippage * 100:.3f}%"
-                    f"   订单簿年龄: {time_diff:.2f} ms (订单簿 → 下单)"  # ✅ 添加时间差
-                )
-                # ✅ 调用客户端下单
-                result = await self.client._place_market_order(
-                    quote_id=quote_id,
-                    side=side,
-                    max_slippage=max_slippage
+                    f"⏱️ 订单簿获取 → 下单时间差: {time_diff:.2f} ms\n"
+                    f"   订单簿时间: {self._orderbook_fetch_time:.3f}\n"
+                    f"   下单时间:   {self._order_place_time:.3f}"
                 )
                 
-                logger.info(f"📊 Market order raw response: {result}")
-                place_end = time.time()
-                place_duration = (place_end - self._order_place_time) * 1000  # 毫秒
-                logger.info(f"✅ {self.exchange_name} 下单完成, 下单耗时:{place_duration:.2f}ms")
+                # ✅ 警告：时间差过大
+                if time_diff > 1000:  # 超过 1 秒
+                    logger.warning(f"⚠️ 订单簿数据过旧！时间差: {time_diff:.0f} ms")
+            
+            logger.info(
+                f"   方向: {side}\n"
+                f"   quote_id: {quote_id[:8]}...\n"
+                f"   最大滑点: {max_slippage * 100:.3f}%"
+                f"   订单簿年龄: {time_diff:.2f} ms (订单簿 → 下单)"  # ✅ 添加时间差
+            )
+            # ✅ 调用客户端下单
+            result = await self.client._place_market_order(
+                quote_id=quote_id,
+                side=side,
+                max_slippage=max_slippage
+            )
+            
+            logger.info(f"📊 Market order raw response: {result}")
+            place_end = time.time()
+            place_duration = (place_end - self._order_place_time) * 1000  # 毫秒
+            logger.info(f"✅ {self.exchange_name} 下单完成, 下单耗时:{place_duration:.2f}ms")
 
-                # ✅ 检查返回格式
-                if not result.success:
-                    error_msg = result.error_message or "Unknown error"
-                    logger.warning(
-                        f"⚠️ 第 {attempt + 1} 次下单失败: {error_msg}\n"
-                        f"   {'即将重试...' if attempt < max_attempts - 1 else '已达最大重试次数'}"
-                    )
-
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(0.1)  # 等待 0.1 秒后重试
-                        continue
-
-                    logger.error(f"❌ 市价单最终失败: {error_msg}(已重试 {max_attempts} 次)")
-                    return {
-                        'success': False,
-                        'order_id': None,
-                        'error': result.error_message,
-                        'timestamp': time.time()
-                    }
+            # ✅ 检查返回格式
+            if not result.success:
+                error_msg = result.error_message or "Unknown error"
                 
-                rfq_id = result.order_id
-                logger.info(f"⏳ 开始等待订单状态 rfq_id={rfq_id}")
-
-                # ✅ 2. 等待 WebSocket 推送订单状态（适配器层负责）
-                self.current_order_id = rfq_id
-                logger.info(f"✅ 已设置 current_order_id = {rfq_id}")
-
-                # final_status = await self._wait_for_order_fill(rfq_id, timeout=5.0)
-                logger.info(f" 等待200ms后获取订单{rfq_id} 状态...")
-                await asyncio.sleep(0.2)  # 确保状态更新完成
-                
-                max_order_retries = 40
-                retry_interval = 0.01  # 10 ms
-                order_data = None
-                final_status = None
-                retries = 0
-
-                for attempt_idx in range(max_order_retries):
-                    try:
-                        # 获取订单历史，尝试寻找匹配的 rfq_id
-                        history_data = await self.client.get_orders_history(limit=20, offset=0)
-                        if history_data and 'result' in history_data:
-                            # 在结果列表中寻找对应的订单
-                            matched_orders = [o for o in history_data['result'] if o.get('rfq_id') == rfq_id]
-                            if matched_orders:
-                                order_data = matched_orders[0]
-                                final_status = order_data.get('status')
-                                
-                                logger.info(f"📊 第 {attempt_idx + 1} 次尝试成功获取订单状态: {final_status}, 等待状态耗时: {(time.time() - place_end) * 1000:.2f}ms")
-                                logger.info(f"⏱️ {self.exchange_name} 下单总耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
-                                retries = attempt_idx + 1
-                                break
-
-                        if attempt_idx < max_order_retries - 1:
-                            retry_interval = 0.01 if attempt_idx < 10 else 0.05
-                            logger.info(f"⏳ 订单 {rfq_id} 尚未入库，{retry_interval}s 后重试 ({attempt_idx + 1}/{max_order_retries})")
-                            await asyncio.sleep(retry_interval)
-                    except Exception as e:
-                        logger.warning(f"⚠️ 第 {attempt_idx + 1} 次查询历史订单异常: {e}")
-                        await asyncio.sleep(retry_interval)
-
-                execution_duration = (time.time() - place_end) * 1000  # 毫秒
-                logger.info(f"⏱️ {self.exchange_name} 等待状态耗时: { execution_duration }ms, 状态: { final_status }")
-                logger.info(f"⏱️ {self.exchange_name} 下单总耗时: {(time.time() - order_start_time) * 1000}ms")
-
-                if not final_status:
-                    logger.error(f"❌ 达到最大重试次数，仍无法获取订单 {rfq_id} 的信息")
-                    return {
-                        'success': False,
-                        'order_id': rfq_id,
-                        'error': f'Timeout and order status: {final_status}',
-                        'filled_price': Decimal('0'),
-                        'filled_quantity': Decimal('0'),
-                        'timestamp': time.time(),
-                        'place_duration_ms': place_duration,
-                        'execution_duration_ms': execution_duration,
-                        'retries': retries
-                    }
-                # ✅ 3. 判断最终状态
-                if final_status.upper() in ['FILLED', 'CLEARED']:
-                    logger.info(f"✅ 市价单成功: {rfq_id}")
-                    filled_price = Decimal(str(order_data.get('price', '0')))
-                    filled_quantity = Decimal(str(order_data.get('qty', '0')))
-                    execution_duration = (time.time() - place_end) * 1000  # 毫秒
-                    logger.info(
-                        f"✅ 获取订单信息:\n"
-                        f"   订单 ID: {rfq_id}\n"
-                        f"   成交价: ${filled_price}\n"
-                        f"   成交量: {filled_quantity}"
-                    )
-                    
-                    return {
-                        'success': True,
-                        'order_id': rfq_id,
-                        'filled_price': filled_price,
-                        'filled_quantity': filled_quantity,
-                        'error': None,
-                        'timestamp': time.time(),
-                        'place_duration_ms': place_duration,
-                        'execution_duration_ms': execution_duration,
-                    }
-                elif final_status.upper() in ['CANCELED', 'REJECTED']:
-                    logger.error(f"❌ 市价单失败: {final_status}")
-                    return {
-                        'success': False,
-                        'order_id': rfq_id,
-                        'error': f'Order {final_status}',
-                        'filled_price': Decimal('0'),
-                        'filled_quantity': Decimal('0'),
-                        'timestamp': time.time(),
-                        'place_duration_ms': place_duration,
-                        'execution_duration_ms': execution_duration,
-                    }
-                else:
-                    # 未知状态，保守返回失败
-                    logger.error(f"❌ 未知订单状态: {final_status}")
-                    return {
-                        'success': False,
-                        'order_id': rfq_id,
-                        'error': f'Unknown status: {final_status}',
-                        'filled_price': Decimal('0'),
-                        'filled_quantity': Decimal('0'),
-                        'timestamp': time.time(),
-                        'place_duration_ms': place_duration,
-                        'execution_duration_ms': execution_duration,
-                    }
-            except Exception as e:
-                logger.error(f"❌ place_market_order 异常: {e}")
-                logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
-
-                import traceback
-                traceback.print_exc()
-                
-                # ✅ 异常时也要返回字典
+                logger.error(f"❌ 市价单下单失败: {error_msg}")
                 return {
                     'success': False,
                     'order_id': None,
-                    'error': str(e),
-                    'filled_price': Decimal('0'),
-                    'filled_quantity': Decimal('0'),
+                    'error': result.error_message,
                     'timestamp': time.time()
                 }
+            
+            rfq_id = result.order_id
+            logger.info(f"⏳ 开始等待订单状态 rfq_id={rfq_id}")
+
+            # ✅ 2. 等待 WebSocket 推送订单状态（适配器层负责）
+            self.current_order_id = rfq_id
+            logger.info(f"✅ 已设置 current_order_id = {rfq_id}")
+
+            # final_status = await self._wait_for_order_fill(rfq_id, timeout=5.0)
+            logger.info(f" 等待200ms后获取订单{rfq_id} 状态...")
+            await asyncio.sleep(0.2)  # 确保状态更新完成
+            
+            max_order_retries = 40
+            retry_interval = 0.01  # 10 ms
+            order_data = None
+            final_status = None
+            retries = 0
+
+            for attempt_idx in range(max_order_retries):
+                try:
+                    # 获取订单历史，尝试寻找匹配的 rfq_id
+                    history_data = await self.client.get_orders_history(limit=20, offset=0)
+                    if history_data and 'result' in history_data:
+                        # 在结果列表中寻找对应的订单
+                        matched_orders = [o for o in history_data['result'] if o.get('rfq_id') == rfq_id]
+                        if matched_orders:
+                            order_data = matched_orders[0]
+                            final_status = order_data.get('status')
+                            
+                            logger.info(f"📊 第 {attempt_idx + 1} 次尝试成功获取订单状态: {final_status}")
+                            retries = attempt_idx + 1
+                            break
+
+                    if attempt_idx < max_order_retries - 1:
+                        retry_interval = 0.01 if attempt_idx < 10 else 0.05
+                        logger.info(f"⏳ 订单 {rfq_id} 尚未入库，{retry_interval}s 后重试 ({attempt_idx + 1}/{max_order_retries})")
+                        await asyncio.sleep(retry_interval)
+                except Exception as e:
+                    logger.warning(f"⚠️ 第 {attempt_idx + 1} 次查询历史订单异常: {e}")
+                    await asyncio.sleep(retry_interval)
+
+            execution_duration = (time.time() - place_end) * 1000  # 毫秒
+            logger.info(f"⏱️ {self.exchange_name} 等待状态耗时: { execution_duration }ms, 状态: { final_status }")
+            logger.info(f"⏱️ {self.exchange_name} 下单总耗时: {(time.time() - order_start_time) * 1000:.2f}ms")
+
+            order_info = {
+                'success': False,
+                'order_id': rfq_id,
+                'error': None,
+                'filled_price': Decimal(str(order_data.get('price', '0'))) if order_data else None,
+                'filled_quantity': Decimal(str(order_data.get('qty', '0'))) if order_data else None,
+                'timestamp': time.time(),
+                'place_duration_ms': place_duration,
+                'execution_duration_ms': execution_duration,
+                'retries': retries
+            }
+            if not final_status:
+                logger.error(f"❌ 达到最大重试次数，仍无法获取订单 {rfq_id} 的信息")
+                order_info['error'] = f'Timeout and order status: {final_status}'
+            # ✅ 3. 判断最终状态
+            if final_status.upper() in ['FILLED', 'CLEARED']:
+                logger.info(f"✅ 市价单成功: {rfq_id} {order_info['filled_quantity']} @ {order_info['filled_price']}")
+                order_info['success'] = True
+                
+            elif final_status.upper() in ['CANCELED', 'REJECTED']:
+                logger.error(f"❌ 市价单失败: {final_status}")
+                order_info['error'] = f'Order {final_status}'
+            else:
+                # 未知状态，保守返回失败
+                logger.error(f"❌ 未知订单状态: {final_status}")
+                order_info['error'] = f'Unknown status {final_status}'
+
+            return order_info
+        except Exception as e:
+            logger.error(f"❌ place_market_order 异常: {e}")
+            logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
+
+            import traceback
+            traceback.print_exc()
+            
+            # ✅ 异常时也要返回字典
+            return {
+                'success': False,
+                'order_id': None,
+                'error': str(e),
+                'filled_price': Decimal('0'),
+                'filled_quantity': Decimal('0'),
+                'timestamp': time.time()
+            }
         
     async def place_limit_order(
         self,

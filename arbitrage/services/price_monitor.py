@@ -88,7 +88,7 @@ class PriceMonitorService:
         """取消订阅"""
         if callback in self._subscribers:
             self._subscribers.remove(callback)
-            logger.info(f"❌ 移除订阅者: {callback.__name__}")
+            logger.info(f"✅ 移除订阅者: {callback.__name__}")
     
     async def start(self):
         """启动监控"""
