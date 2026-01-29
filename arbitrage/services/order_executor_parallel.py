@@ -1367,6 +1367,7 @@ class OrderExecutor:
             )
 
     async def check_position_balance(self):
+        await asyncio.sleep(2)
         logger.info("🔍 检查两所仓位平衡情况...")
         symbol_a = self.exchange_a.symbol
         symbol_b = self.exchange_b.symbol

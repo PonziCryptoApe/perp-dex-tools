@@ -371,9 +371,7 @@ class HedgeStrategy(BaseStrategy):
 
 
         except Exception as e:
-            logger.error(f"❌ 价格更新处理失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"❌ 价格更新处理失败: {e}")
 
     async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
@@ -1086,8 +1084,8 @@ class HedgeStrategy(BaseStrategy):
             # 解析仓位数量
             qty_a = Decimal(str(position_a.get('size', 0))) if position_a else Decimal('0')
             qty_b = Decimal(str(position_b.get('size', 0))) if position_b else Decimal('0')
-            side_a = position_a.get('side')
-            side_b = position_b.get('side')
+            side_a = position_a.get('side') if position_a else 'neutral'
+            side_b = position_b.get('side') if position_b else 'neutral'
 
             if qty_a ==0 or qty_b == 0:
                 logger.info(f"当前A所仓位: {qty_a}({side_a}), B所仓位: {qty_b}({side_b})")
