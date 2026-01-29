@@ -422,9 +422,10 @@ class OrderExecutor:
                 # ✅ 从第 1 次重试开始，获取最新价格和 quote_id
                 try:
                     if order_limiter:
-                        logger.info(f"⏳ 重试订单等待速率限制器...")
+                        time_limiter_start = time.time()
                         await order_limiter.acquire()
-                        logger.info(f"✅ 重试订单速率限制器结束等待")
+                        time_limiter_end = time.time()
+                        logger.info(f"✅ 重试订单速率限制器耗时{ (time_limiter_end - time_limiter_start) * 1000:.2f}")
                     orderbook = await exchange.get_latest_orderbook()
                     if orderbook:
                         # ✅ 更新 quote_id（如果有）
@@ -457,7 +458,8 @@ class OrderExecutor:
                 except Exception as e:
                     logger.warning(f"⚠️ 获取最新价格失败: {e}，使用初始价格 ${initial_price}")
                 current_retry_mode = retry_mode
-                logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 获取订单簿耗时为: {(time.time() - retry_start_time) *1000:.2f}ms")
+                orderbook_time_got = time.time()
+                logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 获取订单簿耗时为: {(orderbook_time_got - retry_start_time) *1000:.2f}ms")
                 try:
                     if order_type == 'open':
                         result = await exchange.place_open_order(
@@ -479,8 +481,8 @@ class OrderExecutor:
                         )
                 except lighter.exceptions.ApiException as le:
                     await self.handleLgApiExcep(le)
-                logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 获取下单订单状态的时间为: {time.time() - retry_start_time}")
-                logger.info(f" 从第一次重试开始，到获取到下单状态的时间为: { time.time() - start_time}")
+                logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 从下单到获取订单状态耗时为: {(time.time() - orderbook_time_got) *1000:.2f}")
+                logger.info(f" 从第一次重试开始到获取到下单状态的时间为: { time.time() - start_time}")
                 # ✅ 检查部分成交
                 if not result.get('success') and result.get('partial_fill'):
                     # ✅ 部分成交也返回（由上层处理）

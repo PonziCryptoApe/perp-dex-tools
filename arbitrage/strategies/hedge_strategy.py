@@ -158,7 +158,7 @@ class HedgeStrategy(BaseStrategy):
         # ✅ 定期输出统计（可选）
         self._last_stats_log_time = 0
         self._stats_log_interval = 60  # 每 60 秒输出一次统计
-        self._equity_log_interval = 15 * 60  # 每 15 分钟输出一次权益和交易量
+        self._equity_log_interval = 5 * 60  # 每 15 分钟输出一次权益和交易量
         self._last_equity_log_time = None
         self._last_yaml_check_time = None
         self._yaml_check_interval = 60  # 每 60 秒检查一次 YAML 配置文件
@@ -240,10 +240,12 @@ class HedgeStrategy(BaseStrategy):
 
     async def get_equity_and_volume(self):
         """获取交易所的权益和交易量"""
-        a_exchange_volume = await self.exchange_a.get_trade_volume()
-        a_exchange_equity = await self.exchange_a.get_balance()
-        b_exchange_volume = await self.exchange_b.get_trade_volume()
-        b_exchange_equity = await self.exchange_b.get_balance()
+        task_a_balance = asyncio.create_task(self.exchange_a.get_balance())
+        task_a_volume = asyncio.create_task(self.exchange_a.get_trade_volume())
+        task_b_balance = asyncio.create_task(self.exchange_b.get_balance())
+        task_b_volume = asyncio.create_task(self.exchange_b.get_trade_volume())
+        a_exchange_equity, a_exchange_volume, b_exchange_equity, b_exchange_volume = await asyncio.gather(task_a_balance, task_a_volume, task_b_balance, task_b_volume)
+        
         logger.info(f"📊 A所交易量: '----', 权益: {a_exchange_equity:.2f}")
         logger.info(f"📊 B所交易量: {b_exchange_volume:.2f}, 权益: {b_exchange_equity:.2f}")
         return a_exchange_volume, a_exchange_equity, b_exchange_volume, b_exchange_equity
@@ -364,6 +366,9 @@ class HedgeStrategy(BaseStrategy):
                         )
                         
                         await self.stop()
+                else:
+                    await self._log_equity_and_volume_if_needed()
+
 
         except Exception as e:
             logger.error(f"❌ 价格更新处理失败: {e}")
@@ -567,7 +572,6 @@ class HedgeStrategy(BaseStrategy):
                 finally:
                     self._is_executing = False
             self._log_stats_if_needed()
-            await self._log_equity_and_volume_if_needed()
 
     async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
@@ -797,7 +801,6 @@ class HedgeStrategy(BaseStrategy):
                 finally:
                     self._is_executing = False
             self._log_stats_if_needed()
-            await self._log_equity_and_volume_if_needed()
 
     def check_yaml_config_updates(self):
         """检查 YAML 配置文件更新"""
@@ -1077,13 +1080,25 @@ class HedgeStrategy(BaseStrategy):
             self._last_equity_log_time = current_time
         
         if current_time - self._last_equity_log_time >= self._equity_log_interval:
-            try:
-                volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
+            position_a = await self.exchange_a.get_position(self.symbol_a)
+            position_b = await self.exchange_b.get_position(self.symbol_b)
 
-                logger.info(
-                    f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f}"
-                    f"   预估损耗: ${((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2):.2f}"
-                )
-            except Exception as e:
-                logger.error(f"❌ 获取账户权益或交易量失败: {e}")
-            self._last_equity_log_time = current_time
+            # 解析仓位数量
+            qty_a = Decimal(str(position_a.get('size', 0))) if position_a else Decimal('0')
+            qty_b = Decimal(str(position_b.get('size', 0))) if position_b else Decimal('0')
+            side_a = position_a.get('side')
+            side_b = position_b.get('side')
+
+            if qty_a ==0 or qty_b == 0:
+                logger.info(f"当前A所仓位: {qty_a}({side_a}), B所仓位: {qty_b}({side_b})")
+                try:
+                    volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
+
+                    logger.info(
+                        f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f},"
+                        f"   B所交易量 {volume_b},"
+                        f"   预估损耗: ${((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2) * 100:.4f}"
+                    )
+                except Exception as e:
+                    logger.error(f"❌ 获取账户权益或交易量失败: {e}")
+                self._last_equity_log_time = current_time
