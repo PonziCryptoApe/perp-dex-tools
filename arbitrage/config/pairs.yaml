@@ -336,7 +336,7 @@ pairs:
   
   lighter_varitonal_xrp:
     enabled: true
-    symbol: PAXG
+    symbol: XRP
     exchange_a: lighter
     exchange_b: variational
     quantity: 25
