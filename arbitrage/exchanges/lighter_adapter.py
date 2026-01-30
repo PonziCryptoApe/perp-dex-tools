@@ -399,7 +399,10 @@ class LighterAdapter(ExchangeAdapter):
                 status = order_update.get('status', '').upper()
                 side = "short" if order_update["is_ask"] else "long"
                 filled_size = order_update.get('filled_base_amount', Decimal('0'))
-                price = Decimal(order_update.get('filled_quote_amount', '0')) / Decimal(order_update.get('filled_base_amount'))
+                if Decimal(order_update.get('filled_base_amount')) == 0:
+                    price = order_update.get('price')
+                else:
+                    price = Decimal(order_update.get('filled_quote_amount', '0')) / Decimal(order_update.get('filled_base_amount'))
                 size = order_update.get('base_size', Decimal('0'))
                 order_type = order_update.get('type', 'OPEN') # 字段无效
                 contract_id = self.client.config.contract_id

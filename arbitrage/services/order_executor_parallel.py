@@ -425,7 +425,7 @@ class OrderExecutor:
                         time_limiter_start = time.time()
                         await order_limiter.acquire()
                         time_limiter_end = time.time()
-                        logger.info(f"✅ 重试订单速率限制器耗时{ (time_limiter_end - time_limiter_start) * 1000:.2f}")
+                        logger.info(f"✅ 重试订单速率限制器耗时{ (time_limiter_end - time_limiter_start) * 1000:.2f}ms")
                     orderbook = await exchange.get_latest_orderbook()
                     if orderbook:
                         # ✅ 更新 quote_id（如果有）
@@ -481,7 +481,7 @@ class OrderExecutor:
                         )
                 except lighter.exceptions.ApiException as le:
                     await self.handleLgApiExcep(le)
-                logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 从下单到获取订单状态耗时为: {(time.time() - orderbook_time_got) *1000:.2f}")
+                logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 从下单到获取订单状态耗时为: {(time.time() - orderbook_time_got) *1000:.2f}ms")
                 logger.info(f" 从第一次重试开始到获取到下单状态的时间为: { time.time() - start_time}")
                 # ✅ 检查部分成交
                 if not result.get('success') and result.get('partial_fill'):
@@ -515,7 +515,7 @@ class OrderExecutor:
                         'attempt': attempt  # ✅ 实际尝试次数
                     }
                 else:
-                    logger.warning(
+                    logger.error(
                         f"⚠️ 下单失败: {exchange.exchange_name} | "
                         f"类型: {order_type} | 方向: {side} | "
                         f"尝试次数: {attempt}/{max_retries} | "
@@ -526,14 +526,10 @@ class OrderExecutor:
                     f"❌ 下单异常: {exchange.exchange_name} | "
                     f"类型: {order_type} | 方向: {side} | "
                     f"尝试次数: {attempt}/{max_retries} | "
-                    f"异常: {str(e)}"
-                    f"从本次拉取订单簿到异常耗时为: {(time.time() - retry_start_time) *1000:.2f}ms"
+                    f"从本次拉取订单簿到异常耗时为: {(time.time() - retry_start_time) *1000:.2f}ms |"
                     f"从第一次重试开始到本次异常耗时为: {(time.time() - start_time) * 1000:.2f}ms"
                 )
-        logger.error(f"❌ 下单失败: {exchange.exchange_name} | "
-                      f"类型: {order_type} | 方向: {side} | "
-                      f"尝试次数: {attempt}/{max_retries} | "
-                      f"错误: {result.get('error')}")
+                logger.exception(f"异常:{e}")
         return {
             'success': False,
             'order_id': None,
@@ -1021,43 +1017,7 @@ class OrderExecutor:
                         f"   🕒 交易所A耗时: {(order_a_result.get('timestamp') - execution_start_time) * 1000:.2f} ms \n"
                         f"   🕒 交易所B耗时: {(order_b_result.get('timestamp') - execution_start_time) * 1000:.2f} ms \n"
                     )
-                    # ✅ 获取实际成交价格
-                    # actual_price_a = retry_result_a.get('filled_price')
-                    # actual_price_b = order_b_result.get('filled_price')
                     
-                    # execution_end_time = time.time()
-                    # execution_delay_ms = (execution_end_time - execution_start_time) * 1000
-                    
-                    # if signal_trigger_time:
-                    #     total_delay_ms = (execution_end_time - signal_trigger_time) * 1000
-                    # else:
-                    #     total_delay_ms = None
-                    
-                    # # ✅ 更新 Position 对象
-                    # position.exchange_a_signal_exit_price = exchange_a_price
-                    # position.exchange_b_signal_exit_price = exchange_b_price
-                    
-                    # position.exchange_a_exit_price = actual_price_a
-                    # position.exchange_b_exit_price = actual_price_b
-                    
-                    # position.exchange_a_filled_exit_price = actual_price_a
-                    # position.exchange_b_filled_exit_price = actual_price_b
-                    
-                    # position.exchange_a_exit_order_id = retry_result_a.get('order_id')
-                    # position.exchange_b_exit_order_id = order_b_result.get('order_id')
-                    
-                    # position.exit_time = datetime.now()
-                    # position.signal_exit_time = signal_trigger_time
-                    # position.exit_execution_delay_ms = total_delay_ms
-                    
-                    # logger.info(
-                    #     f"✅ 平仓成功（A 所重试成功）:\n"
-                    #     f"   {self.exchange_a.exchange_name}: {retry_result_a.get('order_id')}\n"
-                    #     f"   {self.exchange_b.exchange_name}: {order_b_result.get('order_id')}\n"
-                    #     f"   ⏱️ 总耗时: {execution_delay_ms:.2f} ms"
-                    # )
-                    
-                    # return True, position
                 else:
                     logger.error(
                         f"❌ {self.exchange_a.exchange_name} 重试失败，"
@@ -1577,7 +1537,7 @@ class OrderExecutor:
             data = json.loads(e.body)
             error_code = data.get('code', 'Unknown')
             error_msg = data.get('message', str(e))
-            logger.error(f"❌ {self.exchange_name} 下单 API 错误: {error_code} - {error_msg}")
+            logger.error(f"❌ Lighter 下单 API 错误: {error_code} - {error_msg}")
             if error_code =='23000':
                 self.sleep_retries = self.sleep_retries + 1
                 logger.info(f"{error_msg}, 等待{self.sleep_interval}s")

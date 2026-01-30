@@ -597,9 +597,9 @@ class LighterClient(BaseExchangeClient):
 
         order_api = lighter.OrderApi(self.api_client)
         # Get all order books to find the market for our ticker
-        order_books = await order_api.order_book_orders(self.config.contract_id, 1)
+        data = await order_api.order_book_orders(self.config.contract_id, 1)
         
         return {
-            "bids": [{"price": order_books['bids'][0]["price"], "size":  order_books['bids'][0]["initial_base_amount"]}],
-            "asks": [{"price": order_books['asks'][0]["price"], "size": order_books['bids'][0]["initial_base_amount"]}]
+            "bids": [{"price": data.bids[0].price, "size": data.bids[0].remaining_base_amount }],
+            "asks": [{"price": data.asks[0].price, "size": data.bids[0].remaining_base_amount }]
         }

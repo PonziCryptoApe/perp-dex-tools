@@ -1094,8 +1094,8 @@ class HedgeStrategy(BaseStrategy):
 
                     logger.info(
                         f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f},"
-                        f"   B所交易量 {volume_b},"
-                        f"   预估损耗: ${((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2) * 100:.4f}"
+                        f"   B所交易量 {volume_b - self.start_vol_b},"
+                        f"   预估损耗(权益减量/交易增量 * 100%): {((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b - self.start_vol_b) * 2) * 100:.4f}%"
                     )
                 except Exception as e:
                     logger.error(f"❌ 获取账户权益或交易量失败: {e}")
