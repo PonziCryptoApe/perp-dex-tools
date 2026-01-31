@@ -590,16 +590,25 @@ class LighterClient(BaseExchangeClient):
         return account_data.accounts[0]
     
     async def get_orderbook(self):
-        ticker = self.config.ticker
-        if len(ticker) == 0:
-            self.logger.log("Ticker is empty", "ERROR")
-            raise ValueError("Ticker is empty")
+        try:
+            fetch_start = time.time()
 
-        order_api = lighter.OrderApi(self.api_client)
-        # Get all order books to find the market for our ticker
-        data = await order_api.order_book_orders(self.config.contract_id, 1)
-        
-        return {
-            "bids": [{"price": data.bids[0].price, "size": data.bids[0].remaining_base_amount }],
-            "asks": [{"price": data.asks[0].price, "size": data.bids[0].remaining_base_amount }]
-        }
+            ticker = self.config.ticker
+            if len(ticker) == 0:
+                self.logger.log("Ticker is empty", "ERROR")
+                raise ValueError("Ticker is empty")
+
+            order_api = lighter.OrderApi(self.api_client)
+            # Get all order books to find the market for our ticker
+            data = await order_api.order_book_orders(self.config.contract_id, 1)
+            fetch_end = time.time()
+            fetch_duration_ms = (fetch_end - fetch_start) * 1000  # 毫秒
+
+            return {
+                "bids": [[data.bids[0].price, data.bids[0].remaining_base_amount ]],
+                "asks": [[data.asks[0].price, data.bids[0].remaining_base_amount ]],
+                'timestamp': fetch_start,  # 秒时间戳
+                'fetch_duration': fetch_duration_ms,
+            }
+        except Exception as e:
+            self.logger.log(f"获取 Variational 订单簿失败: {e}")

@@ -240,7 +240,7 @@ class VariationalAdapter(ExchangeAdapter):
             logger.warning("⚠️ Variational API 超时")
             return None
         except Exception as e:
-            logger.debug(f"获取 Variational 订单簿失败: {e}")
+            logger.exception(f"获取 Variational 订单簿失败: {e}")
             return None
     
     async def get_latest_orderbook(self) -> Optional[Dict]:

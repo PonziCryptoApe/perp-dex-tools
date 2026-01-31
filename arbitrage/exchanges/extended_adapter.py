@@ -64,7 +64,7 @@ class ExtendedAdapter(ExchangeAdapter):
                 )
 
         except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 连接失败: {e}")
+            logger.exception(f"❌ {self.exchange_name} 连接失败: {e}")
             raise
     
     async def disconnect(self):
@@ -165,7 +165,7 @@ class ExtendedAdapter(ExchangeAdapter):
             )
         
         except Exception as e:
-            logger.error(f"❌ 处理 Extended 订单簿更新失败: {e}")
+            logger.exception(f"❌ 处理 Extended 订单簿更新失败: {e}")
 
     async def _poll_orderbook(self):
         """轮询订单簿数据"""
@@ -197,15 +197,15 @@ class ExtendedAdapter(ExchangeAdapter):
                             await self._orderbook_callback(self._orderbook)
                 
                 except Exception as e:
-                    logger.debug(f"轮询订单簿失败: {e}")
+                    logger.exception(f"轮询订单簿失败: {e}")
                 
                 # ✅ 每 0.5 秒轮询一次
                 await asyncio.sleep(0.5)
         
         except asyncio.CancelledError:
-            logger.debug(f"{self.exchange_name} 订单簿轮询已停止")
+            logger.exception(f"{self.exchange_name} 订单簿轮询已停止")
         except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 订单簿轮询异常: {e}")
+            logger.exception(f"❌ {self.exchange_name} 订单簿轮询异常: {e}")
 
     def _on_order_update(self, order_data: dict):
         """处理 WebSocket 订单更新"""
@@ -286,7 +286,7 @@ class ExtendedAdapter(ExchangeAdapter):
             }
 
         except Exception as e:
-            logger.error(f"❌ 等待订单状态异常: {e}")
+            logger.exception(f"❌ 等待订单状态异常: {e}")
             return {
                 'status': None,
                 'filled_size': Decimal('0'),
@@ -556,9 +556,7 @@ class ExtendedAdapter(ExchangeAdapter):
             }
         
         except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 下单失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"❌ {self.exchange_name} 下单失败: {e}")
 
             if retry_mode == 'aggressive':
                 logger.info("🔄 激进模式：重试下单...")
@@ -612,5 +610,5 @@ class ExtendedAdapter(ExchangeAdapter):
             return position
         
         except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 获取持仓失败: {e}", exc_info=True)
+            logger.exception(f"❌ {self.exchange_name} 获取持仓失败: {e}", exc_info=True)
             return None

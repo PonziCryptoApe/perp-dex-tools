@@ -453,34 +453,32 @@ class OrderExecutor:
                                 )
                                 price = new_price
                     else:
-                        logger.warning(f"⚠️ 无法获取最新订单簿，使用初始价格 ${initial_price}")
-                
+                        logger.warning(f"⚠️ 无法获取最新订单簿，使用初始价格 ${initial_price}")    
                 except Exception as e:
-                    logger.warning(f"⚠️ 获取最新价格失败: {e}，使用初始价格 ${initial_price}")
+                    logger.exception(f"⚠️ 获取最新价格失败: {e}，使用初始价格 ${initial_price}")
                 current_retry_mode = retry_mode
                 orderbook_time_got = time.time()
                 logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 获取订单簿耗时为: {(orderbook_time_got - retry_start_time) *1000:.2f}ms")
-                try:
-                    if order_type == 'open':
-                        result = await exchange.place_open_order(
-                            side=side,
-                            quantity=quantity,
-                            price=price,
-                            retry_mode=current_retry_mode,
-                            quote_id=current_quote_id,
-                            slippage=Decimal('0.02')
-                        )
-                    else:  # 'close'
-                        result = await exchange.place_close_order(
-                            side=side,
-                            quantity=quantity,
-                            price=price,
-                            retry_mode=current_retry_mode,
-                            quote_id=current_quote_id,
-                            slippage=Decimal('0.02')
-                        )
-                except lighter.exceptions.ApiException as le:
-                    await self.handleLgApiExcep(le)
+                
+                if order_type == 'open':
+                    result = await exchange.place_open_order(
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        retry_mode=current_retry_mode,
+                        quote_id=current_quote_id,
+                        slippage=Decimal('0.02')
+                    )
+                else:  # 'close'
+                    result = await exchange.place_close_order(
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        retry_mode=current_retry_mode,
+                        quote_id=current_quote_id,
+                        slippage=Decimal('0.02')
+                    )
+                
                 logger.info(f"💡 第 {attempt} 次重试，使用 {current_retry_mode} 模式, 从下单到获取订单状态耗时为: {(time.time() - orderbook_time_got) *1000:.2f}ms")
                 logger.info(f" 从第一次重试开始到获取到下单状态的时间为: { time.time() - start_time}")
                 # ✅ 检查部分成交
@@ -520,16 +518,24 @@ class OrderExecutor:
                         f"类型: {order_type} | 方向: {side} | "
                         f"尝试次数: {attempt}/{max_retries} | "
                         f"错误: {result.get('error')}"
-                    )                                
-            except Exception as e:
+                    )  
+            except lighter.exceptions.ApiException as le:
                 logger.error(
+                    f"❌ 下单异常(429): {exchange.exchange_name} | "
+                    f"类型: {order_type} | 方向: {side} | "
+                    f"尝试次数: {attempt}/{max_retries} | "
+                    f"从本次拉取订单簿到异常耗时为: {(time.time() - retry_start_time) *1000:.2f}ms |"
+                    f"从第一次重试开始到本次异常耗时为: {(time.time() - start_time) * 1000:.2f}ms"
+                )
+                await self.handleLgApiExcep(le)                           
+            except Exception as e:
+                logger.exception(
                     f"❌ 下单异常: {exchange.exchange_name} | "
                     f"类型: {order_type} | 方向: {side} | "
                     f"尝试次数: {attempt}/{max_retries} | "
                     f"从本次拉取订单簿到异常耗时为: {(time.time() - retry_start_time) *1000:.2f}ms |"
                     f"从第一次重试开始到本次异常耗时为: {(time.time() - start_time) * 1000:.2f}ms"
                 )
-                logger.exception(f"异常:{e}")
         return {
             'success': False,
             'order_id': None,
@@ -1217,11 +1223,7 @@ class OrderExecutor:
                 return True, position
         
         except Exception as e:
-            logger.critical(
-                f"🚨 平仓执行异常: {str(e)}"
-            )
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"🚨 平仓执行异常: {str(e)}")
             return False, None
         
     # ✅ 紧急平仓方法
@@ -1260,7 +1262,7 @@ class OrderExecutor:
                     )
 
         except Exception as e:
-            logger.error(f"❌ 紧急平仓异常: {e}")
+            logger.exception(f"❌ 紧急平仓异常: {e}")
     
     async def _emergency_close_b(self, order_id: str, quantity: Decimal):
         """紧急平仓 B 所（单边持仓风险处理）"""
@@ -1297,7 +1299,7 @@ class OrderExecutor:
                     )
         
         except Exception as e:
-            logger.error(f"❌ 紧急平仓异常: {e}")
+            logger.exception(f"❌ 紧急平仓异常: {e}")
 
     async def _close_position(
         self,
@@ -1343,7 +1345,7 @@ class OrderExecutor:
                 )
         
         except Exception as e:
-            logger.error(
+            logger.exception(
                 f"❌ 平仓异常:\n"
                 f"   交易所: {exchange.exchange_name}\n"
                 f"   原订单: {order_id or 'N/A'}\n"  # ✅ 添加这一行

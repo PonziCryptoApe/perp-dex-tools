@@ -824,7 +824,7 @@ class HedgeStrategy(BaseStrategy):
                         self.position_manager.max_position = new_max_position
                     
             except Exception as e:
-                logger.error(f"⚠️ 检查 YAML 配置文件时出错: {e}")
+                logger.exception(f"⚠️ 检查 YAML 配置文件时出错: {e}")
 
     def _create_dummy_position(self) -> Position:
         """创建虚拟 Position（累计模式用）"""
@@ -908,7 +908,7 @@ class HedgeStrategy(BaseStrategy):
             )
             await self.lark_bot.send_text(message)
         except Exception as e:
-            logger.error(f"❌ 发送飞书通知失败: {e}")
+            logger.exception(f"❌ 发送飞书通知失败: {e}")
     
     async def _send_close_notification(self, position: Position, pnl_pct: Decimal, prices: PriceSnapshot):
         """发送平仓通知"""
@@ -962,7 +962,7 @@ class HedgeStrategy(BaseStrategy):
             
             await self.lark_bot.send_text(message)
         except Exception as e:
-            logger.error(f"❌ 发送飞书通知失败: {e}")
+            logger.exception(f"❌ 发送飞书通知失败: {e}")
     def _format_open_stats(self) -> str:
         """格式化开仓统计信息"""
         stats = self.signal_stats['open']
@@ -1098,5 +1098,5 @@ class HedgeStrategy(BaseStrategy):
                         f"   预估损耗(权益减量/交易增量 * 100%): {((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b - self.start_vol_b) * 2) * 100:.4f}%"
                     )
                 except Exception as e:
-                    logger.error(f"❌ 获取账户权益或交易量失败: {e}")
+                    logger.exception(f"❌ 获取账户权益或交易量失败: {e}")
                 self._last_equity_log_time = current_time

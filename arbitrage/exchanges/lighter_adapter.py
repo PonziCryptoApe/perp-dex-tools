@@ -69,7 +69,7 @@ class LighterAdapter(ExchangeAdapter):
                 logger.warning(f"⚠️ {self.exchange_name} 不支持订单更新回调")
 
         except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 连接失败: {e}")
+            logger.exception(f"❌ {self.exchange_name} 连接失败: {e}")
             raise
     
     async def _get_market_index(self) -> int:
@@ -85,7 +85,7 @@ class LighterAdapter(ExchangeAdapter):
             logger.info(f"✅ Lighter market_index: {market_index}")
             return market_index
         except Exception as e:
-            logger.error(f"获取 market_index 失败: {e}")
+            logger.exception(f"获取 market_index 失败: {e}")
             raise
     
     async def disconnect(self):
@@ -156,7 +156,7 @@ class LighterAdapter(ExchangeAdapter):
                             await ws.send(json.dumps(subscribe_orders_msg))
                             logger.info("✅ Subscribed to account orders with auth token (expires in 10 minutes)")
                     except Exception as e:
-                        logger.warning(f"⚠️ Error creating auth token for account orders subscription: {e}")
+                        logger.exception(f"⚠️ Error creating auth token for account orders subscription: {e}")
 
                     # 接收消息
                     while True:
@@ -174,15 +174,13 @@ class LighterAdapter(ExchangeAdapter):
                             logger.debug("⏳ Lighter WS 1s 无消息，继续监听...")  # 心跳检查
                             continue
                         except websockets.exceptions.ConnectionClosed:
-                            logger.warning("⚠️ Lighter WS 连接关闭，重连...")
+                            logger.exception("⚠️ Lighter WS 连接关闭，重连...")
                             break  # 跳出内循环，重连外层
             
             except websockets.exceptions.ConnectionClosed as e:
-                logger.warning(f"⚠️ Lighter WebSocket 连接关闭: {e}")
+                logger.exception(f"⚠️ Lighter WebSocket 连接关闭: {e}")
             except Exception as e:
-                logger.error(f"❌ Lighter WebSocket 异常: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"❌ Lighter WebSocket 异常: {e}")
             
             # 重连逻辑
             reconnect_count += 1
@@ -287,9 +285,7 @@ class LighterAdapter(ExchangeAdapter):
                 await self._notify_orderbook_update()
         
         except Exception as e:
-            logger.error(f"❌ 处理 Lighter 快照失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"❌ 处理 Lighter 快照失败: {e}")
     
     async def _handle_lighter_update(self, data: dict):
         """处理 Lighter 增量更新消息"""
@@ -330,9 +326,7 @@ class LighterAdapter(ExchangeAdapter):
                 await self._notify_orderbook_update()
         
         except Exception as e:
-            logger.error(f"❌ 处理 Lighter 更新失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"❌ 处理 Lighter 更新失败: {e}")
     
     def _update_lighter_best_prices(self):
         """更新 Lighter 最佳买卖价"""
@@ -434,7 +428,7 @@ class LighterAdapter(ExchangeAdapter):
                         f"filled_size={filled_size}, price={price}")
 
         except Exception as e:
-            logger.error(f"❌ 处理订单更新失败: {e}")
+            logger.exception(f"❌ 处理订单更新失败: {e}")
 
     async def _wait_for_order_status(self, client_order_index: int, timeout: float = 1.0) -> dict:
         """等待订单状态（使用 Future）"""
@@ -451,7 +445,7 @@ class LighterAdapter(ExchangeAdapter):
             self._order_status_futures.pop(client_order_index, None)
             raise
         except Exception as e:
-            logger.error(f"❌ 等待订单状态异常: {e}")
+            logger.exception(f"❌ 等待订单状态异常: {e}")
             self._order_status_futures.pop(client_order_index, None)
             raise
 
@@ -743,7 +737,7 @@ class LighterAdapter(ExchangeAdapter):
                 return order_info
    
             except Exception as wait_e:
-                logger.error(f"❌ 等待状态异常: {wait_e}")
+                logger.exception(f"❌ 等待状态异常: {wait_e}")
                 logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
                 order_info['timestamp'] = time.time()
                 order_info['execution_duration_ms'] = (order_info['timestamp'] - wait_start_time) * 1000
@@ -755,7 +749,7 @@ class LighterAdapter(ExchangeAdapter):
             raise
                 
         except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 下单失败: {e}")
+            logger.exception(f"❌ {self.exchange_name} 下单失败: {e}")
             logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
             import traceback
             traceback.print_exc()
@@ -799,7 +793,7 @@ class LighterAdapter(ExchangeAdapter):
                 }
             
         except Exception as e:
-            logger.error(f"❌ {self.exchange_name} 获取持仓失败: {e}", exc_info=True)
+            logger.exception(f"❌ {self.exchange_name} 获取持仓失败: {e}", exc_info=True)
             return None
     async def get_trade_volume(self) -> Decimal:
         """
@@ -811,7 +805,7 @@ class LighterAdapter(ExchangeAdapter):
         try:
             return Decimal('0')
         except Exception as e:
-            logger.error(f"❌ lighter 获取交易量失败: {e}", exc_info=True)
+            logger.exception(f"❌ lighter 获取交易量失败: {e}", exc_info=True)
             return Decimal('0')
         
     async def get_balance(self) -> Decimal:
@@ -825,5 +819,5 @@ class LighterAdapter(ExchangeAdapter):
             balance_info = await self.client.get_portfolio()
             return Decimal(balance_info.get('balance', '0'))
         except Exception as e:
-            logger.error(f"❌ lighter 获取余额失败: {e}", exc_info=True)
+            logger.exception(f"❌ lighter 获取余额失败: {e}", exc_info=True)
             return Decimal('0')
