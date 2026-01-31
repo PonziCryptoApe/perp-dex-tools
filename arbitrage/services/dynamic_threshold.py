@@ -25,7 +25,7 @@ class DynamicThresholdManager:
         std_multiplier: float = 1.0,
         min_total_threshold: float = 0.02,
         max_std_multiplier: float = 4.0,
-        min_std_multiplier: float = 0,
+        min_std_multiplier: float = 1.5,
         enable_logging: bool = True,  # ✅ 新增：是否启用数据记录
         log_dir: str = "logs/arbitrage/dynamic_threshold"  # ✅ 新增：日志目录
     ):

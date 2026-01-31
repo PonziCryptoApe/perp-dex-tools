@@ -608,15 +608,29 @@ class OrderExecutor:
                 )
             )
 
-            try:
-                order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
-            except lighter.exceptions.ApiException as le:
-                await self.handleLgApiExcep(le)
-            success_a = order_a_result.get('success', False) or (
-                order_a_result.get('partial_fill', False)
-            )
+            
+            order_a_result, order_b_result = await asyncio.gather(task_a, task_b, return_exceptions=True)
+            
+            success_a = False
+            success_b = False
+            filled_qty_a = Decimal('0')
+            filled_qty_b = Decimal('0')
 
-            success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
+            if isinstance(order_a_result, Exception):
+                logger.error(f"❌ 交易所A 下单异常: {order_a_result}")
+                if isinstance(order_a_result, lighter.exceptions.ApiException):
+                    await self.handleLgApiExcep(order_a_result)  # 如果是 lighter 异常
+                order_a_result = {'success': False, 'error': str(order_a_result)}
+            else:
+                success_a = order_a_result.get('success', False) or order_a_result.get('partial_fill', False)
+
+            if isinstance(order_b_result, Exception):
+                logger.error(f"❌ 交易所B 下单异常: {order_b_result}")
+                if isinstance(order_b_result, lighter.exceptions.ApiException):
+                    await self.handleLgApiExcep(order_b_result)
+                order_b_result = {'success': False, 'error': str(order_a_result)}
+            else:
+                success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
             
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
@@ -879,11 +893,7 @@ class OrderExecutor:
                 return True, position
             
         except Exception as e:
-            logger.critical(
-                f"🚨 开仓执行异常: {str(e)}"
-            )
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"🚨 开仓执行异常: {str(e)}")
             return False, None
     
     async def execute_close(
@@ -966,14 +976,28 @@ class OrderExecutor:
                     quote_id=exchange_b_quote_id
                 )
             )
-            try:
-                order_a_result, order_b_result = await asyncio.gather(task_a, task_b)
-            except lighter.exceptions.ApiException as le:
-                await self.handleLgApiExcep(le)
-                
-            success_a = order_a_result.get('success', False) or order_a_result.get('partial_fill', False)
-            success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
+            
+            order_a_result, order_b_result = await asyncio.gather(task_a, task_b, return_exceptions=True)
+               
+            success_a = False
+            success_b = False
 
+            if isinstance(order_a_result, Exception):
+                logger.error(f"❌ 交易所A 下单异常: {order_a_result}")
+                if isinstance(order_a_result, lighter.exceptions.ApiException):
+                    await self.handleLgApiExcep(order_a_result)  # 如果是 lighter 异常
+                order_a_result = {'success': False, 'error': str(order_a_result)}
+            else:
+                success_a = order_a_result.get('success', False) or order_a_result.get('partial_fill', False)
+
+            if isinstance(order_b_result, Exception):
+                logger.error(f"❌ 交易所B 下单异常: {order_b_result}")
+                if isinstance(order_b_result, lighter.exceptions.ApiException):
+                    await self.handleLgApiExcep(order_b_result)
+                order_b_result = {'success': False, 'error': str(order_a_result)}
+            else:
+                success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
+            
             # ✅ 2. 根据结果处理
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
@@ -1207,7 +1231,7 @@ class OrderExecutor:
             logger.warning(f"🚨 紧急平仓 {self.exchange_a.exchange_name}: {order_id}")
             
             # ✅ 获取最新价格
-            orderbook = self.exchange_a.get_latest_orderbook()
+            orderbook = await self.exchange_a.get_latest_orderbook()
             if not orderbook or not orderbook.get('asks'):
                 logger.error("❌ 无法获取价格，紧急平仓失败")
                 return
@@ -1244,7 +1268,7 @@ class OrderExecutor:
             logger.warning(f"🚨 紧急平仓 {self.exchange_b.exchange_name}: {order_id}")
             
             # ✅ 获取最新价格
-            orderbook = self.exchange_b.get_latest_orderbook()
+            orderbook = await self.exchange_b.get_latest_orderbook()
             if not orderbook or not orderbook.get('bids'):
                 logger.error("❌ 无法获取价格，紧急平仓失败")
                 return
@@ -1538,7 +1562,7 @@ class OrderExecutor:
             error_code = data.get('code', 'Unknown')
             error_msg = data.get('message', str(e))
             logger.error(f"❌ Lighter 下单 API 错误: {error_code} - {error_msg}")
-            if error_code =='23000':
+            if error_code =='23000' or error_code == 23000:
                 self.sleep_retries = self.sleep_retries + 1
                 logger.info(f"{error_msg}, 等待{self.sleep_interval}s")
                 await asyncio.sleep(self.sleep_interval if self.sleep_retries == 1 else self.sleep_interval_enhance)
