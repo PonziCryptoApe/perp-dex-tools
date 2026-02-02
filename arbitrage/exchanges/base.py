@@ -116,7 +116,7 @@ class ExchangeAdapter(ABC):
         pass
     
     @abstractmethod
-    async def get_latest_orderbook(self) -> Optional[Dict]:
+    async def get_latest_orderbook(self, quantity: Optional[Decimal] = None) -> Optional[Dict]:
         """
         获取最新订单簿（同步方法，从缓存读取）
         

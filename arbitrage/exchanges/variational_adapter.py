@@ -188,7 +188,7 @@ class VariationalAdapter(ExchangeAdapter):
                 else:
                     await asyncio.sleep(self.polling_interval)
         
-    async def fetch_orderbook(self) -> Optional[Dict]:
+    async def fetch_orderbook(self, quantity: Optional[Decimal] = None) -> Optional[Dict]:
         """
         获取订单簿（通过 indicative quote）
         
@@ -202,11 +202,11 @@ class VariationalAdapter(ExchangeAdapter):
         """
         try:
             fetch_start = time.time()
-
+            q = quantity if quantity else self.query_quantity
             # ✅ 调用 indicative quote API
             quote_data = await asyncio.wait_for(
                 self.client._fetch_indicative_quote(
-                    self.query_quantity,
+                    q,
                     self.contract_id
                 ),
                 timeout=5.0  # 5 秒超时
@@ -243,9 +243,9 @@ class VariationalAdapter(ExchangeAdapter):
             logger.exception(f"获取 Variational 订单簿失败: {e}")
             return None
     
-    async def get_latest_orderbook(self) -> Optional[Dict]:
+    async def get_latest_orderbook(self, quantity: Optional[Decimal]) -> Optional[Dict]:
         """获取最新订单簿"""
-        return await self.fetch_orderbook()
+        return await self.fetch_orderbook(quantity)
     
     async def place_open_order(
         self,

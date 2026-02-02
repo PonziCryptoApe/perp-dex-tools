@@ -759,7 +759,7 @@ class LighterAdapter(ExchangeAdapter):
                 'error': str(e)
             }
 
-    async def get_latest_orderbook(self) -> Optional[Dict]:
+    async def get_latest_orderbook(self, quantity: Optional[Decimal]) -> Optional[Dict]:
         """获取最新订单簿"""
         return await self.client.get_orderbook()
     
