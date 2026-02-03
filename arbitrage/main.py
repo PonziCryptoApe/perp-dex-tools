@@ -284,6 +284,8 @@ async def main():
     parser.add_argument('--cooldown-seconds', type=str, default='5', help='下单冷却时间，默认5秒，只通过控制台传参')
     parser.add_argument('--exchange-a-slippage', type=float, default=None, help='交易所A的滑点')
     parser.add_argument('--exchange-b-slippage', type=float, default=None, help='交易所B的滑点')
+    parser.add_argument('--max-std-multiplier', type=float, default=4.0, help='标准差的最大系数')
+    parser.add_argument('--min-std-multiplier', type=float, default=0.0, help='标准差的最小系数')
     args = parser.parse_args()
     # 加载环境变量
     if args.env_file:
@@ -359,6 +361,9 @@ async def main():
             dynamic_threshold["sample_size"] = int(args.sample_size)
         
         dynamic_threshold['min_samples'] = dynamic_threshold.get('sample_size', 1000)
+
+        dynamic_threshold['max_std_multiplier'] = float(args.max_std_multiplier)
+        dynamic_threshold['min_std_multiplier'] = float(args.min_std_multiplier)
     cooldown_seconds = int(args.cooldown_seconds) if args.cooldown_seconds else 5
     # 设置滑点
     if args.exchange_a_slippage is not None:
@@ -382,6 +387,8 @@ async def main():
         f"  最小深度:     {min_depth_quantity}\n"
         f"  最小阈值和:   {dynamic_threshold["min_total_threshold"]}\n"
         f"  样本数:       {dynamic_threshold["sample_size"]}\n"
+        f"  最大标准差系数: {dynamic_threshold["max_std_multiplier"]}\n"
+        f"  最小标准差系数: {dynamic_threshold["min_std_multiplier"]}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"

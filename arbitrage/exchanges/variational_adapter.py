@@ -801,11 +801,7 @@ class VariationalAdapter(ExchangeAdapter):
             
             if position:
                 logger.info(
-                    f"📊 Variational 持仓:\n"
-                    f"   Symbol: {position['symbol']}\n"
-                    f"   Side: {position['side']}\n"
-                    f"   Size: {position['size']}\n"
-                    f"   Entry Price: ${position['entry_price']}"
+                    f"📊 Variational 持仓:    {'+' if position['side'] == 'long' else '-'}{position['size']} {position['symbol']} @ {position['entry_price']}"
                 )
             else:
                 logger.info(f"📊 Variational 无持仓: {symbol}")

@@ -767,13 +767,9 @@ class LighterAdapter(ExchangeAdapter):
         try :
             position = await self.client.get_position_info()
 
-            if position:
+            if position and Decimal(position.position) != 0:
                 logger.info(
-                    f"📊 lighter 持仓:\n"
-                    f"   Symbol: {position.symbol}\n"
-                    f"   Side: {'long' if position.sign == 1 else 'short'}\n"
-                    f"   Size: {position.position}\n"
-                    f"   Entry Price: ${position.avg_entry_price}"
+                    f"📊 lighter 持仓:  {'+' if position.sign == 1 else '-'}{position.position} {position.symbol} @ {position.avg_entry_price}"
                 )
                 return {
                     'symbol': symbol,

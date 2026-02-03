@@ -45,7 +45,7 @@ class HedgeStrategy(BaseStrategy):
         max_position: Decimal = Decimal('0.1'),
         direction_reverse: bool = False, # 默认负滑点方向才下单
         cooldown_range: tuple = (10.0, 10.0),
-        cooldown_seconds: Optional[int] = 5,
+        cooldown_seconds: Optional[float] = 5,
         dynamic_threshold: Optional[dict] = None,
         end_time: Optional[str] = None
     ):
@@ -171,6 +171,8 @@ class HedgeStrategy(BaseStrategy):
                 min_samples=dt_config.get('min_samples', 200),
                 std_multiplier=dt_config.get('std_multiplier', 1.0),
                 min_total_threshold=dt_config.get('min_total_threshold', 0.02),
+                max_std_multiplier=dt_config.get('max_std_multiplier', 4.0),
+                min_std_multiplier=dt_config.get('min_std_multiplier', 0.0)
             )
         else:
             self.threshold_manager = None
@@ -532,9 +534,10 @@ class HedgeStrategy(BaseStrategy):
                             f"📊 统计: {self._format_open_stats()}"
                         )
 
+                        await asyncio.sleep(2)
                         logger.info(f"🔍 开仓后校验仓位...")
                         expected_qty = self.position_manager.get_current_position_qty()
-                        
+
                         is_consistent = await self.position_manager.verify_and_sync(
                             exchange_a=self.exchange_a,
                             exchange_b=self.exchange_b,
@@ -557,6 +560,7 @@ class HedgeStrategy(BaseStrategy):
                                 await self._send_open_notification(position, prices)
 
                     else:
+                        await asyncio.sleep(2)
                         await self.executor.check_position_balance()
 
                         # ✅ 节流日志：每5秒最多输出一次
@@ -761,10 +765,10 @@ class HedgeStrategy(BaseStrategy):
                             f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
                             f"📊 统计: {self._format_close_stats()}"
                         )
+                        await asyncio.sleep(2)
 
                         logger.info(f"🔍 反向开仓后校验仓位...")
                         expected_qty = self.position_manager.get_current_position_qty()
-                        
                         is_consistent = await self.position_manager.verify_and_sync(
                             exchange_a=self.exchange_a,
                             exchange_b=self.exchange_b,
@@ -787,6 +791,7 @@ class HedgeStrategy(BaseStrategy):
                                 await self._send_close_notification(position, pnl_pct, prices)
 
                     else:
+                        await asyncio.sleep(2)
                         await self.executor.check_position_balance()
 
                         if current_time - self.last_log_time >= self.log_interval:
@@ -1091,12 +1096,18 @@ class HedgeStrategy(BaseStrategy):
                 logger.info(f"当前A所仓位: {qty_a}({side_a}), B所仓位: {qty_b}({side_b})")
                 try:
                     volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
-
-                    logger.info(
-                        f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f},"
-                        f"   B所交易量 {volume_b - self.start_vol_b},"
-                        f"   预估损耗(权益减量/交易增量 * 100%): {((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b - self.start_vol_b) * 2) * 100:.4f}%"
-                    )
+                    if volume_b > self.start_vol_b:
+                        logger.info(
+                            f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f},"
+                            f"   B所交易增量 {volume_b - self.start_vol_b},"
+                            f"   预估损耗(权益减量/交易增量 * 100%): {((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b - self.start_vol_b) * 2) * 100:.4f}%"
+                        )
+                    else:
+                        logger.info(
+                            f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f},"
+                            f"   B所交易增量量 0,"
+                            f"   预估损耗(权益减量/交易增量 * 100%): 0.0%"
+                        )
                 except Exception as e:
                     logger.exception(f"❌ 获取账户权益或交易量失败: {e}")
                 self._last_equity_log_time = current_time

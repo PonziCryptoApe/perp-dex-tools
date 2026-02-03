@@ -1289,7 +1289,6 @@ class OrderExecutor:
             )
 
     async def check_position_balance(self):
-        await asyncio.sleep(2)
         logger.info("🔍 检查两所仓位平衡情况...")
         symbol_a = self.exchange_a.symbol
         symbol_b = self.exchange_b.symbol
@@ -1475,9 +1474,9 @@ class OrderExecutor:
         pos_a = await self.exchange_a.get_position(symbol_a)
         pos_b = await self.exchange_b.get_position(symbol_b)
         pos_a_size = pos_a['size'] if pos_a else Decimal('0')
-        pos_a_side = pos_a['side']
+        pos_a_side = pos_a['side'] if pos_a else 'neutral'
         pos_b_size = pos_b['size'] if pos_b else Decimal('0')
-        pos_b_side = pos_b['side']
+        pos_b_side = pos_b['side'] if pos_b else 'neutral'
         logger.info(f"🔍 重新校验仓位平衡: {self.exchange_a.exchange_name} {pos_a_side} {pos_a_size}, "
                     f": {self.exchange_b.exchange_name} {pos_b_side} {pos_b_size}")
         if pos_a_size == pos_b_size and pos_a_size == 0:
@@ -1502,5 +1501,6 @@ class OrderExecutor:
             logger.error(f"❌ Lighter 下单 API 错误: {error_code} - {error_msg}")
             if error_code =='23000' or error_code == 23000:
                 self.sleep_retries = self.sleep_retries + 1
-                logger.info(f"{error_msg}, 等待{self.sleep_interval}s")
-                await asyncio.sleep(self.sleep_interval if self.sleep_retries == 1 else self.sleep_interval_enhance)
+                sleep_interval = self.sleep_interval if self.sleep_retries == 1 else self.sleep_interval_enhance
+                logger.info(f"{error_msg}, 等待{sleep_interval}s")
+                await asyncio.sleep(sleep_interval)
