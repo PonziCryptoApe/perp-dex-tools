@@ -253,14 +253,14 @@ class PositionManagerService:
         # ✅ 详细调试日志
         old_qty = self.current_position_qty
         
-        logger.info(
-            f"🔍 [DEBUG] reduce_position() 调用:\n"
-            f"   direction: {direction}\n"
-            f"   position.quantity: {position.quantity}\n"
-            f"   当前 current_position_qty: {old_qty}\n"
-            f"   position_step: {self.position_step}\n"
-            f"   max_position: {self.max_position}"
-        )
+        # logger.info(
+        #     f"🔍 [DEBUG] reduce_position() 调用:\n"
+        #     f"   direction: {direction}\n"
+        #     f"   position.quantity: {position.quantity}\n"
+        #     f"   当前 current_position_qty: {old_qty}\n"
+        #     f"   position_step: {self.position_step}\n"
+        #     f"   max_position: {self.max_position}"
+        # )
         # ✅ 累计仓位
         if direction == 'long':
             # Exchange A 买入平空 → current_position_qty 变正
@@ -283,16 +283,16 @@ class PositionManagerService:
         # ✅ 计算仓位利用率
         utilization = abs(self.current_position_qty / self.max_position * 100) if self.max_position > 0 else 0
         
-        logger.info(
-            f"📝 累计仓位更新（平仓）:\n"
-            f"   方向: {direction}\n"
-            f"   操作: {old_qty} {operation} = {self.current_position_qty}\n"
-            f"   数量: {position.quantity}\n"
-            f"   当前累计: {self.current_position_qty:+} / ±{self.max_position}\n"
-            f"   利用率: {utilization:.1f}%\n"
-            # f"   盈亏: {pnl_pct:+.4f}%\n"
-            f"   历史笔数: {len(self.position_history)}"
-        )
+        # logger.info(
+        #     f"📝 累计仓位更新（平仓）:\n"
+        #     f"   方向: {direction}\n"
+        #     f"   操作: {old_qty} {operation} = {self.current_position_qty}\n"
+        #     f"   数量: {position.quantity}\n"
+        #     f"   当前累计: {self.current_position_qty:+} / ±{self.max_position}\n"
+        #     f"   利用率: {utilization:.1f}%\n"
+        #     # f"   盈亏: {pnl_pct:+.4f}%\n"
+        #     f"   历史笔数: {len(self.position_history)}"
+        # )
         
         return pnl_pct
 
@@ -379,9 +379,9 @@ class PositionManagerService:
             qty_a = Decimal(str(position_a.get('size', 0))) if position_a else Decimal('0')
             qty_b = Decimal(str(position_b.get('size', 0))) if position_b else Decimal('0')
             logger.info(
-                f"🔍 获取交易所仓位:\n"
-                f"   {exchange_a.exchange_name}: {qty_a:+.4f} ({'空头' if position_a and position_a.get('side') == 'short' else '多头' if position_a and position_a.get('side') == 'long' else '无仓位'})\n"
-                f"   {exchange_b.exchange_name}: {qty_b:+.4f} ({'空头' if position_b and position_b.get('side') == 'short' else '多头' if position_b and position_b.get('side') == 'long' else '无仓位'})"
+                f"🔍 获取交易所仓位:"
+                f"   {exchange_a.exchange_name}: {qty_a:.4f} ({'空头' if position_a and position_a.get('side') == 'short' else '多头' if position_a and position_a.get('side') == 'long' else '无仓位'}) | "
+                f"   {exchange_b.exchange_name}: {qty_b:.4f} ({'空头' if position_b and position_b.get('side') == 'short' else '多头' if position_b and position_b.get('side') == 'long' else '无仓位'})"
             )
             # Exchange A 做空 → 仓位为负
             qty = qty_b

@@ -174,11 +174,11 @@ class LighterAdapter(ExchangeAdapter):
                             logger.debug("⏳ Lighter WS 1s 无消息，继续监听...")  # 心跳检查
                             continue
                         except websockets.exceptions.ConnectionClosed:
-                            logger.exception("⚠️ Lighter WS 连接关闭，重连...")
+                            logger.exception("❌ Lighter WS 连接关闭，重连...")
                             break  # 跳出内循环，重连外层
             
             except websockets.exceptions.ConnectionClosed as e:
-                logger.exception(f"⚠️ Lighter WebSocket 连接关闭: {e}")
+                logger.exception(f"❌ Lighter WebSocket 连接关闭: {e}")
             except Exception as e:
                 logger.exception(f"❌ Lighter WebSocket 异常: {e}")
             
@@ -223,7 +223,7 @@ class LighterAdapter(ExchangeAdapter):
             logger.debug(f"📨 收到订单更新消息: {data}")
             orders = data.get("orders", {}).get(str(self.market_index), [])
             for order_data in orders:
-                logger.info(f"---------order-data---------{order_data}")
+                # logger.info(f"---------order-data---------{order_data}")
                 # 调用订单更新 handler
                 self._on_order_update(order_data)
                 
@@ -537,16 +537,17 @@ class LighterAdapter(ExchangeAdapter):
                     order_price = Decimal(str(price)) * Decimal(str(1 - (slippage or Decimal('0')))) if price else self.lighter_best_bid
             else:
                 order_price = Decimal(str(price))
-            logger.info(
-                f"📤 {self.exchange_name} 下单:\n"
-                f"   市场: {self.market_index}\n"
-                f"   方向: {side_upper}\n"
-                f"   原始数量: {quantity} (type: {type(quantity)})\n"
-                f"   滑点: {slippage}\n"
-                f"   价格: {order_price}\n"
-                f"   base_amount_multiplier: {self.client.base_amount_multiplier}\n"
-                f"   price_multiplier: {self.client.price_multiplier}"
-            )
+            logger.info(f"📤 {self.exchange_name} 下市价单: {side_upper} {quantity} @ {order_price}")
+            # logger.info(
+            #     f"📤 {self.exchange_name} 下单:\n"
+            #     f"   市场: {self.market_index}\n"
+            #     f"   方向: {side_upper}\n"
+            #     f"   原始数量: {quantity} (type: {type(quantity)})\n"
+            #     f"   滑点: {slippage}\n"
+            #     f"   价格: {order_price}\n"
+            #     f"   base_amount_multiplier: {self.client.base_amount_multiplier}\n"
+            #     f"   price_multiplier: {self.client.price_multiplier}"
+            # )
             # 计算 base_amount
             base_amount_decimal = Decimal(str(quantity)) * Decimal(str(self.client.base_amount_multiplier))
             base_amount = int(base_amount_decimal)
@@ -555,13 +556,13 @@ class LighterAdapter(ExchangeAdapter):
             price_decimal = Decimal(str(order_price)) * Decimal(str(self.client.price_multiplier))
             price_int = int(price_decimal)
             
-            logger.info(
-                f"📋 计算后的订单参数:\n"
-                f"   base_amount (decimal): {base_amount_decimal}\n"
-                f"   base_amount (int): {base_amount}\n"
-                f"   price (decimal): {price_decimal}\n"
-                f"   price (int): {price_int}"
-            )
+            # logger.info(
+            #     f"📋 计算后的订单参数:\n"
+            #     f"   base_amount (decimal): {base_amount_decimal}\n"
+            #     f"   base_amount (int): {base_amount}\n"
+            #     f"   price (decimal): {price_decimal}\n"
+            #     f"   price (int): {price_int}"
+            # )
             
             # ✅ 验证必要属性
             if not hasattr(self.client, 'base_amount_multiplier'):
@@ -613,14 +614,14 @@ class LighterAdapter(ExchangeAdapter):
                 'order_expiry': 0,
             }
             
-            logger.info(
-                f"📋 Lighter 订单参数:\n"
-                f"   market_index: {order_params['market_index']}\n"
-                f"   client_order_index: {order_params['client_order_index']}\n"
-                f"   base_amount: {order_params['base_amount']}\n"
-                f"   price: {order_params['price']}\n"
-                f"   is_ask: {order_params['is_ask']}"
-            )
+            # logger.info(
+            #     f"📋 Lighter 订单参数:\n"
+            #     f"   market_index: {order_params['market_index']}\n"
+            #     f"   client_order_index: {order_params['client_order_index']}\n"
+            #     f"   base_amount: {order_params['base_amount']}\n"
+            #     f"   price: {order_params['price']}\n"
+            #     f"   is_ask: {order_params['is_ask']}"
+            # )
             
             # ✅ 签名订单
             tx_info, error = self.client.lighter_client.sign_create_order(**order_params)
@@ -696,13 +697,8 @@ class LighterAdapter(ExchangeAdapter):
                     order_info['error'] = msg
                     logger.info(msg)
                 
-                if status in ['FILLED']:                    
-                    logger.info(
-                        f"✅ Lighter 市价单成交:\n"
-                        f"   订单 ID: {real_order_id}\n"
-                        f"   成交价: ${price_from_ws}\n"
-                        f"   成交量: {filled_size_from_ws}"
-                    )
+                elif status in ['FILLED']:                    
+                    logger.info(f"✅ Lighter 市价单成交: {filled_size_from_ws} @${price_from_ws}({real_order_id})")
                     order_info['success'] = True
                     # 未知状态
                 else:

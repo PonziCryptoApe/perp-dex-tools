@@ -788,20 +788,23 @@ class OrderExecutor:
                 slippage_a = ((actual_price_a - exchange_a_price) / exchange_a_price * 100).quantize(Decimal('0.0001'))
                 slippage_b = ((actual_price_b - exchange_b_price) / exchange_b_price * 100).quantize(Decimal('0.0001'))
                 
+                logger.info(f"✅ 开仓成功:\n")
+                logger.info(f"{self.exchange_a.exchange_name}: SELL {self.exchange_a.symbol} {balanced_qty_a}/{order_quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
+                logger.info(f"{self.exchange_b.exchange_name}: BUY {self.exchange_b.symbol} {balanced_qty_b}/{order_quantity} @ (${exchange_b_price} --> $${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
                 logger.info(
-                    f"✅ 开仓成功:\n"
-                    f"   {self.exchange_a.exchange_name}:\n"
-                    f"      订单 ID: {order_a_result.get('order_id')}\n"
-                    f"      信号价格: ${exchange_a_price}\n"
-                    f"      成交价格: ${actual_price_a}\n"
-                    f"      滑点: {slippage_a:+.4f}%\n"
-                    f"      成交数量: {balanced_qty_a} / {order_quantity}\n"
-                    f"   {self.exchange_b.exchange_name}:\n"
-                    f"      订单 ID: {order_b_result.get('order_id')}\n"
-                    f"      信号价格: ${exchange_b_price}\n"
-                    f"      成交价格: ${actual_price_b}\n"
-                    f"      滑点: {slippage_b:+.4f}%\n"
-                    f"      成交数量: {balanced_qty_b} / {order_quantity}\n"
+                    # f"✅ 开仓成功:\n"
+                    # f"   {self.exchange_a.exchange_name}:\n"
+                    # f"      订单 ID: {order_a_result.get('order_id')}\n"
+                    # f"      信号价格: ${exchange_a_price}\n"
+                    # f"      成交价格: ${actual_price_a}\n"
+                    # f"      滑点: {slippage_a:+.4f}%\n"
+                    # f"      成交数量: {balanced_qty_a} / {order_quantity}\n"
+                    # f"   {self.exchange_b.exchange_name}:\n"
+                    # f"      订单 ID: {order_b_result.get('order_id')}\n"
+                    # f"      信号价格: ${exchange_b_price}\n"
+                    # f"      成交价格: ${actual_price_b}\n"
+                    # f"      滑点: {slippage_b:+.4f}%\n"
+                    # f"      成交数量: {balanced_qty_b} / {order_quantity}\n"
                     f"   ⏱️ 执行耗时: {execution_delay_ms:.2f} ms"
                 )
 
@@ -1115,32 +1118,37 @@ class OrderExecutor:
                     position.exchange_a_order_id != 'DUMMY'):
                     
                     quality_report = position.get_execution_quality_report()
-                    logger.info(
-                        f"✅ 反向开仓成功:\n"
-                        f"   {self.exchange_a.exchange_name}:\n"
-                        f"      订单 ID: {order_a_result.get('order_id')}\n"
-                        f"      信号价格: ${exchange_a_price}\n"
-                        f"      成交价格: ${actual_price_a}\n"
-                        f"      滑点: {quality_report['exit_slippage']['exchange_a']:+.4f}%\n"
-                        f"      成交数量: {balanced_qty_a} / {position.quantity}\n"
-                        f"   {self.exchange_b.exchange_name}:\n"
-                        f"      订单 ID: {order_b_result.get('order_id')}\n"
-                        f"      信号价格: ${exchange_b_price}\n"
-                        f"      成交价格: ${actual_price_b}\n"
-                        f"      滑点: {quality_report['exit_slippage']['exchange_b']:+.4f}%\n"
-                        f"      成交数量: {balanced_qty_b} / {position.quantity}\n"
 
-                        f"\n"
-                        f"   📊 执行质量分析:\n"
-                        f"      理论盈亏: {quality_report['theoretical_pnl_pct']:+.4f}%\n"
-                        f"      实际盈亏: {quality_report['actual_pnl_pct']:+.4f}%\n"
-                        f"      盈亏损失: {quality_report['pnl_loss_pct']:+.4f}% (由于滑点)\n"
-                        f"      开仓滑点: {quality_report['entry_slippage']['total']:+.4f}%\n"
-                        f"      平仓滑点: {quality_report['exit_slippage']['total']:+.4f}%\n"
-                        f"      开仓延迟: {quality_report['entry_delay_ms']:.2f} ms\n"
-                        f"      平仓延迟: {quality_report['exit_delay_ms']:.2f} ms\n"
-                        f"   持仓时长: {position.get_holding_duration()}"
-                    )
+                    logger.info(f"✅ 反向开仓成功:\n")
+                    logger.info(f"{self.exchange_a.exchange_name}: BUY {self.exchange_a.symbol} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {quality_report['exit_slippage']['exchange_a']:+.4f}%) ({order_a_result.get('order_id')})")
+                    logger.info(f"{self.exchange_b.exchange_name}: SELL {self.exchange_b.symbol} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> $${actual_price_b}, {quality_report['exit_slippage']['exchange_b']:+.4f}%) ({order_b_result.get('order_id')})")
+                
+                    # logger.info(
+                    #     f"✅ 反向开仓成功:\n"
+                    #     f"   {self.exchange_a.exchange_name}:\n"
+                    #     f"      订单 ID: {order_a_result.get('order_id')}\n"
+                    #     f"      信号价格: ${exchange_a_price}\n"
+                    #     f"      成交价格: ${actual_price_a}\n"
+                    #     f"      滑点: {quality_report['exit_slippage']['exchange_a']:+.4f}%\n"
+                    #     f"      成交数量: {balanced_qty_a} / {position.quantity}\n"
+                    #     f"   {self.exchange_b.exchange_name}:\n"
+                    #     f"      订单 ID: {order_b_result.get('order_id')}\n"
+                    #     f"      信号价格: ${exchange_b_price}\n"
+                    #     f"      成交价格: ${actual_price_b}\n"
+                    #     f"      滑点: {quality_report['exit_slippage']['exchange_b']:+.4f}%\n"
+                    #     f"      成交数量: {balanced_qty_b} / {position.quantity}\n"
+
+                        # f"\n"
+                        # f"   📊 执行质量分析:\n"
+                        # f"      理论盈亏: {quality_report['theoretical_pnl_pct']:+.4f}%\n"
+                        # f"      实际盈亏: {quality_report['actual_pnl_pct']:+.4f}%\n"
+                        # f"      盈亏损失: {quality_report['pnl_loss_pct']:+.4f}% (由于滑点)\n"
+                        # f"      开仓滑点: {quality_report['entry_slippage']['total']:+.4f}%\n"
+                        # f"      平仓滑点: {quality_report['exit_slippage']['total']:+.4f}%\n"
+                        # f"      开仓延迟: {quality_report['entry_delay_ms']:.2f} ms\n"
+                        # f"      平仓延迟: {quality_report['exit_delay_ms']:.2f} ms\n"
+                        # f"   持仓时长: {position.get_holding_duration()}"
+                    # )
                 else:
                     # ✅ 虚拟 Position：简化日志
                     logger.info(

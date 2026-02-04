@@ -162,6 +162,7 @@ class HedgeStrategy(BaseStrategy):
         self._last_equity_log_time = None
         self._last_yaml_check_time = None
         self._yaml_check_interval = 60  # 每 60 秒检查一次 YAML 配置文件
+        self._is_executed = False
         # self._last_threshold_check_time = None
         # 动态阈值管理器
         dt_config = dynamic_threshold
@@ -314,6 +315,7 @@ class HedgeStrategy(BaseStrategy):
             if self.position_manager.accumulate_mode:
                 current_qty = self.position_manager.get_current_position_qty()
                 logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
+                self._is_executed = False
                 if current_qty < 0:
                     # ✅ 优先检查平仓信号（如果可以平仓）
                     await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
@@ -321,7 +323,9 @@ class HedgeStrategy(BaseStrategy):
                     # ✅ 如果正在执行，跳过开仓检查
                     if self._executing_lock.locked():
                         return
-            
+                    if self._is_executed is True:
+                        logger.info('开仓信号已经执行过了，直接返回')
+                        return
                     # ✅ 检查开仓信号（如果可以开仓）
                     await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 else:
@@ -331,7 +335,9 @@ class HedgeStrategy(BaseStrategy):
                         # ✅ 如果正在执行，跳过开仓检查
                     if self._executing_lock.locked():
                         return
-                
+                    if self._is_executed is True:
+                        logger.info('平仓已经执行过了，直接返回')
+                        return 
                     # ✅ 检查开仓信号（如果可以开仓）
                     await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 
@@ -519,6 +525,8 @@ class HedgeStrategy(BaseStrategy):
                     
                     if success:
                         self.signal_stats['open']['executed'] += 1
+                        self._is_executed = True
+
                         self._last_execution_time = time.time()
 
                         # ✅ 累计模式：添加仓位
@@ -747,6 +755,8 @@ class HedgeStrategy(BaseStrategy):
                     
                     if success:
                         self.signal_stats['close']['executed'] += 1
+                        self._is_executed = True
+
                         self._last_execution_time = time.time()
 
                         # ✅ 累计模式：减少仓位
@@ -760,11 +770,11 @@ class HedgeStrategy(BaseStrategy):
                             )
                         
                         summary = self.position_manager.get_position_summary()
-                        logger.info(
-                            f"✅ 反向开仓成功: {position}\n"
-                            f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
-                            f"📊 统计: {self._format_close_stats()}"
-                        )
+                        # logger.info(
+                        #     f"✅ 反向开仓成功: {position}\n"
+                        #     f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
+                        #     f"📊 统计: {self._format_close_stats()}"
+                        # )
                         await asyncio.sleep(2)
 
                         logger.info(f"🔍 反向开仓后校验仓位...")
@@ -1052,7 +1062,7 @@ class HedgeStrategy(BaseStrategy):
                 f"{threshold_info}"
                 f" 总信号个数: {self.signal_total}\n"
                 f" 延迟信号个数: {self.signal_delay}\n"
-                f" 样本时间长度 {sample_time_length:.2f} 秒"
+                f" 样本时间长度 {sample_time_length:.2f} 秒\n"
                 f"{'='*60}"
             )
             self._last_stats_log_time = current_time

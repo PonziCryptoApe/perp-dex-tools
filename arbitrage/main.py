@@ -364,7 +364,7 @@ async def main():
 
         dynamic_threshold['max_std_multiplier'] = float(args.max_std_multiplier)
         dynamic_threshold['min_std_multiplier'] = float(args.min_std_multiplier)
-    cooldown_seconds = int(args.cooldown_seconds) if args.cooldown_seconds else 5
+    cooldown_seconds = float(args.cooldown_seconds) if args.cooldown_seconds else 5
     # 设置滑点
     if args.exchange_a_slippage is not None:
         exchange_a_slippage = Decimal(str(args.exchange_a_slippage))
