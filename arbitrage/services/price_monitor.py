@@ -257,7 +257,7 @@ class PriceMonitorService:
         """交易所 A 订单簿更新"""
         self.orderbook_a = orderbook
         self.orderbook_a_updates += 1
-        self.last_orderbook_a_time = time.time() # 上一次得到订单薄的本地时间
+        self.last_orderbook_a_time = orderbook.get('timestamp', time.time())  # 使用订单簿自带时间，避免旧数据被当作新数据
         
         # 记录详细日志（仅在 DEBUG 模式）
         if logger.isEnabledFor(logging.DEBUG):
@@ -276,7 +276,7 @@ class PriceMonitorService:
         """交易所 B 订单簿更新"""
         self.orderbook_b = orderbook
         self.orderbook_b_updates += 1
-        self.last_orderbook_b_time = time.time() # 上一次得到订单薄的本地时间
+        self.last_orderbook_b_time = orderbook.get('timestamp', time.time())  # 使用订单簿自带时间，避免旧数据被当作新数据
         
         # 记录详细日志（仅在 DEBUG 模式）
         if logger.isEnabledFor(logging.DEBUG):
@@ -298,7 +298,7 @@ class PriceMonitorService:
         
         # ✅ 检查订单簿是否都已就绪
         if not self.orderbook_a or not self.orderbook_b:
-            logger.debug("⏳ 等待两个交易所的订单簿数据...")
+            logger.info("⏳ 等待两个交易所的订单簿数据...")
             return
         
         # ✅ 限流：避免过于频繁触发回调
@@ -315,9 +315,7 @@ class PriceMonitorService:
                 try:
                     await callback(prices)
                 except Exception as e:
-                    logger.error(f"❌ 价格更新回调失败 ({callback.__name__}): {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception(f"❌ 价格更新回调失败 ({callback.__name__}): {e}")
     
     async def _wait_for_orderbook(self, timeout: float = 10.0) -> bool:
         """等待订单簿数据就绪"""

@@ -1091,8 +1091,9 @@ class HedgeStrategy(BaseStrategy):
         current_time = time.time()
         if self._last_equity_log_time is None:
             self._last_equity_log_time = current_time
-        
-        if current_time - self._last_equity_log_time >= self._equity_log_interval:
+        current_qty = self.position_manager.get_current_position_qty()
+
+        if current_time - self._last_equity_log_time >= self._equity_log_interval and current_qty == 0:
             position_a = await self.exchange_a.get_position(self.symbol_a)
             position_b = await self.exchange_b.get_position(self.symbol_b)
 
@@ -1102,7 +1103,7 @@ class HedgeStrategy(BaseStrategy):
             side_a = position_a.get('side') if position_a else 'neutral'
             side_b = position_b.get('side') if position_b else 'neutral'
 
-            if qty_a ==0 or qty_b == 0:
+            if qty_a ==0 and qty_b == 0:
                 logger.info(f"当前A所仓位: {qty_a}({side_a}), B所仓位: {qty_b}({side_b})")
                 try:
                     volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()

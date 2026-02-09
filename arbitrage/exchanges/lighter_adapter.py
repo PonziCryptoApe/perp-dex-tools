@@ -41,6 +41,9 @@ class LighterAdapter(ExchangeAdapter):
         self.lighter_best_bid = None
         self.lighter_best_ask = None
         self.lighter_snapshot_loaded = False
+        self.lighter_last_update_ts = 0.0  # 最近一次收到有效订单簿消息的时间戳
+        self._order_book_fingerprint = None  # 订单簿内容指纹，用于检测“内容未变”场景
+        self.lighter_last_notify_ts = 0.0  # 最近一次向上游回调的时间戳
         
         # 消息计数器
         self.message_count = 0
@@ -125,6 +128,9 @@ class LighterAdapter(ExchangeAdapter):
         while True:
             try:
                 logger.info(f"🔌 连接 Lighter WebSocket: {url}")
+
+                # 每次重连前重置本地订单簿状态，避免沿用旧缓存
+                self._reset_lighter_orderbook_state()
                 
                 async with websockets.connect(url) as ws:
                     self.ws = ws
@@ -156,7 +162,7 @@ class LighterAdapter(ExchangeAdapter):
                             await ws.send(json.dumps(subscribe_orders_msg))
                             logger.info("✅ Subscribed to account orders with auth token (expires in 10 minutes)")
                     except Exception as e:
-                        logger.exception(f"⚠️ Error creating auth token for account orders subscription: {e}")
+                        logger.exception(f"❌ Error creating auth token for account orders subscription: {e}")
 
                     # 接收消息
                     while True:
@@ -171,7 +177,7 @@ class LighterAdapter(ExchangeAdapter):
                             await self._process_lighter_message(data)  # 处理消息
                             
                         except asyncio.TimeoutError:
-                            logger.debug("⏳ Lighter WS 1s 无消息，继续监听...")  # 心跳检查
+                            logger.warning("⚠️ Lighter WS 1s 无消息，继续监听...")  # 心跳检查
                             continue
                         except websockets.exceptions.ConnectionClosed:
                             logger.exception("❌ Lighter WS 连接关闭，重连...")
@@ -187,6 +193,16 @@ class LighterAdapter(ExchangeAdapter):
             wait_time = min(10, reconnect_count)
             logger.info(f"⏳ {wait_time}秒后重连 Lighter WebSocket...")
             await asyncio.sleep(wait_time)
+
+    def _reset_lighter_orderbook_state(self):
+        """重置本地订单簿缓存，确保重连后不会使用旧数据"""
+        self.lighter_order_book = {"bids": {}, "asks": {}}
+        self.lighter_best_bid = None
+        self.lighter_best_ask = None
+        self.lighter_snapshot_loaded = False
+        self.lighter_last_update_ts = 0.0
+        self._order_book_fingerprint = None
+        self.lighter_last_notify_ts = 0.0
     
     async def _process_lighter_message(self, data: dict):
         """
@@ -282,7 +298,7 @@ class LighterAdapter(ExchangeAdapter):
                 )
                 
                 # 通知回调
-                await self._notify_orderbook_update()
+                await self._notify_orderbook_update_if_changed()
         
         except Exception as e:
             logger.exception(f"❌ 处理 Lighter 快照失败: {e}")
@@ -322,8 +338,8 @@ class LighterAdapter(ExchangeAdapter):
                 # 更新最佳价格
                 self._update_lighter_best_prices()
                 
-                # 通知回调
-                await self._notify_orderbook_update()
+                # 通知回调（仅在订单簿有变化时）
+                await self._notify_orderbook_update_if_changed()
         
         except Exception as e:
             logger.exception(f"❌ 处理 Lighter 更新失败: {e}")
@@ -341,7 +357,7 @@ class LighterAdapter(ExchangeAdapter):
             self.lighter_best_ask = None
     
     async def _notify_orderbook_update(self):
-        """通知订单簿更新"""
+        """通知订单簿更新（不检查内容变化的内部版本）"""
         if self._orderbook_callback and not self.lighter_best_bid or not self.lighter_best_ask:
             logger.warning(
                 f"⚠️ 订单簿数据不完整:\n"
@@ -353,8 +369,8 @@ class LighterAdapter(ExchangeAdapter):
         # 格式化为标准订单簿格式
         bid_size = float(self.lighter_order_book["bids"].get(self.lighter_best_bid, 0))
         ask_size = float(self.lighter_order_book["asks"].get(self.lighter_best_ask, 0))
-        
-        ts = time.time()
+
+        ts = self.lighter_last_update_ts or time.time()
         self._orderbook = {
             'bids': [[float(self.lighter_best_bid), bid_size]],
             'asks': [[float(self.lighter_best_ask), ask_size]],
@@ -379,6 +395,42 @@ class LighterAdapter(ExchangeAdapter):
         # 触发回调
         if self._orderbook_callback:
             await self._orderbook_callback(self._orderbook)
+            self.lighter_last_notify_ts = ts
+
+    async def _notify_orderbook_update_if_changed(self):
+        """
+        仅当订单簿内容发生变化时才触发回调，并记录真正的事件时间
+        """
+        try:
+            fingerprint = self._make_orderbook_fingerprint()
+            # 取消息自带时间（若有），否则用当前时间
+            msg_ts = time.time()
+            
+            self.lighter_last_update_ts = float(msg_ts)
+
+            if fingerprint == self._order_book_fingerprint:
+                # 内容未变化，作为心跳处理：按间隔刷新，避免 stale 误判
+                heartbeat_gap = 5.0  # 秒
+                if (
+                    self.lighter_last_notify_ts == 0.0
+                    or (self.lighter_last_update_ts - self.lighter_last_notify_ts) >= heartbeat_gap
+                ):
+                    await self._notify_orderbook_update()
+                return
+
+            self._order_book_fingerprint = fingerprint
+            await self._notify_orderbook_update()
+        except Exception as e:
+            logger.exception(f"❌ 通知订单簿更新失败: {e}")
+
+    def _make_orderbook_fingerprint(self) -> int:
+        """
+        生成订单簿内容指纹，用于检测内容是否变化。
+        Decimal 转字符串保证可哈希。
+        """
+        bids_tuple = tuple(sorted((str(p), str(s)) for p, s in self.lighter_order_book["bids"].items()))
+        asks_tuple = tuple(sorted((str(p), str(s)) for p, s in self.lighter_order_book["asks"].items()))
+        return hash((bids_tuple, asks_tuple))
 
     def _on_order_update(self, order_update: dict):
         """处理 WebSocket 订单更新（同步回调）"""
