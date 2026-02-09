@@ -535,12 +535,12 @@ class HedgeStrategy(BaseStrategy):
                         else:
                             self.position_manager.set_position(position)
 
-                        summary = self.position_manager.get_position_summary()
-                        logger.info(
-                            f"✅ 开仓成功: {position}\n"
-                            f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
-                            f"📊 统计: {self._format_open_stats()}"
-                        )
+                        # summary = self.position_manager.get_position_summary()
+                        # logger.info(
+                        #     f"✅ 开仓成功: {position}\n"
+                        #     f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
+                        #     f"📊 统计: {self._format_open_stats()}"
+                        # )
 
                         await asyncio.sleep(2)
                         logger.info(f"🔍 开仓后校验仓位...")

@@ -562,8 +562,8 @@ class OrderExecutor:
             logger.info(f"⏱️ 信号触发 → 开始执行: {signal_to_execution_delay:.2f} ms")
     
         logger.info(
-            f"📤 执行开仓:\n"
-            f"   {self.exchange_a.exchange_name} 开空 @ ${exchange_a_price}\n"
+            f"📤 执行开仓:"
+            f"   {self.exchange_a.exchange_name} 开空 @ ${exchange_a_price},"
             f"   {self.exchange_b.exchange_name} 开多 @ ${exchange_b_price}"
         )
         
@@ -736,16 +736,15 @@ class OrderExecutor:
 
                 logger.info(
                     f"📊 初始成交结果:\n"
-                    f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {order_quantity}\n"
-                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {order_quantity}\n"
-                    f"   下单耗时:\n"
-                    f"   {self.exchange_a.exchange_name}: {place_duration_a:.2f} ms\n"
+                    f"   成交情况: "
+                    f"   {self.exchange_a.exchange_name}(重试{attempt_a}次): {filled_qty_a} / {order_quantity},"
+                    f"   {self.exchange_b.exchange_name}(重试{attempt_b}次): {filled_qty_b} / {order_quantity}\n"
+                    f"   下单耗时:"
+                    f"   {self.exchange_a.exchange_name}: {place_duration_a:.2f} ms,"
                     f"   {self.exchange_b.exchange_name}: {place_duration_b:.2f} ms\n"
-                    f"   执行耗时:\n"
-                    f"   {self.exchange_a.exchange_name}: {execution_duration_a_ms:.2f} ms\n"
+                    f"   执行耗时:"
+                    f"   {self.exchange_a.exchange_name}: {execution_duration_a_ms:.2f} ms,"
                     f"   {self.exchange_b.exchange_name}: {execution_duration_b_ms:.2f} ms\n"
-                    f"   {self.exchange_a.exchange_name} 重试次数: {attempt_a}\n"
-                    f"   {self.exchange_b.exchange_name} 重试次数: {attempt_b}\n"
                 )
                 
                 # ✅ 4. 平衡仓位（关键！）
@@ -785,12 +784,14 @@ class OrderExecutor:
                     total_delay_ms = None
                     logger.info(f"⏱️ 完成开仓总耗时: {execution_delay_ms:.2f} ms")
 
-                slippage_a = ((actual_price_a - exchange_a_price) / exchange_a_price * 100).quantize(Decimal('0.0001'))
+                slippage_a = -((actual_price_a - exchange_a_price) / exchange_a_price * 100).quantize(Decimal('0.0001'))
                 slippage_b = ((actual_price_b - exchange_b_price) / exchange_b_price * 100).quantize(Decimal('0.0001'))
+                total_slippage = slippage_a + slippage_b
                 
-                logger.info(f"✅ 开仓成功:\n")
+                logger.info(f"✅ 开仓成功:")
                 logger.info(f"{self.exchange_a.exchange_name}: SELL {self.exchange_a.symbol} {balanced_qty_a}/{order_quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
-                logger.info(f"{self.exchange_b.exchange_name}: BUY {self.exchange_b.symbol} {balanced_qty_b}/{order_quantity} @ (${exchange_b_price} --> $${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
+                logger.info(f"{self.exchange_b.exchange_name}: BUY {self.exchange_b.symbol} {balanced_qty_b}/{order_quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
+                logger.info(f'信号价差: {spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { spread_pct - total_slippage}')
                 logger.info(
                     # f"✅ 开仓成功:\n"
                     # f"   {self.exchange_a.exchange_name}:\n"
@@ -1051,18 +1052,18 @@ class OrderExecutor:
                 execution_duration_b_ms = order_b_result.get('execution_duration_ms', 0)
                 attempt_a = order_a_result.get('attempt', 0)
                 attempt_b = order_b_result.get('attempt', 0)
+
                 logger.info(
                     f"📊 初始成交结果:\n"
-                    f"   {self.exchange_a.exchange_name}: {filled_qty_a} / {position.quantity}\n"
-                    f"   {self.exchange_b.exchange_name}: {filled_qty_b} / {position.quantity}\n"
-                    f"   下单耗时:\n"
-                    f"   {self.exchange_a.exchange_name}: {place_duration_a_ms:.2f} ms\n"
+                    f"   成交情况: "
+                    f"   {self.exchange_a.exchange_name}(重试{attempt_a}次): {filled_qty_a} / {position.quantity}, "
+                    f"   {self.exchange_b.exchange_name}(重试{attempt_b}次): {filled_qty_b} / {position.quantity}\n"
+                    f"   下单耗时:"
+                    f"   {self.exchange_a.exchange_name}: {place_duration_a_ms:.2f} ms,"
                     f"   {self.exchange_b.exchange_name}: {place_duration_b_ms:.2f} ms\n"
-                    f"   执行耗时:\n"
-                    f"   {self.exchange_a.exchange_name}: {execution_duration_a_ms:.2f} ms\n"
+                    f"   执行耗时:"
+                    f"   {self.exchange_a.exchange_name}: {execution_duration_a_ms:.2f} ms,"
                     f"   {self.exchange_b.exchange_name}: {execution_duration_b_ms:.2f} ms\n"
-                    f"   {self.exchange_a.exchange_name} 重试次数: {attempt_a}\n"
-                    f"   {self.exchange_b.exchange_name} 重试次数: {attempt_b}\n"
                 )
                 
                 # ✅ 4. 平衡仓位（关键！）
@@ -1119,10 +1120,14 @@ class OrderExecutor:
                     
                     quality_report = position.get_execution_quality_report()
 
+                    slippage_a = quality_report['exit_slippage']['exchange_a']
+                    slippage_b = quality_report['exit_slippage']['exchange_b']
+                    total_slippage = slippage_a + slippage_b
                     logger.info(f"✅ 反向开仓成功:\n")
-                    logger.info(f"{self.exchange_a.exchange_name}: BUY {self.exchange_a.symbol} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {quality_report['exit_slippage']['exchange_a']:+.4f}%) ({order_a_result.get('order_id')})")
-                    logger.info(f"{self.exchange_b.exchange_name}: SELL {self.exchange_b.symbol} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> $${actual_price_b}, {quality_report['exit_slippage']['exchange_b']:+.4f}%) ({order_b_result.get('order_id')})")
-                
+                    logger.info(f"{self.exchange_a.exchange_name}: BUY {self.exchange_a.symbol} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
+                    logger.info(f"{self.exchange_b.exchange_name}: SELL {self.exchange_b.symbol} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> $${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
+                    logger.info(f'信号价差: {position.spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { position.spread_pct - total_slippage}')
+
                     # logger.info(
                     #     f"✅ 反向开仓成功:\n"
                     #     f"   {self.exchange_a.exchange_name}:\n"

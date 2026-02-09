@@ -340,21 +340,21 @@ class VariationalAdapter(ExchangeAdapter):
                 self._time_diffs.append(time_diff)
                 
                 logger.info(
-                    f"⏱️ 订单簿获取 → 下单时间差: {time_diff:.2f} ms\n"
-                    f"   订单簿时间: {self._orderbook_fetch_time:.3f}\n"
-                    f"   下单时间:   {self._order_place_time:.3f}"
+                    f"⏱️ 订单簿获取 → 下单时间差: {time_diff:.2f} ms"
+                    # f"   订单簿时间: {self._orderbook_fetch_time:.3f}\n"
+                    # f"   下单时间:   {self._order_place_time:.3f}"
                 )
                 
                 # ✅ 警告：时间差过大
                 if time_diff > 1000:  # 超过 1 秒
                     logger.warning(f"⚠️ 订单簿数据过旧！时间差: {time_diff:.0f} ms")
             
-            logger.info(
-                f"   方向: {side}\n"
-                f"   quote_id: {quote_id[:8]}...\n"
-                f"   最大滑点: {max_slippage * 100:.3f}%"
-                f"   订单簿年龄: {time_diff:.2f} ms (订单簿 → 下单)"  # ✅ 添加时间差
-            )
+            # logger.info(
+            #     f"   方向: {side}\n"
+            #     f"   quote_id: {quote_id[:8]}...\n"
+            #     f"   最大滑点: {max_slippage * 100:.3f}%"
+            #     f"   订单簿年龄: {time_diff:.2f} ms (订单簿 → 下单)"  # ✅ 添加时间差
+            # )
             # ✅ 调用客户端下单
             result = await self.client._place_market_order(
                 quote_id=quote_id,

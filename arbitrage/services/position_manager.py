@@ -214,16 +214,16 @@ class PositionManagerService:
         self._log_open_trade(position, signal_delay_ms_a, signal_delay_ms_b)
         
         # ✅ 计算仓位利用率
-        utilization = abs(self.current_position_qty / self.max_position * 100) if self.max_position > 0 else 0
+        # utilization = abs(self.current_position_qty / self.max_position * 100) if self.max_position > 0 else 0
         
-        logger.info(
-            f"📝 累计仓位更新（开仓）:\n"
-            f"   方向: {'空头' if direction == 'short' else '多头'}\n"
-            f"   数量: {position.quantity}\n"
-            f"   当前累计: {self.current_position_qty:+} / ±{self.max_position}\n"
-            f"   利用率: {utilization:.1f}%\n"
-            f"   历史笔数: {len(self.position_history)}"
-        )
+        # logger.info(
+        #     f"📝 累计仓位更新（开仓）:\n"
+        #     f"   方向: {'空头' if direction == 'short' else '多头'}\n"
+        #     f"   数量: {position.quantity}\n"
+        #     f"   当前累计: {self.current_position_qty:+} / ±{self.max_position}\n"
+        #     f"   利用率: {utilization:.1f}%\n"
+        #     f"   历史笔数: {len(self.position_history)}"
+        # )
     
     def reduce_position(self, position: Position, direction: str) -> Decimal:
         """
@@ -348,7 +348,7 @@ class PositionManagerService:
             'position_step': float(self.position_step),
             'history_count': len(self.position_history),
             'utilization': round(utilization, 2),
-            'direction': 'short' if self.current_position_qty < 0 else ('long' if self.current_position_qty > 0 else 'flat')
+            'direction': 'short' if self.current_position_qty < 0 else ('long' if self.current_position_qty > 0 else 'neutral')
         }
     # ========== 在类中添加新方法 ==========
 
@@ -378,11 +378,11 @@ class PositionManagerService:
             # 解析仓位数量
             qty_a = Decimal(str(position_a.get('size', 0))) if position_a else Decimal('0')
             qty_b = Decimal(str(position_b.get('size', 0))) if position_b else Decimal('0')
-            logger.info(
-                f"🔍 获取交易所仓位:"
-                f"   {exchange_a.exchange_name}: {qty_a:.4f} ({'空头' if position_a and position_a.get('side') == 'short' else '多头' if position_a and position_a.get('side') == 'long' else '无仓位'}) | "
-                f"   {exchange_b.exchange_name}: {qty_b:.4f} ({'空头' if position_b and position_b.get('side') == 'short' else '多头' if position_b and position_b.get('side') == 'long' else '无仓位'})"
-            )
+            # logger.info(
+            #     f"🔍 获取交易所仓位:"
+            #     f"   {exchange_a.exchange_name}: {qty_a:.4f} ({'空头' if position_a and position_a.get('side') == 'short' else '多头' if position_a and position_a.get('side') == 'long' else '无仓位'}) | "
+            #     f"   {exchange_b.exchange_name}: {qty_b:.4f} ({'空头' if position_b and position_b.get('side') == 'short' else '多头' if position_b and position_b.get('side') == 'long' else '无仓位'})"
+            # )
             # Exchange A 做空 → 仓位为负
             qty = qty_b
             if position_b and position_b.get('side') == 'long':

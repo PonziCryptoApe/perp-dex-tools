@@ -214,16 +214,16 @@ class TradeLogger:
         )
         
         # ✅ 计算总滑点
-        slippage_a = -((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
-        slippage_b = ((exchange_b_filled_price - exchange_b_signal_price) / exchange_b_signal_price * 100)
-        total_slippage = slippage_a + slippage_b
+        # slippage_a = -((exchange_a_filled_price - exchange_a_signal_price) / exchange_a_signal_price * 100)
+        # slippage_b = ((exchange_b_filled_price - exchange_b_signal_price) / exchange_b_signal_price * 100)
+        # total_slippage = slippage_a + slippage_b
         
-        self.logger.info(
-            f"✅ 开仓记录完成:\n"
-            f"   {exchange_a_name}({exchange_a_side}): 信号价 ${exchange_a_signal_price} → 成交价 ${exchange_a_filled_price} (滑点: {slippage_a:+.4f}%)\n"
-            f"   {exchange_b_name}({exchange_b_side}): 信号价 ${exchange_b_signal_price} → 成交价 ${exchange_b_filled_price} (滑点: {slippage_b:+.4f}%)\n"
-            f"   价差: {spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%"
-        )
+        # self.logger.info(
+        #     f"✅ 开仓记录完成:\n"
+        #     f"   {exchange_a_name}({exchange_a_side}): 信号价 ${exchange_a_signal_price} → 成交价 ${exchange_a_filled_price} (滑点: {slippage_a:+.4f}%)\n"
+        #     f"   {exchange_b_name}({exchange_b_side}): 信号价 ${exchange_b_signal_price} → 成交价 ${exchange_b_filled_price} (滑点: {slippage_b:+.4f}%)\n"
+        #     f"   价差: {spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%"
+        # )
     
     def log_close_position(
         self,
