@@ -132,7 +132,14 @@ class LighterAdapter(ExchangeAdapter):
                 # 每次重连前重置本地订单簿状态，避免沿用旧缓存
                 self._reset_lighter_orderbook_state()
                 
-                async with websockets.connect(url) as ws:
+                # 调整心跳/超时参数，降低误判断开
+                async with websockets.connect(
+                    url,
+                    ping_interval=20,   # 显式设置心跳间隔
+                    ping_timeout=40,    # 放宽 pong 超时
+                    close_timeout=5,    # 关闭握手超时
+                    max_queue=None      # 避免队列背压导致 ping 超时
+                ) as ws:
                     self.ws = ws
                     reconnect_count = 0
                     
@@ -179,8 +186,11 @@ class LighterAdapter(ExchangeAdapter):
                         except asyncio.TimeoutError:
                             logger.warning("⚠️ Lighter WS 1s 无消息，继续监听...")  # 心跳检查
                             continue
-                        except websockets.exceptions.ConnectionClosed:
-                            logger.exception("❌ Lighter WS 连接关闭，重连...")
+                        except websockets.exceptions.ConnectionClosedError as e:
+                            logger.warning(f"❌ Lighter WS 连接关闭，code={e.code}, reason={e.reason}")
+                            break  # 跳出内循环，重连外层
+                        except websockets.exceptions.ConnectionClosed as e:
+                            logger.exception(f"❌ Lighter WS 连接关闭: {e}")
                             break  # 跳出内循环，重连外层
             
             except websockets.exceptions.ConnectionClosed as e:

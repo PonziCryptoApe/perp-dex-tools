@@ -218,6 +218,7 @@ class HedgeStrategy(BaseStrategy):
                 logger.warning("⚠️ 仓位同步失败，使用初始值 0")
         logger.info("🔍 开始获取初始权益和交易量")
         a_exchange_volume, a_exchange_equity, b_exchange_volume, b_exchange_equity = await self.get_equity_and_volume()
+        logger.info(f"A所: 交易量 {a_exchange_volume} 权益 {a_exchange_equity}, B所: 交易量 { b_exchange_volume } 权益 { b_exchange_equity }")
         self.start_vol_a = a_exchange_volume
         self.start_equity_a = a_exchange_equity
         self.start_vol_b = b_exchange_volume
