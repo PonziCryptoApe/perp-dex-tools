@@ -365,6 +365,9 @@ class HedgeStrategy(BaseStrategy):
                     # 最大仓位为0，并且当前仓位为0，停止策略
                     if self.position_manager.max_position == 0 and self.position_manager.get_current_position_qty() == 0:
                         logger.info(f"⏰ 达到策略结束时间，仓位减为0，等待5min后拉取B所交易量和权益并停止策略")
+                        # 停止期间不再输出订单簿健康告警
+                        if hasattr(self, 'monitor') and self.monitor:
+                            self.monitor.suppress_health_logs = True
                         await asyncio.sleep(300)  # 等待5分钟
                         logger.info(f"⏰ 5分钟等待结束，开始获取B所交易量和权益")
 

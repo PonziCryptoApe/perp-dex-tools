@@ -112,9 +112,10 @@ class VariationalAdapter(ExchangeAdapter):
         if self._polling_task:
             self._polling_task.cancel()
             try:
-                await self._polling_task
-            except asyncio.CancelledError:
+                await asyncio.gather(self._polling_task, return_exceptions=True)
+            except Exception:
                 pass
+            self._polling_task = None
         
         # 断开客户端
         if self.client:

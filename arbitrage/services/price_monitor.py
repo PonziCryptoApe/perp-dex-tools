@@ -63,6 +63,7 @@ class PriceMonitorService:
         
         # 状态
         self._running = False
+        self.suppress_health_logs = False  # 等待结束阶段可关闭健康日志
         
         logger.info(
             f"🔧 初始化价格监控:\n"
@@ -374,6 +375,9 @@ class PriceMonitorService:
                 await asyncio.sleep(check_interval)
                 
                 current_time = time.time()
+                # 结束等待阶段可关闭健康日志
+                if self.suppress_health_logs:
+                    continue
                 
                 # 检查 Exchange A
                 if self.last_orderbook_a_time > 0:
