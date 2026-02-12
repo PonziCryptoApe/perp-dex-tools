@@ -7,13 +7,14 @@ import logging
 from decimal import Decimal
 import os
 import time
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 
 from aiolimiter import AsyncLimiter
 import lighter
 
 from ..models.position import Position
 from ..exchanges.base import ExchangeAdapter
+from ..utils.trade_logger import TradeLogger
 from helpers.lark_bot import LarkBot
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,9 @@ class OrderExecutor:
         max_retries: int = 5,
         retry_delay: float = 0.3,
         order_limiter_a: Optional[AsyncLimiter] = None,
-        order_limiter_b: Optional[AsyncLimiter] = None
+        order_limiter_b: Optional[AsyncLimiter] = None,
+        trade_logger: Optional[TradeLogger] = None,
+        get_strategy_position_after: Optional[Callable[[], Decimal]] = None
     ):
         """
         初始化订单执行器
@@ -50,6 +53,8 @@ class OrderExecutor:
         self.retry_delay = retry_delay
         self.order_limiter_a = order_limiter_a
         self.order_limiter_b = order_limiter_b
+        self.trade_logger = trade_logger
+        self.get_strategy_position_after = get_strategy_position_after
         self.sleep_interval = 30
         self.sleep_interval_enhance = 61
         self.sleep_retries = 0
@@ -82,6 +87,60 @@ class OrderExecutor:
             )
         
         return normalized
+
+    def _log_extra_trade(
+        self,
+        exchange: ExchangeAdapter,
+        side: str,
+        signal_price: Decimal,
+        result: dict,
+        position_type: str,
+        trade_source: str
+    ):
+        """记录非策略主流程的交易（如重试、补单、紧急平仓等）"""
+        if not self.trade_logger:
+            return
+        if not result or not result.get('success') and not result.get('partial_fill'):
+            return
+        filled_price = result.get('filled_price', signal_price)
+        filled_quantity = result.get('filled_quantity', Decimal('0'))
+        order_id = result.get('order_id', '')
+        attempt = result.get('attempt')
+
+        source = trade_source or ''
+        if source.startswith('retry') and attempt:
+            source = f"{source}_{attempt}"
+        if result.get('partial_fill'):
+            if 'partial' not in source:
+                source = f"{source}_partial" if source else 'partial_fill'
+
+        strategy_position_after = None
+        if callable(self.get_strategy_position_after):
+            try:
+                strategy_position_after = self.get_strategy_position_after()
+                if strategy_position_after is not None and exchange is self.exchange_a:
+                    if side.lower() == 'buy':
+                        strategy_position_after += filled_quantity
+                    elif side.lower() == 'sell':
+                        strategy_position_after -= filled_quantity
+            except Exception:
+                strategy_position_after = None
+
+        self.trade_logger.log_trade(
+            exchange=exchange.exchange_name,
+            side=side,
+            signal_price=signal_price,
+            filled_price=filled_price,
+            quantity=filled_quantity,
+            order_id=order_id,
+            position_type=position_type,
+            spread_pct=Decimal('0'),
+            pnl_pct=Decimal('0'),
+            notes=f"{trade_source}",
+            trade_source=source,
+            strategy_position_after=strategy_position_after,
+            attempt=attempt
+        )
     
     async def _balance_positions(
         self,
@@ -180,7 +239,8 @@ class OrderExecutor:
                 quantity=diff_a,  # ✅ 补单剩余数量
                 price=price_a,
                 retry_mode='aggressive',
-                order_limiter=self.order_limiter_a
+                order_limiter=self.order_limiter_a,
+                trade_source=f"balance_{operation_type}"
             )
             if result_retry_a.get('success'):
                 supplement_qty = result_retry_a.get('filled_quantity', Decimal('0'))
@@ -208,7 +268,8 @@ class OrderExecutor:
                 quantity=diff_b,
                 price=price_b,
                 retry_mode='aggressive',
-                order_limiter=self.order_limiter_b
+                order_limiter=self.order_limiter_b,
+                trade_source=f"balance_{operation_type}"
             )
 
             if result_retry_b.get('success'):
@@ -365,7 +426,8 @@ class OrderExecutor:
         retry_mode: str = 'opportunistic',
         quote_id: Optional[str] = None,
         max_retries: Optional[int] = None,
-        order_limiter: Optional[AsyncLimiter] = None
+        order_limiter: Optional[AsyncLimiter] = None,
+        trade_source: str = 'retry'
     ) -> dict:
         """
         重试下单逻辑
@@ -465,6 +527,16 @@ class OrderExecutor:
                         f"⚠️ 部分成交: {exchange.exchange_name} | "
                         f"已成交: {result.get('filled_quantity')} / {quantity}"
                     )
+
+                    result_with_attempt = {**result, 'attempt': attempt}
+                    self._log_extra_trade(
+                        exchange=exchange,
+                        side=side,
+                        signal_price=price,
+                        result=result_with_attempt,
+                        position_type=order_type,
+                        trade_source=trade_source
+                    )
                     
                     return {
                         'success': True,  # ✅ 标记为成功（有成交）
@@ -484,6 +556,15 @@ class OrderExecutor:
                         f"✅ 下单成功: {exchange.exchange_name} | "
                         f"类型: {order_type} | 方向: {side} | "
                         f"尝试次数: {attempt}/{max_retries}"
+                    )
+                    result_with_attempt = {**result, 'attempt': attempt}
+                    self._log_extra_trade(
+                        exchange=exchange,
+                        side=side,
+                        signal_price=price,
+                        result=result_with_attempt,
+                        position_type=order_type,
+                        trade_source=trade_source
                     )
                     return {
                         **result,
@@ -616,6 +697,44 @@ class OrderExecutor:
                 order_b_result = {'success': False, 'error': str(order_b_result)}
             else:
                 success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
+
+            if order_a_result.get('partial_fill'):
+                self._log_extra_trade(
+                    exchange=self.exchange_a,
+                    side='buy',
+                    signal_price=exchange_a_price,
+                    result=order_a_result,
+                    position_type='close',
+                    trade_source='partial_fill_close'
+                )
+            if order_b_result.get('partial_fill'):
+                self._log_extra_trade(
+                    exchange=self.exchange_b,
+                    side='sell',
+                    signal_price=exchange_b_price,
+                    result=order_b_result,
+                    position_type='close',
+                    trade_source='partial_fill_close'
+                )
+
+            if order_a_result.get('partial_fill'):
+                self._log_extra_trade(
+                    exchange=self.exchange_a,
+                    side='sell',
+                    signal_price=exchange_a_price,
+                    result=order_a_result,
+                    position_type='open',
+                    trade_source='partial_fill_open'
+                )
+            if order_b_result.get('partial_fill'):
+                self._log_extra_trade(
+                    exchange=self.exchange_b,
+                    side='buy',
+                    signal_price=exchange_b_price,
+                    result=order_b_result,
+                    position_type='open',
+                    trade_source='partial_fill_open'
+                )
             
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
@@ -646,6 +765,7 @@ class OrderExecutor:
                     retry_mode='aggressive',
                     quote_id=exchange_a_quote_id,
                     order_limiter=self.order_limiter_a,
+                    trade_source="retry_open",
                 )
                 if retry_result_a.get('success'):
 
@@ -686,7 +806,9 @@ class OrderExecutor:
                     price=exchange_b_price,
                     retry_mode='aggressive',
                     quote_id=exchange_b_quote_id,
-                    order_limiter=self.order_limiter_b,)
+                    order_limiter=self.order_limiter_b,
+                    trade_source="retry_open",
+                )
                 if retry_result_b.get('success'):
                     # ✅ 更新 order_b_result 和 success_b
                     order_b_result = retry_result_b
@@ -977,6 +1099,7 @@ class OrderExecutor:
                     retry_mode='aggressive',
                     quote_id=exchange_a_quote_id,
                     order_limiter=self.order_limiter_a,
+                    trade_source="retry_close",
                 )
 
                 if retry_result_a.get('success'):
@@ -1019,6 +1142,7 @@ class OrderExecutor:
                     retry_mode='aggressive',
                     quote_id=exchange_b_quote_id,
                     order_limiter=self.order_limiter_b,
+                    trade_source="retry_close",
                 )
                 
                 if retry_result_b.get('success'):
@@ -1130,7 +1254,7 @@ class OrderExecutor:
                     logger.info(f"✅ 反向开仓成功: {symbol_a}/{symbol_b}")
                     logger.info(f"{self.exchange_a.exchange_name}: BUY {symbol_a} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
                     logger.info(f"{self.exchange_b.exchange_name}: SELL {symbol_b} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
-                    logger.info(f'信号价差: {position.spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { position.spread_pct - total_slippage}')
+                    logger.info(f'信号价差: {position.spread_pct:+.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { position.spread_pct - total_slippage:+.4f}')
 
                     # logger.info(
                     #     f"✅ 反向开仓成功:\n"
@@ -1202,7 +1326,8 @@ class OrderExecutor:
                 price=close_price,
                 retry_mode='aggressive',
                 quote_id=orderbook.get('quote_id'),
-                order_limiter=self.order_limiter_a
+                order_limiter=self.order_limiter_a,
+                trade_source="emergency_close"
             )
             
             if result.get('success'):
@@ -1239,7 +1364,8 @@ class OrderExecutor:
                 price=close_price,
                 retry_mode='aggressive',
                 quote_id=quote_id,
-                order_limiter=self.order_limiter_b
+                order_limiter=self.order_limiter_b,
+                trade_source="emergency_close"
             )
             
             if result.get('success'):
@@ -1279,7 +1405,8 @@ class OrderExecutor:
                 quantity=quantity,
                 price=price,
                 retry_mode='aggressive',
-                order_limiter=order_limiter
+                order_limiter=order_limiter,
+                trade_source="force_close"
             )
             
             if result.get('success'):
@@ -1358,6 +1485,7 @@ class OrderExecutor:
                     price=exchange_a_ask_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_a_side == 'long' and pos_b_side == 'short':
                 # Exchange A 多头多于 Exchange B，多卖出差额
@@ -1370,6 +1498,7 @@ class OrderExecutor:
                     price=exchange_a_bid_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_a_side == 'long' and pos_b_side == 'long':
                 logger.info(f'🔄 两边仓位方向相同:long, 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位')
@@ -1381,6 +1510,7 @@ class OrderExecutor:
                     price=exchange_a_bid_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_a_side == 'short' and pos_b_side == 'short':
                 logger.info(f'🔄 两边仓位方向相同:short,调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位 ')
@@ -1392,6 +1522,7 @@ class OrderExecutor:
                     price=exchange_a_ask_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_b_side == 'neutral':
                 if pos_a_side == 'long':
@@ -1404,6 +1535,7 @@ class OrderExecutor:
                         price=exchange_a_bid_price,
                         retry_mode='aggressive',
                         order_limiter=self.order_limiter_a,
+                        trade_source="position_balance",
                     )
                 elif pos_a_side == 'short':
                     logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {diff_size} {symbol_a} 以平衡仓位")
@@ -1415,6 +1547,7 @@ class OrderExecutor:
                         price=exchange_a_ask_price,
                         retry_mode='aggressive',
                         order_limiter=self.order_limiter_a,
+                        trade_source="position_balance",
                     )
         if pos_b_size > pos_a_size:
             diff_size = pos_b_size - pos_a_size
@@ -1429,6 +1562,7 @@ class OrderExecutor:
                     price=exchange_a_bid_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_a_side == 'long' and pos_b_side == 'short':
                 # Exchange A 多头少于 Exchange B，A买入差额
@@ -1441,6 +1575,7 @@ class OrderExecutor:
                     price=exchange_a_ask_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_a_side == 'long' and pos_b_side == 'long':
                 logger.info(f'🔄 两边仓位方向相同:long, 调整仓位: 在 {self.exchange_a.exchange_name} 卖出 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位')
@@ -1452,6 +1587,7 @@ class OrderExecutor:
                     price=exchange_a_bid_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_a_side == 'short' and pos_b_side == 'short':
                 logger.info(f'🔄 两边仓位方向相同:short,调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_a_size + pos_b_size} {symbol_a} 以平衡仓位 ')
@@ -1463,6 +1599,7 @@ class OrderExecutor:
                     price=exchange_a_bid_price,
                     retry_mode='aggressive',
                     order_limiter=self.order_limiter_a,
+                    trade_source="position_balance",
                 )
             elif pos_a_side == 'neutral':
                 if pos_b_side == 'long':
@@ -1475,6 +1612,7 @@ class OrderExecutor:
                         price=exchange_a_bid_price,
                         retry_mode='aggressive',
                         order_limiter=self.order_limiter_a,
+                        trade_source="position_balance",
                     )
                 elif pos_b_side == 'short':
                     logger.info(f"🔄 调整仓位: 在 {self.exchange_a.exchange_name} 买入 {pos_b_size} {symbol_b} 以平衡仓位")
@@ -1486,6 +1624,7 @@ class OrderExecutor:
                         price=exchange_a_ask_price,
                         retry_mode='aggressive',
                         order_limiter=self.order_limiter_a,
+                        trade_source="position_balance",
                     )
 
         pos_a = await self.exchange_a.get_position(symbol_a)

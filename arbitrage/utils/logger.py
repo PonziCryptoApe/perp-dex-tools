@@ -56,17 +56,17 @@ def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
         utc=True
     )
     file_handler.suffix = "%Y%m%d"
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(log_format)
     
     # ✅ 控制台 Handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG)
     console_handler.setFormatter(log_format)
     
     # ✅ 配置根日志记录器
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG)
     
     # 清除现有 handlers（避免重复）
     root_logger.handlers.clear()

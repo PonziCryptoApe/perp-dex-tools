@@ -483,6 +483,9 @@ class PositionManagerService:
     def _log_open_trade(self, position: Position, signal_delay_ms_a: float = 0, signal_delay_ms_b: float = 0):
         """记录开仓交易到 CSV"""
         if self.trade_logger:
+            strategy_position_after = self._get_strategy_position_after('open', position)
+            trade_source_a = self._get_trade_source('open', position.attempt_a)
+            trade_source_b = self._get_trade_source('open', position.attempt_b)
             self.trade_logger.log_open_position(
                 exchange_a_name=position.exchange_a_name,
                 exchange_a_side='sell',
@@ -503,7 +506,10 @@ class PositionManagerService:
                 execution_duration_a_ms=position.execution_duration_a_ms,
                 execution_duration_b_ms=position.execution_duration_b_ms,
                 attempt_a=position.attempt_a,
-                attempt_b=position.attempt_b
+                attempt_b=position.attempt_b,
+                trade_source_a=trade_source_a,
+                trade_source_b=trade_source_b,
+                strategy_position_after=strategy_position_after
             )
 
     def _log_close_trade(self, position: Position, pnl_pct: Decimal, signal_delay_ms_a: float = 0, signal_delay_ms_b: float = 0):
@@ -518,6 +524,9 @@ class PositionManagerService:
             else:
                 close_spread_pct = Decimal('0')
             
+            strategy_position_after = self._get_strategy_position_after('close', position)
+            trade_source_a = self._get_trade_source('close', position.attempt_a)
+            trade_source_b = self._get_trade_source('close', position.attempt_b)
             self.trade_logger.log_close_position(
                 exchange_a_name=position.exchange_a_name,
                 exchange_a_side='buy',  # 平空
@@ -539,5 +548,22 @@ class PositionManagerService:
                 execution_duration_a_ms=position.execution_duration_a_ms,
                 execution_duration_b_ms=position.execution_duration_b_ms,
                 attempt_a=position.attempt_a,
-                attempt_b=position.attempt_b
+                attempt_b=position.attempt_b,
+                trade_source_a=trade_source_a,
+                trade_source_b=trade_source_b,
+                strategy_position_after=strategy_position_after
             )
+
+    def _get_trade_source(self, position_type: str, attempt: Optional[int]) -> str:
+        """生成交易来源标记"""
+        if attempt is None or attempt <= 1:
+            return f"normal_{position_type}"
+        return f"retry_{position_type}_{attempt}"
+
+    def _get_strategy_position_after(self, position_type: str, position: Position) -> Decimal:
+        """计算当前下单后的策略仓位（以 A 所为准）"""
+        if self.accumulate_mode:
+            return self.current_position_qty
+        if position_type == 'open':
+            return Decimal('0') - position.quantity
+        return Decimal('0')

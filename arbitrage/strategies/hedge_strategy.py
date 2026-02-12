@@ -111,7 +111,9 @@ class HedgeStrategy(BaseStrategy):
             quantity=quantity,
             quantity_precision=quantity_precision,
             order_limiter_a=self.order_limiter_a,
-            order_limiter_b=self.order_limiter_b
+            order_limiter_b=self.order_limiter_b,
+            trade_logger=trade_logger,
+            get_strategy_position_after=self.position_manager.get_current_position_qty
         )
         
         # 持仓管理

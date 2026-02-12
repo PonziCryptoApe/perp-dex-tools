@@ -54,6 +54,8 @@ class TradeLogger:
                     'spread_pct',          # 价差百分比
                     'pnl_pct',             # 盈亏百分比
                     'notes',               # 备注
+                    'trade_source',        # ✅ 新增：交易来源
+                    'strategy_position_after', # ✅ 新增：策略仓位（A 所为准）
                     'signal_delay_ms',      # ✅ 可选：信号延迟时间
                     'place_duration_ms',   # ✅ 可选：下单耗时
                     'execution_duration_ms', # ✅ 可选：执行耗时
@@ -73,6 +75,8 @@ class TradeLogger:
         spread_pct: Decimal = Decimal('0'),
         pnl_pct: Decimal = Decimal('0'),
         notes: str = '',
+        trade_source: str = '',
+        strategy_position_after: Optional[Decimal] = None,
         signal_delay_ms: Optional[float] = None,
         place_duration_ms: Optional[float] = None,
         execution_duration_ms: Optional[float] = None,
@@ -123,6 +127,8 @@ class TradeLogger:
                     f"{spread_pct:.6f}",
                     f"{pnl_pct:.6f}",
                     notes,
+                    trade_source,
+                    f"{strategy_position_after}" if strategy_position_after is not None else '',
                     signal_delay_ms, #✅ 可选：信号延迟时间
                     place_duration_ms,   # ✅ 可选：下单耗时
                     execution_duration_ms, # ✅ 可选：执行耗时
@@ -159,6 +165,9 @@ class TradeLogger:
         place_duration_b_ms: float,
         execution_duration_b_ms: float,
         attempt_b: int,
+        trade_source_a: str = '',
+        trade_source_b: str = '',
+        strategy_position_after: Optional[Decimal] = None,
     ):
         """
         记录开仓（两条记录）
@@ -189,6 +198,8 @@ class TradeLogger:
             spread_pct=spread_pct,
             pnl_pct=Decimal('0'),
             notes=f'开仓-{exchange_a_name}-{exchange_a_side}',
+            trade_source=trade_source_a,
+            strategy_position_after=strategy_position_after,
             signal_delay_ms=signal_delay_ms_a,
             place_duration_ms=place_duration_a_ms,
             execution_duration_ms=execution_duration_a_ms,
@@ -207,6 +218,8 @@ class TradeLogger:
             spread_pct=spread_pct,
             pnl_pct=Decimal('0'),
             notes=f'开仓-{exchange_b_name}-{exchange_b_side}',
+            trade_source=trade_source_b,
+            strategy_position_after=strategy_position_after,
             signal_delay_ms=signal_delay_ms_b,
             place_duration_ms=place_duration_b_ms,
             execution_duration_ms=execution_duration_b_ms,
@@ -247,7 +260,10 @@ class TradeLogger:
         execution_duration_a_ms: float = 0,
         execution_duration_b_ms: float = 0,
         attempt_a: int = 0,
-        attempt_b: int = 0
+        attempt_b: int = 0,
+        trade_source_a: str = '',
+        trade_source_b: str = '',
+        strategy_position_after: Optional[Decimal] = None
     ):
         """
         记录反向开仓（两条记录）
@@ -279,6 +295,8 @@ class TradeLogger:
             spread_pct=spread_pct,
             pnl_pct=pnl_pct,
             notes=f'反向开仓-{exchange_a_name}-{exchange_a_side}',
+            trade_source=trade_source_a,
+            strategy_position_after=strategy_position_after,
             signal_delay_ms=signal_delay_ms_a,
             place_duration_ms=place_duration_a_ms,
             execution_duration_ms=execution_duration_a_ms,
@@ -297,6 +315,8 @@ class TradeLogger:
             spread_pct=spread_pct,
             pnl_pct=pnl_pct,
             notes=f'反向开仓-{exchange_b_name}-{exchange_b_side}',
+            trade_source=trade_source_b,
+            strategy_position_after=strategy_position_after,
             signal_delay_ms=signal_delay_ms_b,
             place_duration_ms=place_duration_b_ms,
             execution_duration_ms=execution_duration_b_ms,
