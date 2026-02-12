@@ -270,8 +270,8 @@ class HedgeStrategy(BaseStrategy):
             return
         try:
             # ✅ 记录价格更新的时间
-            price_update_time_a = prices.exchange_a_timestamp
-            price_update_time_b = prices.exchange_b_timestamp
+            price_update_time_a = self._normalize_timestamp(prices.exchange_a_timestamp)
+            price_update_time_b = self._normalize_timestamp(prices.exchange_b_timestamp)
 
             # 记录信号触发时间
             signal_trigger_time = time.time()
@@ -285,7 +285,7 @@ class HedgeStrategy(BaseStrategy):
                 signal_flag = True
             else:
                 self.signal_delay += 1
-                logger.warning(f"⚠️ 信号延迟过大: A {signal_delay_ms_a:.2f} ms（阈值: {self.max_signal_delay_ms} ms），"
+                logger.warning(f"⚠️ [{self.symbol}] 信号延迟过大: A {signal_delay_ms_a:.2f} ms（阈值: {self.max_signal_delay_ms} ms），"
                             f" B {signal_delay_ms_b:.2f} ms（阈值: {self.max_signal_delay_ms} ms）")
                 return  # 丢弃该信号
             # 计算价差
@@ -315,7 +315,7 @@ class HedgeStrategy(BaseStrategy):
 
             if self.position_manager.accumulate_mode:
                 current_qty = self.position_manager.get_current_position_qty()
-                logger.info(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
+                logger.debug(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
                 self._is_executed = False
                 if current_qty < 0:
                     # ✅ 优先检查平仓信号（如果可以平仓）
@@ -385,6 +385,19 @@ class HedgeStrategy(BaseStrategy):
         except Exception as e:
             logger.exception(f"❌ 价格更新处理失败: {e}")
 
+    def _normalize_timestamp(self, ts) -> float:
+        """统一时间戳为秒"""
+        if ts is None:
+            return time.time()
+        try:
+            ts_val = float(ts)
+        except Exception:
+            return time.time()
+        # 大于 1e10 认为是毫秒
+        if ts_val > 1e10:
+            ts_val = ts_val / 1000.0
+        return ts_val
+
     async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
         检查开仓信号
@@ -431,7 +444,7 @@ class HedgeStrategy(BaseStrategy):
                 self.signal_stats['open']['depth_insufficient'] += 1
 
                 logger.warning(
-                    f"⚠️ 开仓深度不足，跳过:\n"
+                    f"⚠️ [{self.symbol}] 开仓深度不足，跳过:\n"
                     f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
                     f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
                     f"   最小深度: {min_depth} < 阈值: {self.min_depth_quantity}\n"
@@ -442,7 +455,7 @@ class HedgeStrategy(BaseStrategy):
             self.open_signal_count += 1
 
             logger.info(
-                f"🔔 检测到开仓信号 #{self.open_signal_count}:\n"
+                f"🔔 [{self.symbol}] 检测到开仓信号 #{self.open_signal_count}:\n"
                 f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                 f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                 f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
@@ -638,7 +651,7 @@ class HedgeStrategy(BaseStrategy):
                 self.signal_stats['close']['depth_insufficient'] += 1
 
                 logger.warning(
-                    f"⚠️ 反向开仓深度不足，跳过:\n"
+                    f"⚠️ [{self.symbol}] 反向开仓深度不足，跳过:\n"
                     f"   {self.exchange_a.exchange_name} 卖一深度: {depth_a}\n"
                     f"   {self.exchange_b.exchange_name} 买一深度: {depth_b}\n"
                     f"   最小深度: {min_depth} < 阈值: {self.min_depth_quantity}\n"
@@ -649,7 +662,7 @@ class HedgeStrategy(BaseStrategy):
             self.close_signal_count += 1
 
             logger.info(
-                f"🔔 检测到反向开仓信号 #{self.close_signal_count}:\n"
+                f"🔔 [{self.symbol}] 检测到反向开仓信号 #{self.close_signal_count}:\n"
                 f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                 f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
                 f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
@@ -825,7 +838,7 @@ class HedgeStrategy(BaseStrategy):
         config_path = self.config_yaml_path
         if not os.path.exists(config_path):
             return
-        logger.info(f"🔍 检查 YAML 配置文件更新: {config_path}")
+        logger.debug(f"🔍 检查 YAML 配置文件更新: {config_path}")
          # 检查间隔
         if self._last_yaml_check_time is None:
             self._last_yaml_check_time = time.time()

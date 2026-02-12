@@ -611,4 +611,4 @@ class LighterClient(BaseExchangeClient):
                 'fetch_duration': fetch_duration_ms,
             }
         except Exception as e:
-            self.logger.log(f"获取 Variational 订单簿失败: {e}")
+            self.logger.log(f"获取 Lighter 订单簿失败: {e}")

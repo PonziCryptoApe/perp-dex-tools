@@ -264,12 +264,12 @@ class PriceMonitorService:
         if logger.isEnabledFor(logging.DEBUG):
             bids = orderbook.get('bids', [])
             asks = orderbook.get('asks', [])
-            if bids and asks:
-                logger.debug(
-                    f"📘 {self.exchange_a.exchange_name} 订单簿更新 #{self.orderbook_a_updates}:\n"
-                    f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
-                    f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
-                )
+            # if bids and asks:
+                # logger.debug(
+                #     f"📘 {self.exchange_a.exchange_name} 订单簿更新 #{self.orderbook_a_updates}:\n"
+                #     f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
+                #     f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
+                # )
         if self.trigger_exchange == 'exchange_a':
             await self._notify_price_update()
     
@@ -283,12 +283,12 @@ class PriceMonitorService:
         if logger.isEnabledFor(logging.DEBUG):
             bids = orderbook.get('bids', [])
             asks = orderbook.get('asks', [])
-            if bids and asks:
-                logger.debug(
-                    f"📗 {self.exchange_b.exchange_name} 订单簿更新 #{self.orderbook_b_updates}:\n"
-                    f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
-                    f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
-                )
+            # if bids and asks:
+            #     logger.debug(
+            #         f"📗 {self.exchange_b.exchange_name} 订单簿更新 #{self.orderbook_b_updates}:\n"
+            #         f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
+            #         f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
+            #     )
         if self.trigger_exchange == 'exchange_b':
             await self._notify_price_update()
 
@@ -316,7 +316,12 @@ class PriceMonitorService:
                 try:
                     await callback(prices)
                 except Exception as e:
-                    logger.exception(f"❌ 价格更新回调失败 ({callback.__name__}): {e}")
+                    logger.exception(
+                        f"❌ [{self.symbol}] 价格更新回调失败 "
+                        f"({callback.__name__}) | "
+                        f"A={self.exchange_a.exchange_name}, "
+                        f"B={self.exchange_b.exchange_name}: {e}"
+                    )
     
     async def _wait_for_orderbook(self, timeout: float = 10.0) -> bool:
         """等待订单簿数据就绪"""
@@ -418,21 +423,39 @@ class PriceMonitorService:
     def is_orderbook_stale(self, max_age: float = 10.0) -> tuple[bool, str]:
         """检查订单簿是否过时"""
         current_time = time.time()
+        age_a = None
+        age_b = None
         
         # 检查 Exchange A
         if self.last_orderbook_a_time > 0:
             age_a = current_time - self.last_orderbook_a_time
             if age_a > max_age:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 订单簿过时: "
+                    f"{self.exchange_a.exchange_name} age_ms={age_a*1000:.0f}"
+                )
                 return True, f"{self.exchange_a.exchange_name} 订单簿已 {age_a:.1f}s 未更新"
         elif self.orderbook_a is None:
+            logger.warning(
+                f"⚠️ [{self.symbol}] 订单簿未初始化: "
+                f"{self.exchange_a.exchange_name}"
+            )
             return True, f"{self.exchange_a.exchange_name} 订单簿未初始化"
         
         # 检查 Exchange B
         if self.last_orderbook_b_time > 0:
             age_b = current_time - self.last_orderbook_b_time
             if age_b > max_age:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 订单簿过时: "
+                    f"{self.exchange_b.exchange_name} age_ms={age_b*1000:.0f}"
+                )
                 return True, f"{self.exchange_b.exchange_name} 订单簿已 {age_b:.1f}s 未更新"
         elif self.orderbook_b is None:
+            logger.warning(
+                f"⚠️ [{self.symbol}] 订单簿未初始化: "
+                f"{self.exchange_b.exchange_name}"
+            )
             return True, f"{self.exchange_b.exchange_name} 订单簿未初始化"
         
         return False, ""

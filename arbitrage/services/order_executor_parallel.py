@@ -553,18 +553,20 @@ class OrderExecutor:
 
         order_quantity = self._normalize_quantity(order_quantity, "开仓数量")
 
+        symbol_a = self.exchange_a.symbol
+        symbol_b = self.exchange_b.symbol
         # ✅ 记录开始执行时间
         execution_start_time = time.time()
         
         # ✅ 计算信号触发 → 开始执行的延迟
         if signal_trigger_time:
             signal_to_execution_delay = (execution_start_time - signal_trigger_time) * 1000
-            logger.info(f"⏱️ 信号触发 → 开始执行: {signal_to_execution_delay:.2f} ms")
+            logger.info(f"⏱️ 信号触发 → 开始执行: {symbol_a}/{symbol_b} | {signal_to_execution_delay:.2f} ms")
     
         logger.info(
-            f"📤 执行开仓:"
-            f"   {self.exchange_a.exchange_name} 开空 @ ${exchange_a_price},"
-            f"   {self.exchange_b.exchange_name} 开多 @ ${exchange_b_price}"
+            f"📤 执行开仓: {symbol_a}/{symbol_b} | "
+            f"{self.exchange_a.exchange_name} 开空 @ ${exchange_a_price}, "
+            f"{self.exchange_b.exchange_name} 开多 @ ${exchange_b_price}"
         )
         
         try:
@@ -611,7 +613,7 @@ class OrderExecutor:
                 logger.error(f"❌ 交易所B 下单异常: {order_b_result}")
                 if isinstance(order_b_result, lighter.exceptions.ApiException):
                     await self.handleLgApiExcep(order_b_result)
-                order_b_result = {'success': False, 'error': str(order_a_result)}
+                order_b_result = {'success': False, 'error': str(order_b_result)}
             else:
                 success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
             
@@ -714,7 +716,7 @@ class OrderExecutor:
                 
             # 情况 4️⃣: 两所都成功 → 创建持仓
             if success_a and success_b:
-                logger.info(
+                logger.debug(
                     f"✅ 两所均下单成功:\n"
                     f"   {self.exchange_a.exchange_name} 订单: {order_a_result.get('order_id')}\n"
                     f"   {self.exchange_b.exchange_name} 订单: {order_b_result.get('order_id')}\n"
@@ -788,10 +790,10 @@ class OrderExecutor:
                 slippage_b = ((actual_price_b - exchange_b_price) / exchange_b_price * 100).quantize(Decimal('0.0001'))
                 total_slippage = slippage_a + slippage_b
                 
-                logger.info(f"✅ 开仓成功:")
-                logger.info(f"{self.exchange_a.exchange_name}: SELL {self.exchange_a.symbol} {balanced_qty_a}/{order_quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
-                logger.info(f"{self.exchange_b.exchange_name}: BUY {self.exchange_b.symbol} {balanced_qty_b}/{order_quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
-                logger.info(f'信号价差: {spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { spread_pct - total_slippage}')
+                logger.info(f"✅ 开仓成功: {symbol_a}/{symbol_b}")
+                logger.info(f"{self.exchange_a.exchange_name}: SELL {symbol_a} {balanced_qty_a}/{order_quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
+                logger.info(f"{self.exchange_b.exchange_name}: BUY {symbol_b} {balanced_qty_b}/{order_quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
+                logger.info(f'信号价差: {spread_pct:+.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { spread_pct - total_slippage:+.4f}%')
                 logger.info(
                     # f"✅ 开仓成功:\n"
                     # f"   {self.exchange_a.exchange_name}:\n"
@@ -870,6 +872,8 @@ class OrderExecutor:
         Returns:
             (success: bool, position: Optional[Position])
         """
+        symbol_a = self.exchange_a.symbol
+        symbol_b = self.exchange_b.symbol
         # ✅ 记录开始执行时间
         execution_start_time = time.time()
         # ✅ 确定平仓数量
@@ -890,10 +894,10 @@ class OrderExecutor:
         # ✅ 计算信号触发 → 开始执行的延迟
         if signal_trigger_time:
             signal_to_execution_delay = (execution_start_time - signal_trigger_time) * 1000
-            logger.info(f"⏱️ 信号触发 → 开始执行: {signal_to_execution_delay:.2f} ms")
+            logger.info(f"⏱️ 信号触发 → 开始执行: {symbol_a}/{symbol_b} | {signal_to_execution_delay:.2f} ms")
         
         logger.info(
-            f"📤 执行平仓:\n"
+            f"📤 执行平仓: {symbol_a}/{symbol_b}\n"
             f"   平仓数量: {close_quantity} / {position.quantity}\n"
             f"   {self.exchange_a.exchange_name} 平空 @ ${exchange_a_price}\n"
             f"   {self.exchange_b.exchange_name} 平多 @ ${exchange_b_price}"
@@ -940,7 +944,7 @@ class OrderExecutor:
                 logger.error(f"❌ 交易所B 下单异常: {order_b_result}")
                 if isinstance(order_b_result, lighter.exceptions.ApiException):
                     await self.handleLgApiExcep(order_b_result)
-                order_b_result = {'success': False, 'error': str(order_a_result)}
+                order_b_result = {'success': False, 'error': str(order_b_result)}
             else:
                 success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
             
@@ -1123,9 +1127,9 @@ class OrderExecutor:
                     slippage_a = quality_report['exit_slippage']['exchange_a']
                     slippage_b = quality_report['exit_slippage']['exchange_b']
                     total_slippage = slippage_a + slippage_b
-                    logger.info(f"✅ 反向开仓成功:\n")
-                    logger.info(f"{self.exchange_a.exchange_name}: BUY {self.exchange_a.symbol} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
-                    logger.info(f"{self.exchange_b.exchange_name}: SELL {self.exchange_b.symbol} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> $${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
+                    logger.info(f"✅ 反向开仓成功: {symbol_a}/{symbol_b}")
+                    logger.info(f"{self.exchange_a.exchange_name}: BUY {symbol_a} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
+                    logger.info(f"{self.exchange_b.exchange_name}: SELL {symbol_b} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
                     logger.info(f'信号价差: {position.spread_pct:.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { position.spread_pct - total_slippage}')
 
                     # logger.info(

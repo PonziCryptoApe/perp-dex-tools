@@ -76,7 +76,7 @@ class VariationalAdapter(ExchangeAdapter):
     async def connect(self):
         """连接交易所"""
         try:
-            logger.info(f"🔌 连接 Variational...")
+            logger.info(f"🔌 连接 Variational... ({self.symbol})")
             
             # 连接客户端
             await self.client.connect()
@@ -88,7 +88,7 @@ class VariationalAdapter(ExchangeAdapter):
             self.client.setup_order_update_handler(self._on_position_update)
 
             # ✅ 4. 等待 WebSocket 连接稳定（增加等待时间）
-            logger.info("⏳ 等待 WebSocket 连接建立...")
+            logger.info(f"⏳ 等待 WebSocket 连接建立... ({self.symbol})")
             await asyncio.sleep(3)  # 从 2 秒改为 3 秒
             
             # ✅ 5. 验证 WebSocket 连接状态
@@ -96,14 +96,14 @@ class VariationalAdapter(ExchangeAdapter):
                 raise Exception("Portfolio WebSocket 未连接")
             
             logger.info(
-                f"✅ Variational 已连接\n"
+                f"✅ Variational 已连接 ({self.symbol})\n"
                 f"   Contract ID: {self.contract_id}\n"
                 f"   Tick Size: {self.tick_size}\n"
                 f"   WebSocket: {'已连接' if self.client._portfolio_ws else '❌ 未连接'}"
             )
         
         except Exception as e:
-            logger.error(f"❌ Variational 连接失败: {e}")
+            logger.error(f"❌ Variational 连接失败 ({self.symbol}): {e}")
             raise
     
     async def disconnect(self):
@@ -121,7 +121,7 @@ class VariationalAdapter(ExchangeAdapter):
         if self.client:
             await self.client.disconnect()
         
-        logger.info(f"⏹️ Variational 已断开")
+        logger.info(f"⏹️ Variational 已断开 ({self.symbol})")
     
     async def subscribe_orderbook(self, callback: Callable):
         """
@@ -135,11 +135,11 @@ class VariationalAdapter(ExchangeAdapter):
         # 启动轮询任务
         self._polling_task = asyncio.create_task(self._polling_loop())
         
-        logger.info(f"📡 已订阅 Variational 订单簿（轮询模式，间隔 {self.polling_interval}s）")
+        logger.info(f"📡 已订阅 Variational 订单簿（轮询模式，间隔 {self.polling_interval}s） ({self.symbol})")
     
     async def _polling_loop(self):
         """轮询循环"""
-        logger.info("🔄 启动 Variational 轮询...")
+        logger.info(f"🔄 启动 Variational 轮询... ({self.symbol})")
         consecutive_errors = 0
         max_consecutive_errors = 5
         while True:
@@ -162,25 +162,27 @@ class VariationalAdapter(ExchangeAdapter):
                 else:
                     consecutive_errors += 1
                     logger.warning(
-                        f"⚠️ Variational 数据获取失败 ({consecutive_errors}/{max_consecutive_errors})"
+                        f"⚠️ Variational 数据获取失败 ({self.symbol}) "
+                        f"({consecutive_errors}/{max_consecutive_errors})"
                     )
                 
                 # ✅ 连续失败过多，增加延迟
                 if consecutive_errors >= max_consecutive_errors:
-                    logger.warning(f"🚨 连续失败 {max_consecutive_errors} 次，暂停 10 秒")
+                    logger.warning(f"🚨 连续失败 {max_consecutive_errors} 次，暂停 10 秒 ({self.symbol})")
                     await asyncio.sleep(10)
                     consecutive_errors = 0  # 重置
                 else:
                     await asyncio.sleep(self.polling_interval)
             
             except asyncio.CancelledError:
-                logger.info("⏹️ Variational 轮询已停止")
+                logger.info(f"⏹️ Variational 轮询已停止 ({self.symbol})")
                 break
             
             except Exception as e:
                 consecutive_errors += 1
                 logger.error(
-                    f"❌ Variational 轮询错误 ({consecutive_errors}/{max_consecutive_errors}): {e}"
+                    f"❌ Variational 轮询错误 ({self.symbol}) "
+                    f"({consecutive_errors}/{max_consecutive_errors}): {e}"
                 )
                 
                 if consecutive_errors >= max_consecutive_errors:
@@ -216,7 +218,7 @@ class VariationalAdapter(ExchangeAdapter):
             self._orderbook_fetch_time = fetch_end  # 记录订单簿获取时间
 
             if not quote_data or 'bid' not in quote_data or 'ask' not in quote_data:
-                logger.debug("Variational quote 数据不完整")
+                logger.debug(f"Variational quote 数据不完整 ({self.symbol})")
                 return None
             
             bid_price = Decimal(str(quote_data['bid']))
@@ -238,10 +240,10 @@ class VariationalAdapter(ExchangeAdapter):
             
             return orderbook
         except asyncio.TimeoutError:
-            logger.warning("⚠️ Variational API 超时")
+            logger.warning(f"⚠️ Variational API 超时 ({self.symbol})")
             return None
         except Exception as e:
-            logger.exception(f"获取 Variational 订单簿失败: {e}")
+            logger.exception(f"获取 Variational 订单簿失败 ({self.symbol}): {e}")
             return None
     
     async def get_latest_orderbook(self, quantity: Optional[Decimal]) -> Optional[Dict]:
@@ -272,13 +274,13 @@ class VariationalAdapter(ExchangeAdapter):
         else:
             if quote_id is None:
                 #_quote_id为空，无法下单
-                logger.error("❌ 下单失败：缺少 quote_id")
+                logger.error(f"❌ 下单失败：缺少 quote_id ({self.symbol})")
                 return {
                     'success': False,
                     'order_id': None,
                     'error': 'Missing quote_id'
                 }
-            logger.info(f"📤 Variational 下市价单: {side} (quote_id: {quote_id})")
+            logger.info(f"📤 Variational 下市价单: {self.symbol} {side} (quote_id: {quote_id})")
             return await self.place_market_order(
                 side=side,
                 quote_id=quote_id,
@@ -308,13 +310,13 @@ class VariationalAdapter(ExchangeAdapter):
         else:
             if quote_id is None:
                 #_quote_id为空，无法下单
-                logger.error("❌ 下单失败：缺少 quote_id")
+                logger.error(f"❌ 下单失败：缺少 quote_id ({self.symbol})")
                 return {
                     'success': False,
                     'order_id': None,
                     'error': 'Missing quote_id'
                 }
-            logger.info(f"📤 Variational 下市价单: {side} (quote_id: {quote_id})")
+            logger.info(f"📤 Variational 下市价单: {self.symbol} {side} (quote_id: {quote_id})")
             return await self.place_market_order(
                 side=side,
                 quote_id=quote_id,
@@ -348,7 +350,7 @@ class VariationalAdapter(ExchangeAdapter):
                 
                 # ✅ 警告：时间差过大
                 if time_diff > 1000:  # 超过 1 秒
-                    logger.warning(f"⚠️ 订单簿数据过旧！时间差: {time_diff:.0f} ms")
+                    logger.warning(f"⚠️ 订单簿数据过旧！({self.symbol}) 时间差: {time_diff:.0f} ms")
             
             # logger.info(
             #     f"   方向: {side}\n"
@@ -363,16 +365,16 @@ class VariationalAdapter(ExchangeAdapter):
                 max_slippage=max_slippage
             )
             
-            logger.info(f"📊 Market order raw response: {result}")
+            logger.debug(f"📊 Market order raw response ({self.symbol}): {result}")
             place_end = time.time()
             place_duration = (place_end - self._order_place_time) * 1000  # 毫秒
-            logger.info(f"✅ {self.exchange_name} 下单完成, 下单耗时:{place_duration:.2f}ms")
+            logger.info(f"✅ {self.exchange_name} 下单完成 ({self.symbol}), 下单耗时:{place_duration:.2f}ms")
 
             # ✅ 检查返回格式
             if not result.success:
                 error_msg = result.error_message or "Unknown error"
                 
-                logger.error(f"❌ 市价单下单失败: {error_msg}")
+                logger.error(f"❌ 市价单下单失败 ({self.symbol}): {error_msg}")
                 return {
                     'success': False,
                     'order_id': None,
@@ -414,10 +416,10 @@ class VariationalAdapter(ExchangeAdapter):
 
                     if attempt_idx < max_order_retries - 1:
                         retry_interval = 0.01 if attempt_idx < 10 else 0.05
-                        logger.info(f"⏳ 订单 {rfq_id} 尚未入库，{retry_interval}s 后重试 ({attempt_idx + 1}/{max_order_retries})")
+                        logger.info(f"⏳ 订单尚未入库 ({self.symbol}) rfq_id={rfq_id}，{retry_interval}s 后重试 ({attempt_idx + 1}/{max_order_retries})")
                         await asyncio.sleep(retry_interval)
                 except Exception as e:
-                    logger.warning(f"⚠️ 第 {attempt_idx + 1} 次查询历史订单异常: {e}")
+                    logger.warning(f"⚠️ 第 {attempt_idx + 1} 次查询历史订单异常 ({self.symbol}): {e}")
                     await asyncio.sleep(retry_interval)
 
             execution_duration = (time.time() - place_end) * 1000  # 毫秒
@@ -436,25 +438,25 @@ class VariationalAdapter(ExchangeAdapter):
                 'retries': retries
             }
             if not final_status:
-                logger.error(f"❌ 达到最大重试次数，仍无法获取订单 {rfq_id} 的信息")
+                logger.error(f"❌ 达到最大重试次数，仍无法获取订单信息 ({self.symbol}) rfq_id={rfq_id}")
                 order_info['error'] = f'Timeout and order status: {final_status}'
             # ✅ 3. 判断最终状态
             if final_status.upper() in ['FILLED', 'CLEARED']:
-                logger.info(f"✅ 市价单成功: {rfq_id} {order_info['filled_quantity']} @ {order_info['filled_price']}")
+                logger.info(f"✅ 市价单成功 ({self.symbol}): {rfq_id} {order_info['filled_quantity']} @ {order_info['filled_price']}")
                 order_info['success'] = True
                 
             elif final_status.upper() in ['CANCELED', 'REJECTED']:
-                logger.error(f"❌ 市价单失败: {final_status}")
+                logger.error(f"❌ 市价单失败 ({self.symbol}): {final_status}")
                 order_info['error'] = f'Order {final_status}'
             else:
                 # 未知状态，保守返回失败
-                logger.error(f"❌ 未知订单状态: {final_status}")
+                logger.error(f"❌ 未知订单状态 ({self.symbol}): {final_status}")
                 order_info['error'] = f'Unknown status {final_status}'
 
             return order_info
         except Exception as e:
-            logger.error(f"❌ place_market_order 异常: {e}")
-            logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
+            logger.error(f"❌ place_market_order 异常 ({self.symbol}): {e}")
+            logger.info(f"⏱️ {self.exchange_name} 从下单到报错共耗时: {self.symbol} {(time.time() - order_start_time) * 1000:.2f} ms")
 
             import traceback
             traceback.print_exc()
@@ -501,7 +503,7 @@ class VariationalAdapter(ExchangeAdapter):
         """
         try:
             logger.info(
-                f"📤 Variational 下单:\n"
+                f"📤 Variational 下单 ({self.symbol}):\n"
                 f"   方向: {side}\n"
                 f"   数量: {quantity}\n"
                 f"   价格: {price}\n"
@@ -516,14 +518,14 @@ class VariationalAdapter(ExchangeAdapter):
             success = await self._place_post_only_order(side, quantity, price)
 
             if success:
-                logger.info(f"✅ Variational 订单成交: {self.current_order_id}")
+                logger.info(f"✅ Variational 订单成交 ({self.symbol}): {self.current_order_id}")
                 return {
                     'success': True,
                     'order_id': self.current_order_id,
                     'error': None
                 }
             else:
-                logger.error("❌ Variational 订单失败")
+                logger.error(f"❌ Variational 订单失败 ({self.symbol})")
                 return {
                     'success': False,
                     'order_id': None,
@@ -531,7 +533,7 @@ class VariationalAdapter(ExchangeAdapter):
                 }
         
         except Exception as e:
-            logger.error(f"❌ Variational 下单失败: {e}")
+            logger.error(f"❌ Variational 下单失败 ({self.symbol}): {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -556,7 +558,7 @@ class VariationalAdapter(ExchangeAdapter):
         # ✅ 下第一单
         order_id, order_price = await self._place_bbo_order(side, quantity, price)
         if not order_id:
-            logger.error("❌ 首次下单失败")
+            logger.error(f"❌ 首次下单失败 ({self.symbol})")
             return False
         
         self.current_order_id = order_id
@@ -676,7 +678,7 @@ class VariationalAdapter(ExchangeAdapter):
                 return order_result.order_id, order_price
             else:
                 self.order_status = 'FAILED'
-                logger.error(f"❌ 下单失败: {order_result.error_message}")
+                logger.error(f"❌ 下单失败 ({self.symbol}): {order_result.error_message}")
                 return None, None
         
         except Exception as e:

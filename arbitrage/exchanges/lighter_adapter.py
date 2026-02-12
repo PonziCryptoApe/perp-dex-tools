@@ -21,10 +21,11 @@ class LighterAdapter(ExchangeAdapter):
         super().__init__(symbol, client, config)
 
         # ✅ 调试：打印客户端的所有方法
-        logger.info(f"🔍 LighterClient 可用方法:")
-        for attr in dir(self.client):
-            if not attr.startswith('_') and callable(getattr(self.client, attr)):
-                logger.info(f"   - {attr}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("🔍 LighterClient 可用方法:")
+            for attr in dir(self.client):
+                if not attr.startswith('_') and callable(getattr(self.client, attr)):
+                    logger.debug(f"   - {attr}")
 
         self.market_index = None
         self.ws_task = None
@@ -44,6 +45,7 @@ class LighterAdapter(ExchangeAdapter):
         self.lighter_last_update_ts = 0.0  # 最近一次收到有效订单簿消息的时间戳
         self._order_book_fingerprint = None  # 订单簿内容指纹，用于检测“内容未变”场景
         self.lighter_last_notify_ts = 0.0  # 最近一次向上游回调的时间戳
+        self._is_running = False
         
         # 消息计数器
         self.message_count = 0
@@ -54,25 +56,26 @@ class LighterAdapter(ExchangeAdapter):
     async def connect(self):
         """连接 Lighter"""
         try:
+            self._is_running = True
             if self.client.config.contract_id is not None and self.client.config.contract_id != '':
                 logger.info(
                     f"✅ {self.exchange_name} 已连接: "
-                    f"contract_id={self.client.config.contract_id}"
+                    f"{self.symbol} contract_id={self.client.config.contract_id}"
                 )
             else:
                 logger.warning(
-                    f"⚠️ {self.exchange_name} contract_id 未设置，"
+                    f"⚠️ {self.exchange_name} contract_id 未设置 ({self.symbol})，"
                     f"将在订阅订单簿时获取"
                 )
 
             if hasattr(self.client, 'setup_order_update_handler'):
                 self.client.setup_order_update_handler(self._on_order_update)
-                logger.info(f"📡 {self.exchange_name} 订单更新回调已注册")
+                logger.info(f"📡 {self.exchange_name} 订单更新回调已注册: {self.symbol}")
             else:
-                logger.warning(f"⚠️ {self.exchange_name} 不支持订单更新回调")
+                logger.warning(f"⚠️ {self.exchange_name} 不支持订单更新回调: {self.symbol}")
 
         except Exception as e:
-            logger.exception(f"❌ {self.exchange_name} 连接失败: {e}")
+            logger.exception(f"❌ {self.exchange_name} 连接失败 ({self.symbol}): {e}")
             raise
     
     async def _get_market_index(self) -> int:
@@ -85,13 +88,14 @@ class LighterAdapter(ExchangeAdapter):
                 )
             
             market_index = int(self.client.config.contract_id)
-            logger.info(f"✅ Lighter market_index: {market_index}")
+            logger.info(f"✅ Lighter market_index: {market_index} ({self.symbol})")
             return market_index
         except Exception as e:
             logger.exception(f"获取 market_index 失败: {e}")
             raise
     
     async def disconnect(self):
+        self._is_running = False
         self._order_status_futures.clear()
         self._order_status_data.clear()
         """断开连接"""
@@ -118,16 +122,16 @@ class LighterAdapter(ExchangeAdapter):
         # 启动 WebSocket 任务
         self.ws_task = asyncio.create_task(self._handle_lighter_ws())
         
-        logger.info(f"📡 {self.exchange_name} 订阅订单簿: market {self.market_index}")
+        logger.info(f"📡 {self.exchange_name} 订阅订单簿: {self.symbol} market {self.market_index}")
     
     async def _handle_lighter_ws(self):
         """处理 Lighter WebSocket"""
         url = "wss://mainnet.zklighter.elliot.ai/stream"
         reconnect_count = 0
         
-        while True:
+        while self._is_running:
             try:
-                logger.info(f"🔌 连接 Lighter WebSocket: {url}")
+                logger.info(f"🔌 连接 Lighter WebSocket: {self.symbol} {url}")
 
                 # 每次重连前重置本地订单簿状态，避免沿用旧缓存
                 self._reset_lighter_orderbook_state()
@@ -149,7 +153,7 @@ class LighterAdapter(ExchangeAdapter):
                         "channel": f"order_book/{self.market_index}"
                     }
                     await ws.send(json.dumps(subscribe_msg))
-                    logger.info(f"📡 已订阅 Lighter 订单簿: market {self.market_index}")
+                    logger.info(f"📡 已订阅 Lighter 订单簿: {self.symbol} market {self.market_index}")
                     try:
 
                         # ✅ 新增：订阅订单更新流
@@ -158,7 +162,7 @@ class LighterAdapter(ExchangeAdapter):
                         auth_token, err = self.client.lighter_client.create_auth_token_with_expiry(ten_minutes_deadline)
 
                         if err is not None:
-                            logger.warning(f"⚠️ Failed to create auth token for account orders subscription: {err}")
+                            logger.warning(f"⚠️ Failed to create auth token for account orders subscription: {self.symbol} {err}")
                         else: 
 
                             subscribe_orders_msg = {
@@ -167,9 +171,9 @@ class LighterAdapter(ExchangeAdapter):
                                 "auth": auth_token
                             }
                             await ws.send(json.dumps(subscribe_orders_msg))
-                            logger.info("✅ Subscribed to account orders with auth token (expires in 10 minutes)")
+                            logger.info(f"✅ Subscribed to account orders with auth token: {self.symbol} (expires in 10 minutes)")
                     except Exception as e:
-                        logger.exception(f"❌ Error creating auth token for account orders subscription: {e}")
+                        logger.exception(f"❌ Error creating auth token for account orders subscription: {self.symbol} {e}")
 
                     # 接收消息
                     while True:
@@ -184,25 +188,33 @@ class LighterAdapter(ExchangeAdapter):
                             await self._process_lighter_message(data)  # 处理消息
                             
                         except asyncio.TimeoutError:
-                            logger.warning("⚠️ Lighter WS 1s 无消息，继续监听...")  # 心跳检查
+                            logger.info(f"⚠️ Lighter WS 1s 无消息，继续监听... ({self.symbol})")  # 心跳检查
                             continue
                         except websockets.exceptions.ConnectionClosedError as e:
-                            logger.warning(f"❌ Lighter WS 连接关闭，code={e.code}, reason={e.reason}")
+                            logger.warning(f"❌ Lighter WS 连接关闭 ({self.symbol})，code={e.code}, reason={e.reason}")
                             break  # 跳出内循环，重连外层
                         except websockets.exceptions.ConnectionClosed as e:
-                            logger.exception(f"❌ Lighter WS 连接关闭: {e}")
+                            logger.exception(f"❌ Lighter WS 连接关闭 ({self.symbol}): {e}")
+                            break  # 跳出内循环，重连外层
+                        except asyncio.CancelledError:
+                            logger.info(f"🔚 Lighter WS 任务被取消，退出循环 ({self.symbol})")
+                            self._is_running = False
                             break  # 跳出内循环，重连外层
             
             except websockets.exceptions.ConnectionClosed as e:
-                logger.exception(f"❌ Lighter WebSocket 连接关闭: {e}")
+                logger.exception(f"❌ Lighter WebSocket 连接关闭 ({self.symbol}): {e}")
             except Exception as e:
-                logger.exception(f"❌ Lighter WebSocket 异常: {e}")
-            
-            # 重连逻辑
-            reconnect_count += 1
-            wait_time = min(10, reconnect_count)
-            logger.info(f"⏳ {wait_time}秒后重连 Lighter WebSocket...")
-            await asyncio.sleep(wait_time)
+                logger.exception(f"❌ Lighter WebSocket 异常 ({self.symbol}): {e}")
+            if self._is_running:
+                # 重连逻辑
+                reconnect_count += 1
+                wait_time = min(10, reconnect_count)
+                logger.info(f"⏳ {wait_time}秒后重连 Lighter WebSocket... ({self.symbol})")
+                try:
+                    await asyncio.sleep(wait_time)
+                except asyncio.CancelledError:
+                    logger.info(f"🔚 Lighter WS 外层任务被取消，退出重连 ({self.symbol})")
+                    break
 
     def _reset_lighter_orderbook_state(self):
         """重置本地订单簿缓存，确保重连后不会使用旧数据"""
@@ -234,7 +246,7 @@ class LighterAdapter(ExchangeAdapter):
         if msg_type == "update/order_book":
             # ✅ 如果是第一次收到，当作快照处理
             if not self.lighter_snapshot_loaded:
-                logger.info("📸 收到 Lighter 初始订单簿（当作快照）")
+                logger.info(f"📸 收到 Lighter 初始订单簿（当作快照）: {self.symbol}")
                 await self._handle_lighter_snapshot(data)
             else:
                 # ✅ 后续消息当作增量更新
@@ -242,7 +254,7 @@ class LighterAdapter(ExchangeAdapter):
         
         elif msg_type == "snapshot":
             # ✅ 如果有专门的 snapshot 类型
-            logger.info("📸 收到 Lighter 快照消息")
+            logger.info(f"📸 收到 Lighter 快照消息: {self.symbol}")
             await self._handle_lighter_snapshot(data)
 
         elif msg_type in ["update/account_orders"]:
@@ -272,7 +284,7 @@ class LighterAdapter(ExchangeAdapter):
                 asks = order_book.get("asks", [])
                 
                 logger.info(
-                    f"📸 Lighter 快照数据:\n"
+                    f"📸 Lighter 快照数据: {self.symbol}\n"
                     f"   bids: {len(bids)} 条\n"
                     f"   asks: {len(asks)} 条"
                 )
@@ -300,7 +312,7 @@ class LighterAdapter(ExchangeAdapter):
                 self.lighter_snapshot_loaded = True
                 
                 logger.info(
-                    f"✅ Lighter 快照加载完成:\n"
+                    f"✅ Lighter 快照加载完成: {self.symbol}\n"
                     f"   {len(self.lighter_order_book['bids'])} bids\n"
                     f"   {len(self.lighter_order_book['asks'])} asks\n"
                     f"   Best Bid: ${self.lighter_best_bid}\n"
@@ -370,7 +382,7 @@ class LighterAdapter(ExchangeAdapter):
         """通知订单簿更新（不检查内容变化的内部版本）"""
         if self._orderbook_callback and not self.lighter_best_bid or not self.lighter_best_ask:
             logger.warning(
-                f"⚠️ 订单簿数据不完整:\n"
+                f"⚠️ 订单簿数据不完整: {self.symbol}\n"
                 f"   Best Bid: {self.lighter_best_bid}\n"
                 f"   Best Ask: {self.lighter_best_ask}"
             )
@@ -394,13 +406,13 @@ class LighterAdapter(ExchangeAdapter):
                 }
         self.client.best_bid = self.lighter_best_bid
         self.client.best_ask = self.lighter_best_ask
-        logger.debug("✅ Order book synced to Client")
-        logger.debug(
-            f"📗 Lighter 订单簿更新:\n"
-            f"   Bid: ${self.lighter_best_bid} x {bid_size}\n"
-            f"   Ask: ${self.lighter_best_ask} x {ask_size}"
-            f"   时间戳 ${ts:.3f}"
-        )
+        # logger.debug("✅ Order book synced to Client")
+        # logger.debug(
+        #     f"📗 Lighter 订单簿更新:\n"
+        #     f"   Bid: ${self.lighter_best_bid} x {bid_size}\n"
+        #     f"   Ask: ${self.lighter_best_ask} x {ask_size}"
+        #     f"   时间戳 {ts:.3f}"
+        # )
         
         # 触发回调
         if self._orderbook_callback:
@@ -502,12 +514,12 @@ class LighterAdapter(ExchangeAdapter):
             status_data = await asyncio.wait_for(future, timeout=timeout)
             return status_data
         except asyncio.TimeoutError:
-            logger.warning(f"⏰ 订单状态超时 (client_idx={client_order_index})")
+            logger.warning(f"⏰ 订单状态超时 ({self.symbol}, client_idx={client_order_index})")
             # 清理
             self._order_status_futures.pop(client_order_index, None)
             raise
         except Exception as e:
-            logger.exception(f"❌ 等待订单状态异常: {e}")
+            logger.exception(f"❌ 等待订单状态异常 ({self.symbol}): {e}")
             self._order_status_futures.pop(client_order_index, None)
             raise
 

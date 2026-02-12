@@ -788,7 +788,7 @@ class VariationalClient(BaseExchangeClient):
 
             # 设置认证 cookies
             
-            self.logger.log(f"【VARIATIONAL】Fetching orders history with params: {params}", "INFO")
+            self.logger.log(f"【VARIATIONAL】Fetching orders history with params: {params}", "DEBUG")
             
             # 发起请求
             response_data = await self._make_var_request('GET', url, params=params, cookies=self.cookies)
@@ -804,9 +804,9 @@ class VariationalClient(BaseExchangeClient):
                 # 更新对象计数
                 response_data['pagination']['object_count'] = len(filtered_orders)
                 
-                self.logger.log(f"【VARIATIONAL】Filtered {len(filtered_orders)} orders for rfq_id: {rfq_id}", "INFO")
+                self.logger.log(f"【VARIATIONAL】Filtered {len(filtered_orders)} orders for rfq_id: {rfq_id}", "DEBUG")
             
-            self.logger.log(f"【VARIATIONAL】Retrieved {len(response_data.get('result', []))} orders", "INFO")
+            self.logger.log(f"【VARIATIONAL】Retrieved {len(response_data.get('result', []))} orders", "DEBUG")
             return response_data
             
         except Exception as e:
@@ -865,7 +865,7 @@ class VariationalClient(BaseExchangeClient):
             
             # ✅ 检查返回数据
             if not data:
-                self.logger.log(f"No positions data", "DEBUG")
+                self.logger.log("No positions data", "DEBUG")
                 return None
             
             # ✅ 关键修正：data 本身就是数组，不需要 data['positions']
