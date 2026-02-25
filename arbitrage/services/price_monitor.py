@@ -56,6 +56,16 @@ class PriceMonitorService:
         self.orderbook_b_updates = 0
         self.last_orderbook_a_time = 0.0
         self.last_orderbook_b_time = 0.0
+
+        # 断流恢复保护：
+        # 当某一侧订单簿长时间断流后刚恢复时，先进入短暂保护期，
+        # 避免恢复瞬间的异常价差直接参与信号判断。
+        self.recovery_grace_seconds = 1.0
+        self.recovery_stale_threshold_seconds = 3.0
+        self._long_stale_a = False
+        self._long_stale_b = False
+        self._recovery_ready_time_a = 0.0
+        self._recovery_ready_time_b = 0.0
         
         # 回调限流（避免过于频繁触发）
         self.last_callback_time = 0.0
@@ -430,12 +440,29 @@ class PriceMonitorService:
         if self.last_orderbook_a_time > 0:
             age_a = current_time - self.last_orderbook_a_time
             if age_a > max_age:
+                if age_a >= self.recovery_stale_threshold_seconds:
+                    self._long_stale_a = True
+                self._recovery_ready_time_a = 0.0
                 logger.warning(
                     f"⚠️ [{self.symbol}] 订单簿过时: "
                     f"{self.exchange_a.exchange_name} age_ms={age_a*1000:.0f}"
                 )
                 return True, f"{self.exchange_a.exchange_name} 订单簿已 {age_a:.1f}s 未更新"
+            if self._long_stale_a:
+                if self._recovery_ready_time_a == 0.0:
+                    self._recovery_ready_time_a = current_time + self.recovery_grace_seconds
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] {self.exchange_a.exchange_name} 长断流恢复，"
+                        f"进入 {self.recovery_grace_seconds:.1f}s 保护期"
+                    )
+                remain = self._recovery_ready_time_a - current_time
+                if remain > 0:
+                    return True, f"{self.exchange_a.exchange_name} 恢复保护期中({remain:.2f}s)"
+                self._long_stale_a = False
+                self._recovery_ready_time_a = 0.0
         elif self.orderbook_a is None:
+            self._long_stale_a = True
+            self._recovery_ready_time_a = 0.0
             logger.warning(
                 f"⚠️ [{self.symbol}] 订单簿未初始化: "
                 f"{self.exchange_a.exchange_name}"
@@ -446,12 +473,29 @@ class PriceMonitorService:
         if self.last_orderbook_b_time > 0:
             age_b = current_time - self.last_orderbook_b_time
             if age_b > max_age:
+                if age_b >= self.recovery_stale_threshold_seconds:
+                    self._long_stale_b = True
+                self._recovery_ready_time_b = 0.0
                 logger.warning(
                     f"⚠️ [{self.symbol}] 订单簿过时: "
                     f"{self.exchange_b.exchange_name} age_ms={age_b*1000:.0f}"
                 )
                 return True, f"{self.exchange_b.exchange_name} 订单簿已 {age_b:.1f}s 未更新"
+            if self._long_stale_b:
+                if self._recovery_ready_time_b == 0.0:
+                    self._recovery_ready_time_b = current_time + self.recovery_grace_seconds
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] {self.exchange_b.exchange_name} 长断流恢复，"
+                        f"进入 {self.recovery_grace_seconds:.1f}s 保护期"
+                    )
+                remain = self._recovery_ready_time_b - current_time
+                if remain > 0:
+                    return True, f"{self.exchange_b.exchange_name} 恢复保护期中({remain:.2f}s)"
+                self._long_stale_b = False
+                self._recovery_ready_time_b = 0.0
         elif self.orderbook_b is None:
+            self._long_stale_b = True
+            self._recovery_ready_time_b = 0.0
             logger.warning(
                 f"⚠️ [{self.symbol}] 订单簿未初始化: "
                 f"{self.exchange_b.exchange_name}"

@@ -60,7 +60,9 @@ async def create_exchange_adapter(
     symbol: str,
     quantity: Decimal = None,
     slippage: Decimal = None,
-    config_override: dict = None
+    config_override: dict = None,
+    lighter_reconnect_base_delay: float = 0.3,
+    lighter_reconnect_max_delay: float = 10.0
 ):
     """创建交易所适配器"""
     if exchange_name not in EXCHANGE_CLIENTS:
@@ -215,6 +217,11 @@ async def create_exchange_adapter(
     adapter_config = {
         'slippage': slippage
     }
+    if exchange_name == 'lighter':
+        adapter_config.update({
+            'reconnect_base_delay': lighter_reconnect_base_delay,
+            'reconnect_max_delay': lighter_reconnect_max_delay
+        })
     
     if exchange_name == 'variational':
         adapter_config = {
@@ -284,9 +291,17 @@ async def main():
     parser.add_argument('--cooldown-seconds', type=str, default='5', help='下单冷却时间，默认5秒，只通过控制台传参')
     parser.add_argument('--exchange-a-slippage', type=float, default=None, help='交易所A的滑点')
     parser.add_argument('--exchange-b-slippage', type=float, default=None, help='交易所B的滑点')
+    parser.add_argument('--lighter-reconnect-base-delay', type=float, default=0.3, help='Lighter WS 重连基础等待秒数（默认0.3）')
+    parser.add_argument('--lighter-reconnect-max-delay', type=float, default=10.0, help='Lighter WS 重连最大等待秒数（默认10）')
     parser.add_argument('--max-std-multiplier', type=float, default=4.0, help='标准差的最大系数')
     parser.add_argument('--min-std-multiplier', type=float, default=0.0, help='标准差的最小系数')
     args = parser.parse_args()
+    if args.lighter_reconnect_base_delay <= 0:
+        parser.error("--lighter-reconnect-base-delay 必须大于 0")
+    if args.lighter_reconnect_max_delay <= 0:
+        parser.error("--lighter-reconnect-max-delay 必须大于 0")
+    if args.lighter_reconnect_max_delay < args.lighter_reconnect_base_delay:
+        parser.error("--lighter-reconnect-max-delay 不能小于 --lighter-reconnect-base-delay")
     # 加载环境变量
     if args.env_file:
         load_dotenv(args.env_file)
@@ -365,11 +380,18 @@ async def main():
         dynamic_threshold['max_std_multiplier'] = float(args.max_std_multiplier)
         dynamic_threshold['min_std_multiplier'] = float(args.min_std_multiplier)
     cooldown_seconds = float(args.cooldown_seconds) if args.cooldown_seconds else 5
+    exchange_a_slippage = None
+    exchange_b_slippage = None
     # 设置滑点
     if args.exchange_a_slippage is not None:
         exchange_a_slippage = Decimal(str(args.exchange_a_slippage))
     if args.exchange_b_slippage is not None:
         exchange_b_slippage = Decimal(str(args.exchange_b_slippage))
+    dt_min_total_threshold = dynamic_threshold.get('min_total_threshold', '--') if isinstance(dynamic_threshold, dict) else '--'
+    dt_sample_size = dynamic_threshold.get('sample_size', '--') if isinstance(dynamic_threshold, dict) else '--'
+    dt_max_std_multiplier = dynamic_threshold.get('max_std_multiplier', '--') if isinstance(dynamic_threshold, dict) else '--'
+    dt_min_std_multiplier = dynamic_threshold.get('min_std_multiplier', '--') if isinstance(dynamic_threshold, dict) else '--'
+    dt_enabled_text = '启用' if isinstance(dynamic_threshold, dict) and dynamic_threshold.get('enabled', False) else '禁用'
 
     logger.info(
         f"\n"
@@ -385,18 +407,20 @@ async def main():
         f"  开仓阈值:     {open_threshold}%\n"
         f"  平仓阈值:     {close_threshold}%\n"
         f"  最小深度:     {min_depth_quantity}\n"
-        f"  最小阈值和:   {dynamic_threshold["min_total_threshold"]}\n"
-        f"  样本数:       {dynamic_threshold["sample_size"]}\n"
-        f"  最大标准差系数: {dynamic_threshold["max_std_multiplier"]}\n"
-        f"  最小标准差系数: {dynamic_threshold["min_std_multiplier"]}\n"
+        f"  最小阈值和:   {dt_min_total_threshold}\n"
+        f"  样本数:       {dt_sample_size}\n"
+        f"  最大标准差系数: {dt_max_std_multiplier}\n"
+        f"  最小标准差系数: {dt_min_std_multiplier}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"
         f"  负向滑点方向下单: { '是' if not direction_reverse else '否'}\n"
-        f"  动态阈值:     {'启用' if dynamic_threshold.get('enabled', False) else '禁用'}\n"  # ✅ 新增
+        f"  动态阈值:     {dt_enabled_text}\n"  # ✅ 新增
         f"  冷却时间:     { cooldown_seconds }s\n"
         f"  交易所 A 滑点: {exchange_a_slippage or '--'}\n"
         f"  交易所 B 滑点: {exchange_b_slippage or '--'}\n"
+        f"  Lighter 重连基础等待: {args.lighter_reconnect_base_delay}s\n"
+        f"  Lighter 重连最大等待: {args.lighter_reconnect_max_delay}s\n"
         f"{'='*60}\n"
     )
     
@@ -428,7 +452,9 @@ async def main():
             symbol_a,
             quantity,
             exchange_a_slippage,
-            config_override_a
+            config_override_a,
+            args.lighter_reconnect_base_delay,
+            args.lighter_reconnect_max_delay
         )
         
         exchange_b = await create_exchange_adapter(
@@ -436,7 +462,9 @@ async def main():
             symbol_b,
             quantity,
             exchange_b_slippage,
-            config_override_b
+            config_override_b,
+            args.lighter_reconnect_base_delay,
+            args.lighter_reconnect_max_delay
         )
         
         logger.info(

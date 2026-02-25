@@ -31,6 +31,20 @@ class LighterAdapter(ExchangeAdapter):
         self.ws_task = None
         self.ws = None
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX'))
+        self.reconnect_base_delay = float(self.config.get('reconnect_base_delay', 0.3))
+        self.reconnect_max_delay = float(self.config.get('reconnect_max_delay', 10.0))
+        if self.reconnect_base_delay <= 0:
+            logger.warning(f"⚠️ reconnect_base_delay 非法({self.reconnect_base_delay})，使用默认值 0.3")
+            self.reconnect_base_delay = 0.3
+        if self.reconnect_max_delay <= 0:
+            logger.warning(f"⚠️ reconnect_max_delay 非法({self.reconnect_max_delay})，使用默认值 10.0")
+            self.reconnect_max_delay = 10.0
+        if self.reconnect_max_delay < self.reconnect_base_delay:
+            logger.warning(
+                f"⚠️ reconnect_max_delay({self.reconnect_max_delay}) < reconnect_base_delay({self.reconnect_base_delay})，"
+                f"已自动调整为相同值"
+            )
+            self.reconnect_max_delay = self.reconnect_base_delay
 
         
         # ✅ Lighter 订单簿数据
@@ -208,7 +222,10 @@ class LighterAdapter(ExchangeAdapter):
             if self._is_running:
                 # 重连逻辑
                 reconnect_count += 1
-                wait_time = min(10, reconnect_count)
+                wait_time = min(
+                    self.reconnect_max_delay,
+                    self.reconnect_base_delay * (2 ** (reconnect_count - 1))
+                )
                 logger.info(f"⏳ {wait_time}秒后重连 Lighter WebSocket... ({self.symbol})")
                 try:
                     await asyncio.sleep(wait_time)
@@ -462,50 +479,68 @@ class LighterAdapter(ExchangeAdapter):
                 logger.debug(f"⏭️ 跳过无 client_order_index 的更新")
                 return
 
-            if client_order_index in self._order_status_futures:
-                real_order_id = order_update.get('order_id')
-                status = order_update.get('status', '').upper()
-                side = "short" if order_update["is_ask"] else "long"
-                filled_size = order_update.get('filled_base_amount', Decimal('0'))
-                if Decimal(order_update.get('filled_base_amount')) == 0:
-                    price = order_update.get('price')
-                else:
-                    price = Decimal(order_update.get('filled_quote_amount', '0')) / Decimal(order_update.get('filled_base_amount'))
-                size = order_update.get('base_size', Decimal('0'))
-                order_type = order_update.get('type', 'OPEN') # 字段无效
-                contract_id = self.client.config.contract_id
+            real_order_id = order_update.get('order_id')
+            status = str(order_update.get('status', '')).upper()
+            side = "short" if order_update.get("is_ask") else "long"
+            filled_base_amount = Decimal(str(order_update.get('filled_base_amount', '0')))
+            if filled_base_amount == 0:
+                price = Decimal(str(order_update.get('price', '0')))
+            else:
+                filled_quote_amount = Decimal(str(order_update.get('filled_quote_amount', '0')))
+                price = (filled_quote_amount / filled_base_amount) if filled_base_amount > 0 else Decimal('0')
+            size = Decimal(str(order_update.get('base_size', '0')))
+            order_type = order_update.get('type', 'OPEN')  # 字段无效
+            contract_id = self.client.config.contract_id
 
-                data = {
-                    'order_id': real_order_id,
-                    'client_order_index': client_order_index,
-                    'status': status,
-                    'side': side,
-                    'order_type': order_type,
-                    'size': size,
-                    'price': price,
-                    'contract_id': contract_id,
-                    'filled_size': filled_size
-                }
-                self._order_status_data[client_order_index] = data
+            # 某些终态更新可能不再携带成交量/成交价，避免把已有有效值覆盖为 0
+            previous_data = self._order_status_data.get(client_order_index)
+            if previous_data:
+                previous_filled_size = Decimal(str(previous_data.get('filled_size', '0')))
+                if filled_base_amount <= 0 and previous_filled_size > 0:
+                    filled_base_amount = previous_filled_size
+                previous_price = Decimal(str(previous_data.get('price', '0')))
+                if price <= 0 and previous_price > 0:
+                    price = previous_price
 
-                future = self._order_status_futures.pop(client_order_index, None)
-                if future and not future.done():
-                    future.set_result(data)
-                    logger.debug(f"✅ 订单状态 Future 已完成: {client_order_index} -> {status}")
+            data = {
+                'order_id': real_order_id,
+                'client_order_index': client_order_index,
+                'status': status,
+                'side': side,
+                'order_type': order_type,
+                'size': size,
+                'price': price,
+                'contract_id': contract_id,
+                'filled_size': filled_base_amount
+            }
+            # 无论是否还在等待，都缓存，避免“晚到回报”丢失
+            self._order_status_data[client_order_index] = data
+
+            future = self._order_status_futures.pop(client_order_index, None)
+            if future and not future.done():
+                future.set_result(data)
+                logger.debug(f"✅ 订单状态 Future 已完成: {client_order_index} -> {status}")
 
             # ✅ 日志（节流）
             order_id = order_update.get('order_id')
-            status = order_update.get('status')
-            filled_size = order_update.get('filled_size', 0)
-            price = order_update.get('price', 0)
-            logger.info(f"📨 收到订单更新: client_idx={client_order_index}, order_id={order_id}, status={status}, "
-                        f"filled_size={filled_size}, price={price}")
+            raw_status = order_update.get('status')
+            raw_filled_base_amount = order_update.get('filled_base_amount', 0)
+            raw_filled_quote_amount = order_update.get('filled_quote_amount', 0)
+            logger.info(
+                f"📨 收到订单更新: client_idx={client_order_index}, order_id={order_id}, status={raw_status}, "
+                f"filled_base_amount={raw_filled_base_amount}, filled_quote_amount={raw_filled_quote_amount}, "
+                f"calc_filled_size={filled_base_amount}, calc_price={price}"
+            )
 
         except Exception as e:
             logger.exception(f"❌ 处理订单更新失败: {e}")
 
     async def _wait_for_order_status(self, client_order_index: int, timeout: float = 1.0) -> dict:
         """等待订单状态（使用 Future）"""
+        cached = self._order_status_data.pop(client_order_index, None)
+        if cached:
+            return cached
+
         future = self._order_status_futures.get(client_order_index)
         if not future:
             raise ValueError(f"No future for client_order_index: {client_order_index}")
@@ -522,6 +557,60 @@ class LighterAdapter(ExchangeAdapter):
             logger.exception(f"❌ 等待订单状态异常 ({self.symbol}): {e}")
             self._order_status_futures.pop(client_order_index, None)
             raise
+
+    async def _wait_for_late_order_status(
+        self,
+        client_order_index: int,
+        timeout: float = 2.0,
+        poll_interval: float = 0.1
+    ) -> Optional[dict]:
+        """等待晚到的订单状态回报（用于 WS 超时后的短暂兜底）"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cached = self._order_status_data.pop(client_order_index, None)
+            if cached:
+                return cached
+            await asyncio.sleep(poll_interval)
+        return None
+
+    async def _wait_until_terminal_order_status(
+        self,
+        client_order_index: int,
+        status_data: dict,
+        timeout: float = 1.2,
+        poll_interval: float = 0.005
+    ) -> dict:
+        """
+        对 IN-PROGRESS 做短暂追加等待，尽量拿到终态（FILLED/CANCELED）。
+        Lighter 当前无 NEW 状态，这里只处理 IN-PROGRESS。
+        """
+        latest = status_data
+        deadline = time.time() + timeout
+
+        while str(latest.get('status', '')).upper() == 'IN-PROGRESS' and time.time() < deadline:
+            remain = deadline - time.time()
+            late_status_data = await self._wait_for_late_order_status(
+                client_order_index=client_order_index,
+                timeout=min(0.2, max(0.0, remain)),
+                poll_interval=poll_interval
+            )
+            if not late_status_data:
+                break
+
+            # 晚到状态缺少成交字段时，沿用上一条有效值
+            prev_filled_size = Decimal(str(latest.get('filled_size', '0')))
+            late_filled_size = Decimal(str(late_status_data.get('filled_size', '0')))
+            if late_filled_size <= 0 and prev_filled_size > 0:
+                late_status_data['filled_size'] = prev_filled_size
+
+            prev_price = Decimal(str(latest.get('price', '0')))
+            late_price = Decimal(str(late_status_data.get('price', '0')))
+            if late_price <= 0 and prev_price > 0:
+                late_status_data['price'] = prev_price
+
+            latest = late_status_data
+
+        return latest
 
     async def place_open_order(self,
         side: str,
@@ -739,10 +828,22 @@ class LighterAdapter(ExchangeAdapter):
                     'place_duration_ms': place_duration,
                     'execution_duration_ms': None,
                 }
+            canceled_statuses = [
+                'CANCELED', 'CANCELED-NOT-ENOUGH-LIQUIDITY', 'CANCELED-POSITION_NOT_ALLOWED',
+                'CANCELED-MARGIN-NOT-ALLOWED', 'CANCELED-TOO-MUCH-SLIPPAGE', 'CANCELED-SELF-TRADE',
+                'CANCELED-EXPIRED', 'CANCELED-OCO', 'CANCELED-CHILD', 'CANCELED-LIQUIDATION'
+            ]
+
             # 下单成功后，判断订单是否成交
             try:
                 status_data = await self._wait_for_order_status(client_order_index, timeout=1.0)
-                status = status_data.get('status')
+                status_data = await self._wait_until_terminal_order_status(
+                    client_order_index=client_order_index,
+                    status_data=status_data,
+                    timeout=1.2,
+                    poll_interval=0.005
+                )
+                status = str(status_data.get('status', '')).upper()
                 real_order_id = status_data.get('order_id')
                 filled_size_from_ws = Decimal(status_data.get('filled_size', '0'))
                 price_from_ws = status_data.get('price', order_price)
@@ -765,8 +866,7 @@ class LighterAdapter(ExchangeAdapter):
                     
                     logger.warning(f"订单 ID: {real_order_id}出现部分成交, 成交数量{filled_size_from_ws} / {quantity}, 成交价格${price_from_ws}")
 
-                if status in ['CANCELED', 'CANCELED-NOT-ENOUGH-LIQUIDITY', 'CANCELED-POSITION_NOT_ALLOWED', 'CANCELED-MARGIN-NOT-ALLOWED', 'CANCELED-TOO-MUCH-SLIPPAGE',
-                              'CANCELED-SELF-TRADE', 'CANCELED-EXPIRED', 'CANCELED-OCO', 'CANCELED-CHILD', 'CANCELED-LIQUIDATION']:
+                if status in canceled_statuses:
                     msg = f"✅ 订单被取消: {real_order_id}, 订单状态{status}"
                     order_info['error'] = msg
                     logger.info(msg)
@@ -774,6 +874,14 @@ class LighterAdapter(ExchangeAdapter):
                 elif status in ['FILLED']:                    
                     logger.info(f"✅ Lighter 市价单成交: {filled_size_from_ws} @${price_from_ws}({real_order_id})")
                     order_info['success'] = True
+                elif status == 'IN-PROGRESS':
+                    order_info['unknown_status'] = True
+                    order_info['retryable'] = False
+                    order_info['error'] = (
+                        f'订单状态仍为 IN-PROGRESS(client_index={client_order_index})，'
+                        f'已禁止自动重试以避免重复下单'
+                    )
+                    logger.warning(f"⚠️ {order_info['error']}")
                     # 未知状态
                 else:
                     logger.warning(f"⚠️ 未知订单状态: {status}")
@@ -781,29 +889,63 @@ class LighterAdapter(ExchangeAdapter):
 
                 return order_info
             except asyncio.TimeoutError:
-                logger.warning(f"⏰ 订单状态超时 (client_idx={client_order_index})，假设部分成交或失败")
+                logger.warning(f"⏰ 订单状态超时 (client_idx={client_order_index})，进入延迟确认窗口")
                 logger.info(f"⏱️ {self.exchange_name} 从下单到超时共耗时: {(time.time() - order_start_time) * 1000:.2f} ms")
-                # ✅ 后备：轮询 get_active_orders 检查
-                active_orders = await self.client.get_active_orders(self.client.config.contract_id)
-                matching_order = None
-                for order in active_orders:
-                    if order.client_order_index == client_order_index:
-                        matching_order = order
-                        break
+
                 order_info['timestamp'] = time.time()
                 order_info['execution_duration_ms'] = (order_info['timestamp'] - wait_start_time) * 1000
 
-                if matching_order:
-                    order_info['success'] = Decimal(matching_order.remaining_base_amount) == 0
-                    order_info['order_id'] = matching_order.order_id
-                    order_info['filled_price'] = Decimal(matching_order.get('filled_quote_amount', '0')) / Decimal(matching_order.get('filled_base_amount'))
-                    order_info['filled_quantity'] = matching_order.filled_base_amount
-                    order_info['partial_fill'] = Decimal(matching_order.remaining_base_amount) > 0  and Decimal(matching_order.remaining_base_amount) < quantity
-                    order_info['error'] = 'Timeout, confirmed filled via poll'
-                    # 已成交                    
+                late_status_data = await self._wait_for_late_order_status(
+                    client_order_index=client_order_index,
+                    timeout=2.0,
+                    poll_interval=0.1
+                )
+
+                if late_status_data:
+                    late_status_data = await self._wait_until_terminal_order_status(
+                        client_order_index=client_order_index,
+                        status_data=late_status_data,
+                        timeout=1.2,
+                        poll_interval=0.005
+                    )
+                    status = str(late_status_data.get('status', '')).upper()
+                    real_order_id = late_status_data.get('order_id')
+                    filled_size_from_ws = Decimal(late_status_data.get('filled_size', '0'))
+                    price_from_ws = late_status_data.get('price', order_price)
+                    order_info['order_id'] = real_order_id
+                    order_info['filled_price'] = price_from_ws
+                    order_info['filled_quantity'] = filled_size_from_ws
+                    if filled_size_from_ws > 0 and filled_size_from_ws < quantity:
+                        order_info['partial_fill'] = True
+                    if status in ['FILLED']:
+                        order_info['success'] = True
+                        order_info['error'] = 'Timeout but confirmed by late websocket update'
+                    elif status in canceled_statuses:
+                        order_info['success'] = False
+                        order_info['error'] = f'Order {status} (late websocket update)'
+                    elif status == 'IN-PROGRESS':
+                        order_info['success'] = False
+                        order_info['unknown_status'] = True
+                        order_info['retryable'] = False
+                        order_info['error'] = (
+                            f'订单状态仍为 IN-PROGRESS(client_index={client_order_index})，'
+                            f'已禁止自动重试以避免重复下单'
+                        )
+                    else:
+                        order_info['success'] = False
+                        order_info['error'] = f'Unknown status {status} (late websocket update)'
                 else:
+                    # 关键：未知状态不应被当作“可重试失败”，否则容易重复下单
                     order_info['success'] = False
-                    order_info['error'] = f'ws超时后使用restful接口也查询不到client_index={client_order_index}'
+                    order_info['order_id'] = str(client_order_index)
+                    order_info['filled_price'] = Decimal('0')
+                    order_info['filled_quantity'] = Decimal('0')
+                    order_info['unknown_status'] = True
+                    order_info['retryable'] = False
+                    order_info['error'] = (
+                        f'订单状态未知(client_index={client_order_index})，'
+                        f'已禁止自动重试以避免重复下单'
+                    )
                 return order_info
    
             except Exception as wait_e:

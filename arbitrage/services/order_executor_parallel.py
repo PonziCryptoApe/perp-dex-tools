@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime
 import json
 import logging
+import re
 from decimal import Decimal
 import os
 import time
@@ -87,6 +88,35 @@ class OrderExecutor:
             )
         
         return normalized
+
+    async def _handle_unknown_order_status(
+        self,
+        exchange_name: str,
+        order_type: str,
+        side: str,
+        error: str
+    ):
+        """
+        处理“订单状态未知”场景：
+        - 发送高优先级告警
+        """
+        # 尝试从上游错误信息中提取状态提示（可能提取不到）
+        status_hint = "UNKNOWN"
+        if error:
+            match = re.search(r"Unknown status\s+([^\s\)]+)", error)
+            if match:
+                status_hint = match.group(1)
+
+        msg = (
+            f"🚨 {self.lark_index_text}{exchange_name} 订单状态不确定，需人工确认最终成交。\n"
+            f"   order_type={order_type}, side={side}\n"
+            f"   status_hint={status_hint}\n"
+            f"   upstream_error={error or 'N/A'}\n"
+            f"   action=该单按 unknown_status 处理，不继续自动重试以避免重复下单"
+        )
+        logger.critical(msg)
+        if self.lark_bot:
+            await self.lark_bot.send_text(msg)
 
     def _log_extra_trade(
         self,
@@ -577,6 +607,16 @@ class OrderExecutor:
                         f"尝试次数: {attempt}/{max_retries} | "
                         f"错误: {result.get('error')}"
                     )  
+                    if result.get('retryable') is False:
+                        logger.warning(
+                            f"⛔ 停止重试: {exchange.exchange_name} | "
+                            f"类型: {order_type} | 方向: {side} | "
+                            f"原因: retryable=False"
+                        )
+                        return {
+                            **result,
+                            'attempt': attempt
+                        }
             except lighter.exceptions.ApiException as le:
                 logger.error(
                     f"❌ 下单异常(429): {exchange.exchange_name} | "
@@ -738,6 +778,14 @@ class OrderExecutor:
             
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
+                if order_a_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_a.exchange_name, 'open', 'sell', order_a_result.get('error', '')
+                    )
+                if order_b_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_b.exchange_name, 'open', 'buy', order_b_result.get('error', '')
+                    )
                 logger.warning(
                     f"⚠️ 开仓失败（两所都失败）:\n"
                     f"   {self.exchange_a.exchange_name}: {order_a_result.get('error')}\n"
@@ -749,6 +797,11 @@ class OrderExecutor:
             
             # 情况 2️⃣: A失败，B成功 → 重试A
             if not success_a and success_b:
+                if order_a_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_a.exchange_name, 'open', 'sell', order_a_result.get('error', '')
+                    )
+                    return False, None
                 logger.warning(
                     f"⚠️ {self.exchange_b.exchange_name} 成功，"
                     f"⚠️ {self.exchange_a.exchange_name} 下单失败，"
@@ -779,6 +832,11 @@ class OrderExecutor:
                         f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
                     )
                 else:
+                    if retry_result_a.get('unknown_status'):
+                        await self._handle_unknown_order_status(
+                            self.exchange_a.exchange_name, 'open', 'sell', retry_result_a.get('error', '')
+                        )
+                        return False, None
                     # ✅ A 所重试失败 → 需要平掉 B 所的仓位
                     logger.error(
                         f"❌ {self.exchange_a.exchange_name} 重试失败，"
@@ -793,6 +851,11 @@ class OrderExecutor:
                     return False, None
             # 情况 3️⃣: A成功，B失败 → 重试 B
             if success_a and not success_b:
+                if order_b_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_b.exchange_name, 'open', 'buy', order_b_result.get('error', '')
+                    )
+                    return False, None
                 logger.warning(
                     f"⚠️ {self.exchange_a.exchange_name} 成功，"
                     f"{self.exchange_b.exchange_name} 失败 → 重试 {self.exchange_b.exchange_name}..."
@@ -823,6 +886,11 @@ class OrderExecutor:
                         f"   🕒 交易所B耗时: {(order_b_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
                     )
                 else:
+                    if retry_result_b.get('unknown_status'):
+                        await self._handle_unknown_order_status(
+                            self.exchange_b.exchange_name, 'open', 'buy', retry_result_b.get('error', '')
+                        )
+                        return False, None
                     # ✅ B 所重试失败 → 需要平掉 A 所的仓位
                     logger.error(
                         f"❌ {self.exchange_b.exchange_name} 重试失败，"
@@ -1073,6 +1141,14 @@ class OrderExecutor:
             # ✅ 2. 根据结果处理
             # 情况 1️⃣: 两所都失败 → 跳过
             if not success_a and not success_b:
+                if order_a_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_a.exchange_name, 'close', 'buy', order_a_result.get('error', '')
+                    )
+                if order_b_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_b.exchange_name, 'close', 'sell', order_b_result.get('error', '')
+                    )
                 logger.warning(
                     f"⚠️ 平仓失败（两所都失败）→ 跳过...\n"
                     f"   {self.exchange_a.exchange_name}: {order_a_result.get('error')}\n"
@@ -1082,6 +1158,11 @@ class OrderExecutor:
                 return False, None
             # 情况 2️⃣: A失败，B成功 → 重试A
             if not success_a and success_b:
+                if order_a_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_a.exchange_name, 'close', 'buy', order_a_result.get('error', '')
+                    )
+                    return False, None
                 logger.warning(
                     f"⚠️ {self.exchange_b.exchange_name} 成功，"
                     f"⚠️ {self.exchange_a.exchange_name} 下单失败，"
@@ -1116,6 +1197,11 @@ class OrderExecutor:
                     )
                     
                 else:
+                    if retry_result_a.get('unknown_status'):
+                        await self._handle_unknown_order_status(
+                            self.exchange_a.exchange_name, 'close', 'buy', retry_result_a.get('error', '')
+                        )
+                        return False, None
                     logger.error(
                         f"❌ {self.exchange_a.exchange_name} 重试失败，"
                         f"需要手动处理仓位！"
@@ -1128,6 +1214,11 @@ class OrderExecutor:
 
             # 情况 3️⃣: A成功，B失败 → 重试 B
             if success_a and not success_b:
+                if order_b_result.get('unknown_status'):
+                    await self._handle_unknown_order_status(
+                        self.exchange_b.exchange_name, 'close', 'sell', order_b_result.get('error', '')
+                    )
+                    return False, None
                 logger.warning(
                     f"⚠️ {self.exchange_a.exchange_name} 成功，"
                     f"{self.exchange_b.exchange_name} 失败 → 重试 {self.exchange_b.exchange_name}..."
@@ -1158,6 +1249,11 @@ class OrderExecutor:
                         f"   🕒 交易所B耗时: {(order_b_result.get('timestamp') - execution_start_time) * 1000:.2f} ms\n"
                     )
                 else:
+                    if retry_result_b.get('unknown_status'):
+                        await self._handle_unknown_order_status(
+                            self.exchange_b.exchange_name, 'close', 'sell', retry_result_b.get('error', '')
+                        )
+                        return False, None
                     logger.critical(
                         f"🚨 {self.exchange_b.exchange_name} 平仓失败（重试后仍失败），"
                         f"需要手动处理！"
