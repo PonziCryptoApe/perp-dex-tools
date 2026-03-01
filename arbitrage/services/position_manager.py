@@ -225,7 +225,13 @@ class PositionManagerService:
         #     f"   历史笔数: {len(self.position_history)}"
         # )
     
-    def reduce_position(self, position: Position, direction: str) -> Decimal:
+    def reduce_position(
+        self,
+        position: Position,
+        direction: str,
+        signal_delay_ms_a: float = 0,
+        signal_delay_ms_b: float = 0
+    ) -> Decimal:
         """
         减少仓位（累计模式专用）
         
@@ -239,7 +245,7 @@ class PositionManagerService:
         """
         if not self.accumulate_mode:
             logger.warning("⚠️ 传统模式下不支持 reduce_position()，请使用 close_position()")
-            return self.close_position()
+            return self.close_position(signal_delay_ms_a, signal_delay_ms_b)
         # ✅ 断言检查
         if position.quantity == 0:
             raise ValueError(
@@ -278,7 +284,7 @@ class PositionManagerService:
         )
         
         # ✅ 记录平仓交易到 CSV
-        self._log_close_trade(position, pnl_pct)
+        self._log_close_trade(position, pnl_pct, signal_delay_ms_a, signal_delay_ms_b)
         
         # ✅ 计算仓位利用率
         utilization = abs(self.current_position_qty / self.max_position * 100) if self.max_position > 0 else 0

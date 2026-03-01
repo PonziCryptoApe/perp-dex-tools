@@ -703,7 +703,12 @@ class HedgeStrategy(BaseStrategy):
                     temp_position.exchange_b_exit_price = prices.exchange_b_bid
                     temp_position.exit_time = datetime.now()
                     
-                    pnl_pct = self.position_manager.reduce_position(temp_position, 'long')
+                    pnl_pct = self.position_manager.reduce_position(
+                        temp_position,
+                        'long',
+                        signal_delay_ms_a,
+                        signal_delay_ms_b
+                    )
                     if self.position_manager.accumulate_mode:
                        await self._send_multi_notification('long', temp_position, spread_pct)
                 else:
@@ -780,7 +785,12 @@ class HedgeStrategy(BaseStrategy):
 
                         # ✅ 累计模式：减少仓位
                         if self.position_manager.accumulate_mode:
-                            pnl_pct = self.position_manager.reduce_position(position, 'long')
+                            pnl_pct = self.position_manager.reduce_position(
+                                position,
+                                'long',
+                                signal_delay_ms_a,
+                                signal_delay_ms_b
+                            )
                         else:
                             self.position_manager.position = position
                             pnl_pct = self.position_manager.close_position(

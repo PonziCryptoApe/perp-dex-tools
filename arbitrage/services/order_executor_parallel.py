@@ -1350,7 +1350,7 @@ class OrderExecutor:
                     logger.info(f"✅ 反向开仓成功: {symbol_a}/{symbol_b}")
                     logger.info(f"{self.exchange_a.exchange_name}: BUY {symbol_a} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
                     logger.info(f"{self.exchange_b.exchange_name}: SELL {symbol_b} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
-                    logger.info(f'信号价差: {position.spread_pct:+.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { position.spread_pct - total_slippage:+.4f}')
+                    logger.info(f'信号价差: {position.spread_pct:+.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { position.spread_pct - total_slippage:+.4f}%')
 
                     # logger.info(
                     #     f"✅ 反向开仓成功:\n"
