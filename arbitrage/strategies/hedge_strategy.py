@@ -47,7 +47,13 @@ class HedgeStrategy(BaseStrategy):
         cooldown_range: tuple = (10.0, 10.0),
         cooldown_seconds: Optional[float] = 5,
         dynamic_threshold: Optional[dict] = None,
-        end_time: Optional[str] = None
+        end_time: Optional[str] = None,
+        edge_filter_enabled: bool = True,
+        min_edge_bps: float = 0.8,
+        edge_base_cost_bps: float = 3.0,
+        edge_fee_bps: float = 0.0,
+        edge_latency_bps_per_100ms: float = 0.0,
+        edge_latency_free_ms: float = 120.0
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -72,6 +78,12 @@ class HedgeStrategy(BaseStrategy):
         self.cooldown_range = cooldown_range
         self.signal_total = 0
         self.signal_delay = 0
+        self.edge_filter_enabled = bool(edge_filter_enabled)
+        self.min_edge_bps = max(0.0, float(min_edge_bps))
+        self.edge_base_cost_bps = max(0.0, float(edge_base_cost_bps))
+        self.edge_fee_bps = max(0.0, float(edge_fee_bps))
+        self.edge_latency_bps_per_100ms = max(0.0, float(edge_latency_bps_per_100ms))
+        self.edge_latency_free_ms = max(0.0, float(edge_latency_free_ms))
 
         self.start_vol_a = 0
         self.start_equity_a = 0
@@ -139,6 +151,7 @@ class HedgeStrategy(BaseStrategy):
                 'total': 0,              # 总信号数（满足阈值）
                 'delay_filtered': 0,     # 因延迟过滤
                 'depth_insufficient': 0, # 因深度不足跳过
+                'edge_filtered': 0,      # 因边际不足跳过
                 'depth_adjusted': 0,     # 因深度调整数量
                 'limited_a': 0,            # 因限流跳过
                 'limited_b': 0,            # 因限流跳过
@@ -150,6 +163,7 @@ class HedgeStrategy(BaseStrategy):
                 'total': 0,
                 'delay_filtered': 0,
                 'depth_insufficient': 0,
+                'edge_filtered': 0,      # 因边际不足跳过
                 'depth_adjusted': 0,
                 'limited_a': 0,
                 'limited_b': 0,
@@ -190,7 +204,13 @@ class HedgeStrategy(BaseStrategy):
             f"   Exchange A: {exchange_a.exchange_name}\n"
             f"   Exchange B: {exchange_b.exchange_name}\n"
             f"   Monitor Only: {monitor_only}\n"
-            f"   累计模式: {'✅ 启用' if accumulate_mode else '❌ 禁用'}"
+            f"   累计模式: {'✅ 启用' if accumulate_mode else '❌ 禁用'}\n"
+            f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
+            f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
+            f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
+            f"   手续费估计: {self.edge_fee_bps:.2f} bps\n"
+            f"   延迟风险系数: {self.edge_latency_bps_per_100ms:.2f} bps/100ms\n"
+            f"   延迟免惩罚阈值: {self.edge_latency_free_ms:.0f} ms"
         )
     
     async def start(self):
@@ -400,6 +420,63 @@ class HedgeStrategy(BaseStrategy):
             ts_val = ts_val / 1000.0
         return ts_val
 
+    def _estimate_cost_bps(self, signal_delay_ms_a: float, signal_delay_ms_b: float) -> dict:
+        """估算执行成本（bps）"""
+        latency_est_ms = max(float(signal_delay_ms_a), float(signal_delay_ms_b))
+        latency_over_ms = max(0.0, latency_est_ms - self.edge_latency_free_ms)
+        latency_risk_bps = (latency_over_ms / 100.0) * self.edge_latency_bps_per_100ms
+        cost_est_bps = self.edge_base_cost_bps + self.edge_fee_bps + latency_risk_bps
+        required_spread_bps = cost_est_bps + self.min_edge_bps
+        return {
+            'latency_est_ms': latency_est_ms,
+            'latency_over_ms': latency_over_ms,
+            'latency_risk_bps': latency_risk_bps,
+            'cost_est_bps': cost_est_bps,
+            'required_spread_bps': required_spread_bps,
+        }
+
+    def _passes_edge_filter(self, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float) -> tuple[bool, dict]:
+        """边际二次过滤：abs(spread) >= cost_est + min_edge"""
+        spread_abs_bps = float(abs(spread_pct)) * 100.0
+        estimate = self._estimate_cost_bps(signal_delay_ms_a, signal_delay_ms_b)
+        edge_est_bps = spread_abs_bps - estimate['cost_est_bps']
+        passed = spread_abs_bps >= estimate['required_spread_bps']
+        estimate.update({
+            'spread_abs_bps': spread_abs_bps,
+            'edge_est_bps': edge_est_bps,
+        })
+        return passed, estimate
+
+    def _should_apply_edge_filter(self, signal_type: str) -> tuple[bool, dict]:
+        """
+        仅当信号会增加风险（|仓位|变大）时才应用边际过滤。
+        signal_type: 'open' 或 'close'
+        """
+        if signal_type not in {'open', 'close'}:
+            return False, {'reason': 'invalid_signal_type'}
+
+        if not self.position_manager.accumulate_mode:
+            # 传统模式：开仓增风险，平仓减风险
+            return signal_type == 'open', {
+                'current_qty': Decimal('0'),
+                'projected_qty': self.quantity if signal_type == 'open' else Decimal('0'),
+                'risk_increasing': signal_type == 'open',
+                'reason': 'traditional_mode'
+            }
+
+        current_qty = self.position_manager.get_current_position_qty()
+        step = self.position_manager.position_step
+        delta = -step if signal_type == 'open' else step
+        projected_qty = current_qty + delta
+        risk_increasing = abs(projected_qty) > abs(current_qty)
+
+        return risk_increasing, {
+            'current_qty': current_qty,
+            'projected_qty': projected_qty,
+            'risk_increasing': risk_increasing,
+            'reason': 'accumulate_mode'
+        }
+
     async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
         检查开仓信号
@@ -453,8 +530,45 @@ class HedgeStrategy(BaseStrategy):
                     f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)"
                 )
                 return
+
+            edge_estimate = None
+            edge_apply, edge_ctx = self._should_apply_edge_filter('open')
+            if self.edge_filter_enabled:
+                if edge_apply:
+                    passed_edge, edge_estimate = self._passes_edge_filter(
+                        spread_pct=spread_pct,
+                        signal_delay_ms_a=signal_delay_ms_a,
+                        signal_delay_ms_b=signal_delay_ms_b
+                    )
+                    if not passed_edge:
+                        self.signal_stats['open']['edge_filtered'] += 1
+                        logger.info(
+                            f"⏭️ [{self.symbol}] 开仓边际不足，跳过:\n"
+                            f"   当前仓位: {edge_ctx['current_qty']:+.4f} -> 预测仓位: {edge_ctx['projected_qty']:+.4f}\n"
+                            f"   绝对价差: {edge_estimate['spread_abs_bps']:.2f} bps\n"
+                            f"   成本估计: {edge_estimate['cost_est_bps']:.2f} bps "
+                            f"(base={self.edge_base_cost_bps:.2f}, fee={self.edge_fee_bps:.2f}, latency={edge_estimate['latency_risk_bps']:.2f})\n"
+                            f"   安全边际: {self.min_edge_bps:.2f} bps\n"
+                            f"   最低要求: {edge_estimate['required_spread_bps']:.2f} bps\n"
+                            f"   估算边际: {edge_estimate['edge_est_bps']:.2f} bps"
+                        )
+                        return
             
             self.open_signal_count += 1
+
+            edge_text = ""
+            if self.edge_filter_enabled:
+                if edge_apply and edge_estimate is not None:
+                    edge_text = (
+                        f"   边际过滤: {edge_estimate['spread_abs_bps']:.2f} bps >= "
+                        f"{edge_estimate['required_spread_bps']:.2f} bps "
+                        f"(成本: {edge_estimate['cost_est_bps']:.2f} bps, 估算边际: {edge_estimate['edge_est_bps']:.2f} bps)\n"
+                    )
+                elif not edge_apply:
+                    edge_text = (
+                        f"   边际过滤: 减风险路径放行 "
+                        f"(仓位 {edge_ctx['current_qty']:+.4f} -> {edge_ctx['projected_qty']:+.4f})\n"
+                    )
 
             logger.info(
                 f"🔔 [{self.symbol}] 检测到开仓信号 #{self.open_signal_count}:\n"
@@ -464,6 +578,7 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_a.exchange_name}_bid_size: {prices.exchange_a_bid_size}\n"
                 f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
                 f"   {self.exchange_b.exchange_name}_ask_size: {prices.exchange_b_ask_size}\n"
+                f"   {edge_text}"
                 f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)"
             )
 
@@ -660,8 +775,45 @@ class HedgeStrategy(BaseStrategy):
                     f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)"
                 )
                 return
+
+            edge_estimate = None
+            edge_apply, edge_ctx = self._should_apply_edge_filter('close')
+            if self.edge_filter_enabled:
+                if edge_apply:
+                    passed_edge, edge_estimate = self._passes_edge_filter(
+                        spread_pct=spread_pct,
+                        signal_delay_ms_a=signal_delay_ms_a,
+                        signal_delay_ms_b=signal_delay_ms_b
+                    )
+                    if not passed_edge:
+                        self.signal_stats['close']['edge_filtered'] += 1
+                        logger.info(
+                            f"⏭️ [{self.symbol}] 反向开仓边际不足，跳过:\n"
+                            f"   当前仓位: {edge_ctx['current_qty']:+.4f} -> 预测仓位: {edge_ctx['projected_qty']:+.4f}\n"
+                            f"   绝对价差: {edge_estimate['spread_abs_bps']:.2f} bps\n"
+                            f"   成本估计: {edge_estimate['cost_est_bps']:.2f} bps "
+                            f"(base={self.edge_base_cost_bps:.2f}, fee={self.edge_fee_bps:.2f}, latency={edge_estimate['latency_risk_bps']:.2f})\n"
+                            f"   安全边际: {self.min_edge_bps:.2f} bps\n"
+                            f"   最低要求: {edge_estimate['required_spread_bps']:.2f} bps\n"
+                            f"   估算边际: {edge_estimate['edge_est_bps']:.2f} bps"
+                        )
+                        return
         
             self.close_signal_count += 1
+
+            edge_text = ""
+            if self.edge_filter_enabled:
+                if edge_apply and edge_estimate is not None:
+                    edge_text = (
+                        f"   边际过滤: {edge_estimate['spread_abs_bps']:.2f} bps >= "
+                        f"{edge_estimate['required_spread_bps']:.2f} bps "
+                        f"(成本: {edge_estimate['cost_est_bps']:.2f} bps, 估算边际: {edge_estimate['edge_est_bps']:.2f} bps)\n"
+                    )
+                elif not edge_apply:
+                    edge_text = (
+                        f"   边际过滤: 减风险路径放行 "
+                        f"(仓位 {edge_ctx['current_qty']:+.4f} -> {edge_ctx['projected_qty']:+.4f})\n"
+                    )
 
             logger.info(
                 f"🔔 [{self.symbol}] 检测到反向开仓信号 #{self.close_signal_count}:\n"
@@ -671,6 +823,7 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_a.exchange_name}_ask_size: {prices.exchange_a_ask_size}\n"
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
                 f"   {self.exchange_b.exchange_name}_bid_size: {prices.exchange_b_bid_size}\n"
+                f"   {edge_text}"
                 f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)"
             )
             
@@ -1018,6 +1171,7 @@ class HedgeStrategy(BaseStrategy):
         # 计算比例
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
+        edge_pct = (stats['edge_filtered'] / total * 100) if total > 0 else 0
         adjusted_pct = (stats['depth_adjusted'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
         limited_a_pct = (stats['limited_a'] / total * 100) if total > 0 else 0
@@ -1028,6 +1182,7 @@ class HedgeStrategy(BaseStrategy):
             f"总信号 {total} | "
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
+            f"边际不足 {stats['edge_filtered']} ({edge_pct:.1f}%) | "
             # f"数量调整 {stats['depth_adjusted']} ({adjusted_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
             f"限流A {stats['limited_a']} ({limited_a_pct:.1f}%) | "
@@ -1045,6 +1200,7 @@ class HedgeStrategy(BaseStrategy):
         
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
+        edge_pct = (stats['edge_filtered'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
         limited_a_pct = (stats['limited_a'] / total * 100) if total > 0 else 0
         limited_b_pct = (stats['limited_b'] / total * 100) if total > 0 else 0
@@ -1054,6 +1210,7 @@ class HedgeStrategy(BaseStrategy):
             f"总信号 {total} | "
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
+            f"边际不足 {stats['edge_filtered']} ({edge_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
             f"限流A {stats['limited_a']} ({limited_a_pct:.1f}%) | "
             f"限流B {stats['limited_b']} ({limited_b_pct:.1f}%) | "

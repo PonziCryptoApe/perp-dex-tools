@@ -295,6 +295,12 @@ async def main():
     parser.add_argument('--lighter-reconnect-max-delay', type=float, default=10.0, help='Lighter WS 重连最大等待秒数（默认10）')
     parser.add_argument('--max-std-multiplier', type=float, default=4.0, help='标准差的最大系数')
     parser.add_argument('--min-std-multiplier', type=float, default=0.0, help='标准差的最小系数')
+    parser.add_argument('--edge-filter', choices=['on', 'off'], default=None, help='边际二次过滤开关（默认读取配置，配置缺失时为 on）')
+    parser.add_argument('--min-edge-bps', type=float, default=None, help='边际二次过滤最小安全边际（bps），默认 0.8')
+    parser.add_argument('--edge-base-cost-bps', type=float, default=None, help='边际二次过滤基础成本估计（bps），默认 3.0')
+    parser.add_argument('--edge-fee-bps', type=float, default=None, help='边际二次过滤手续费估计（bps），默认 0.0')
+    parser.add_argument('--edge-latency-bps-per-100ms', type=float, default=None, help='边际二次过滤延迟风险系数（每 100ms 增加 bps），默认 0.0')
+    parser.add_argument('--edge-latency-free-ms', type=float, default=None, help='边际二次过滤延迟免惩罚阈值（ms），默认 120')
     args = parser.parse_args()
     if args.lighter_reconnect_base_delay <= 0:
         parser.error("--lighter-reconnect-base-delay 必须大于 0")
@@ -302,6 +308,16 @@ async def main():
         parser.error("--lighter-reconnect-max-delay 必须大于 0")
     if args.lighter_reconnect_max_delay < args.lighter_reconnect_base_delay:
         parser.error("--lighter-reconnect-max-delay 不能小于 --lighter-reconnect-base-delay")
+    if args.min_edge_bps is not None and args.min_edge_bps < 0:
+        parser.error("--min-edge-bps 不能小于 0")
+    if args.edge_base_cost_bps is not None and args.edge_base_cost_bps < 0:
+        parser.error("--edge-base-cost-bps 不能小于 0")
+    if args.edge_fee_bps is not None and args.edge_fee_bps < 0:
+        parser.error("--edge-fee-bps 不能小于 0")
+    if args.edge_latency_bps_per_100ms is not None and args.edge_latency_bps_per_100ms < 0:
+        parser.error("--edge-latency-bps-per-100ms 不能小于 0")
+    if args.edge_latency_free_ms is not None and args.edge_latency_free_ms < 0:
+        parser.error("--edge-latency-free-ms 不能小于 0")
     # 加载环境变量
     if args.env_file:
         load_dotenv(args.env_file)
@@ -368,6 +384,25 @@ async def main():
     max_position = Decimal(str(args.max_position)) if args.max_position is not None else Decimal(str(config.max_position))
     direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
+    edge_filter_config = config.edge_filter if hasattr(config, 'edge_filter') and isinstance(config.edge_filter, dict) else {}
+
+    edge_filter_enabled = edge_filter_config.get('enabled', True)
+    if args.edge_filter is not None:
+        edge_filter_enabled = (args.edge_filter == 'on')
+
+    min_edge_bps = float(args.min_edge_bps) if args.min_edge_bps is not None else float(edge_filter_config.get('min_edge_bps', 0.8))
+    edge_base_cost_bps = float(args.edge_base_cost_bps) if args.edge_base_cost_bps is not None else float(edge_filter_config.get('base_cost_bps', 3.0))
+    edge_fee_bps = float(args.edge_fee_bps) if args.edge_fee_bps is not None else float(edge_filter_config.get('fee_bps', 0.0))
+    edge_latency_bps_per_100ms = (
+        float(args.edge_latency_bps_per_100ms)
+        if args.edge_latency_bps_per_100ms is not None
+        else float(edge_filter_config.get('latency_bps_per_100ms', 0.0))
+    )
+    edge_latency_free_ms = (
+        float(args.edge_latency_free_ms)
+        if args.edge_latency_free_ms is not None
+        else float(edge_filter_config.get('latency_free_ms', 120.0))
+    )
 
     if dynamic_threshold:
         if args.min_total_threshold is not None:
@@ -421,6 +456,12 @@ async def main():
         f"  交易所 B 滑点: {exchange_b_slippage or '--'}\n"
         f"  Lighter 重连基础等待: {args.lighter_reconnect_base_delay}s\n"
         f"  Lighter 重连最大等待: {args.lighter_reconnect_max_delay}s\n"
+        f"  边际二次过滤: {'启用' if edge_filter_enabled else '禁用'}\n"
+        f"  最小安全边际: {min_edge_bps:.2f} bps\n"
+        f"  基础成本估计: {edge_base_cost_bps:.2f} bps\n"
+        f"  手续费估计:   {edge_fee_bps:.2f} bps\n"
+        f"  延迟风险系数: {edge_latency_bps_per_100ms:.2f} bps/100ms\n"
+        f"  延迟免惩罚阈值: {edge_latency_free_ms:.0f} ms\n"
         f"{'='*60}\n"
     )
     
@@ -503,6 +544,12 @@ async def main():
         dynamic_threshold=dynamic_threshold,  # ✅ 传递动态阈值配置
         cooldown_seconds=cooldown_seconds,
         end_time=args.end_time,
+        edge_filter_enabled=edge_filter_enabled,
+        min_edge_bps=min_edge_bps,
+        edge_base_cost_bps=edge_base_cost_bps,
+        edge_fee_bps=edge_fee_bps,
+        edge_latency_bps_per_100ms=edge_latency_bps_per_100ms,
+        edge_latency_free_ms=edge_latency_free_ms,
     )
     logger.info("✅ 策略创建成功\n")
     # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========
