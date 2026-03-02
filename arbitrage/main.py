@@ -434,7 +434,7 @@ async def main():
     latency_mid_qty_factor = (
         float(args.latency_mid_qty_factor)
         if args.latency_mid_qty_factor is not None
-        else float(latency_tiers_config.get('mid_qty_factor', 0.6))
+        else float(latency_tiers_config.get('mid_qty_factor', 1.0))
     )
     latency_mid_qty_factor = min(1.0, max(0.01, latency_mid_qty_factor))
     if args.latency_high_block_open is not None:

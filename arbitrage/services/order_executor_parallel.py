@@ -89,6 +89,46 @@ class OrderExecutor:
         
         return normalized
 
+    def _should_refresh_quote_id_for_quantity(self, quantity: Decimal) -> bool:
+        """仅当本次数量与基准数量不一致时刷新 quote_id。"""
+        baseline_quantity = self._normalize_quantity(self.quantity)
+        return quantity != baseline_quantity
+
+    async def _refresh_quote_id_for_quantity(
+        self,
+        exchange: ExchangeAdapter,
+        quantity: Decimal,
+        current_quote_id: Optional[str],
+        context: str
+    ) -> Optional[str]:
+        """按本次下单数量刷新 quote_id，避免使用旧数量对应的报价。"""
+        if exchange.exchange_name.lower() != 'variational':
+            return current_quote_id
+        try:
+            latest_orderbook = await exchange.get_latest_orderbook(quantity)
+            if not latest_orderbook:
+                logger.warning(
+                    f"⚠️ [{context}] {exchange.exchange_name} 刷新 quote_id 失败：无最新订单簿，沿用旧 quote_id"
+                )
+                return current_quote_id
+            latest_quote_id = latest_orderbook.get('quote_id')
+            if not latest_quote_id:
+                logger.warning(
+                    f"⚠️ [{context}] {exchange.exchange_name} 最新订单簿缺少 quote_id，沿用旧 quote_id"
+                )
+                return current_quote_id
+            if latest_quote_id != current_quote_id:
+                logger.info(
+                    f"💡 [{context}] {exchange.exchange_name} 按数量 {quantity} 刷新 quote_id: "
+                    f"{str(current_quote_id)[:8] if current_quote_id else 'None'} -> {str(latest_quote_id)[:8]}..."
+                )
+            return latest_quote_id
+        except Exception as e:
+            logger.warning(
+                f"⚠️ [{context}] {exchange.exchange_name} 刷新 quote_id 异常，沿用旧 quote_id: {e}"
+            )
+            return current_quote_id
+
     async def _handle_unknown_order_status(
         self,
         exchange_name: str,
@@ -171,7 +211,7 @@ class OrderExecutor:
             strategy_position_after=strategy_position_after,
             attempt=attempt
         )
-    
+
     async def _balance_positions(
         self,
         target_quantity: Decimal,
@@ -206,14 +246,7 @@ class OrderExecutor:
         # ✅ 1. 检查是否完全匹配
         diff_a = target_quantity - filled_qty_a
         diff_b = target_quantity - filled_qty_b
-        
-        # ✅ 使用 filled_qty 的精度标准化差异
-        if filled_qty_a != 0:
-            diff_a = diff_a.quantize(filled_qty_a)
-        
-        if filled_qty_b != 0:
-            diff_b = diff_b.quantize(filled_qty_b)
-        
+
         if diff_a == 0 and diff_b == 0:
             logger.info(f"✅ 仓位平衡，无需调整")
             return filled_qty_a, filled_qty_b
@@ -252,6 +285,12 @@ class OrderExecutor:
             f"   容忍阈值: {tolerance}\n"
             f"   开始补单"
         )
+
+        def reverse_side(side: str) -> str:
+            return 'buy' if side == 'sell' else 'sell'
+
+        def reverse_order_type(order_type: str) -> str:
+            return 'close' if order_type == 'open' else 'open'
         
         # ✅ A 需要补单
         if diff_a > tolerance:
@@ -310,6 +349,72 @@ class OrderExecutor:
                     f"   补单: {supplement_qty}\n"
                     f"   总计: {filled_qty_b} / {target_quantity}"
                 )    
+
+        # 补单后重算差异，避免后续修正使用旧值
+        diff_a = target_quantity - filled_qty_a
+        diff_b = target_quantity - filled_qty_b
+
+        # ✅ A 超量成交，需要反向修正
+        if diff_a < -tolerance:
+            excess_a = self._normalize_quantity(abs(diff_a), self.exchange_a.exchange_name)
+            if excess_a > 0:
+                reduce_order_type_a = reverse_order_type(operation_type)
+                reduce_side_a = reverse_side(side_a)
+                logger.warning(
+                    f"🔄 修正超量 {self.exchange_a.exchange_name}:\n"
+                    f"   已成交: {filled_qty_a}\n"
+                    f"   目标: {target_quantity}\n"
+                    f"   超量: {excess_a} ({reduce_order_type_a}/{reduce_side_a})"
+                )
+                result_reduce_a = await self._retry_place_order(
+                    exchange=self.exchange_a,
+                    order_type=reduce_order_type_a,
+                    side=reduce_side_a,
+                    quantity=excess_a,
+                    price=price_a,
+                    retry_mode='aggressive',
+                    order_limiter=self.order_limiter_a,
+                    trade_source=f"balance_reduce_{operation_type}"
+                )
+                if result_reduce_a.get('success'):
+                    reduce_qty_a = result_reduce_a.get('filled_quantity', excess_a)
+                    filled_qty_a = max(Decimal('0'), filled_qty_a - reduce_qty_a)
+                    logger.info(
+                        f"✅ {self.exchange_a.exchange_name} 超量修正成功:\n"
+                        f"   修正: {reduce_qty_a}\n"
+                        f"   修正后: {filled_qty_a} / {target_quantity}"
+                    )
+
+        # ✅ B 超量成交，需要反向修正
+        if diff_b < -tolerance:
+            excess_b = self._normalize_quantity(abs(diff_b), self.exchange_b.exchange_name)
+            if excess_b > 0:
+                reduce_order_type_b = reverse_order_type(operation_type)
+                reduce_side_b = reverse_side(side_b)
+                logger.warning(
+                    f"🔄 修正超量 {self.exchange_b.exchange_name}:\n"
+                    f"   已成交: {filled_qty_b}\n"
+                    f"   目标: {target_quantity}\n"
+                    f"   超量: {excess_b} ({reduce_order_type_b}/{reduce_side_b})"
+                )
+                result_reduce_b = await self._retry_place_order(
+                    exchange=self.exchange_b,
+                    order_type=reduce_order_type_b,
+                    side=reduce_side_b,
+                    quantity=excess_b,
+                    price=price_b,
+                    retry_mode='aggressive',
+                    order_limiter=self.order_limiter_b,
+                    trade_source=f"balance_reduce_{operation_type}"
+                )
+                if result_reduce_b.get('success'):
+                    reduce_qty_b = result_reduce_b.get('filled_quantity', excess_b)
+                    filled_qty_b = max(Decimal('0'), filled_qty_b - reduce_qty_b)
+                    logger.info(
+                        f"✅ {self.exchange_b.exchange_name} 超量修正成功:\n"
+                        f"   修正: {reduce_qty_b}\n"
+                        f"   修正后: {filled_qty_b} / {target_quantity}"
+                    )
         
         # ✅ 6. 检查补单后的结果
         final_diff_after = filled_qty_a - filled_qty_b
@@ -693,6 +798,22 @@ class OrderExecutor:
         try:
             # ✅ 1. 并行下单（首次尝试）
             logger.info("🚀 开始并行下单（首次尝试）...")
+            if self._should_refresh_quote_id_for_quantity(order_quantity):
+                logger.info(f"💡 [open] 检测到数量偏离基准，刷新 quote_id: {order_quantity} (base={self.quantity})")
+                exchange_a_quote_id, exchange_b_quote_id = await asyncio.gather(
+                    self._refresh_quote_id_for_quantity(
+                        exchange=self.exchange_a,
+                        quantity=order_quantity,
+                        current_quote_id=exchange_a_quote_id,
+                        context='open'
+                    ),
+                    self._refresh_quote_id_for_quantity(
+                        exchange=self.exchange_b,
+                        quantity=order_quantity,
+                        current_quote_id=exchange_b_quote_id,
+                        context='open'
+                    )
+                )
 
             task_a = asyncio.create_task(
                 self.exchange_a.place_open_order(
@@ -737,25 +858,6 @@ class OrderExecutor:
                 order_b_result = {'success': False, 'error': str(order_b_result)}
             else:
                 success_b = order_b_result.get('success', False) or order_b_result.get('partial_fill', False)
-
-            if order_a_result.get('partial_fill'):
-                self._log_extra_trade(
-                    exchange=self.exchange_a,
-                    side='buy',
-                    signal_price=exchange_a_price,
-                    result=order_a_result,
-                    position_type='close',
-                    trade_source='partial_fill_close'
-                )
-            if order_b_result.get('partial_fill'):
-                self._log_extra_trade(
-                    exchange=self.exchange_b,
-                    side='sell',
-                    signal_price=exchange_b_price,
-                    result=order_b_result,
-                    position_type='close',
-                    trade_source='partial_fill_close'
-                )
 
             if order_a_result.get('partial_fill'):
                 self._log_extra_trade(
@@ -1096,6 +1198,22 @@ class OrderExecutor:
         try:
             # ✅ 1. 并行下单（首次尝试）
             logger.info("🚀 开始并行平仓（首次尝试）...")
+            if self._should_refresh_quote_id_for_quantity(close_quantity):
+                logger.info(f"💡 [close] 检测到数量偏离基准，刷新 quote_id: {close_quantity} (base={self.quantity})")
+                exchange_a_quote_id, exchange_b_quote_id = await asyncio.gather(
+                    self._refresh_quote_id_for_quantity(
+                        exchange=self.exchange_a,
+                        quantity=close_quantity,
+                        current_quote_id=exchange_a_quote_id,
+                        context='close'
+                    ),
+                    self._refresh_quote_id_for_quantity(
+                        exchange=self.exchange_b,
+                        quantity=close_quantity,
+                        current_quote_id=exchange_b_quote_id,
+                        context='close'
+                    )
+                )
 
             task_a = asyncio.create_task(
                 self.exchange_a.place_close_order(

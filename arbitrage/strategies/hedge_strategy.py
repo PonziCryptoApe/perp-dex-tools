@@ -58,7 +58,7 @@ class HedgeStrategy(BaseStrategy):
         latency_tier1_ms: float = 150.0,
         latency_tier2_ms: float = 400.0,
         latency_mid_threshold_add_pct: float = 0.03,
-        latency_mid_qty_factor: float = 0.6,
+        latency_mid_qty_factor: float = 1.0,
         latency_high_block_open: bool = True,
         latency_metrics_window: int = 50
     ):
