@@ -301,6 +301,12 @@ async def main():
     parser.add_argument('--edge-fee-bps', type=float, default=None, help='边际二次过滤手续费估计（bps），默认 0.0')
     parser.add_argument('--edge-latency-bps-per-100ms', type=float, default=None, help='边际二次过滤延迟风险系数（每 100ms 增加 bps），默认 0.0')
     parser.add_argument('--edge-latency-free-ms', type=float, default=None, help='边际二次过滤延迟免惩罚阈值（ms），默认 120')
+    parser.add_argument('--latency-tier1-ms', type=float, default=None, help='延迟分级一级阈值（ms），默认 150')
+    parser.add_argument('--latency-tier2-ms', type=float, default=None, help='延迟分级二级阈值（ms），默认 400')
+    parser.add_argument('--latency-mid-threshold-add-pct', type=float, default=None, help='中延迟阈值上浮（%），默认 0.03')
+    parser.add_argument('--latency-mid-qty-factor', type=float, default=None, help='中延迟降仓系数（0~1），默认 0.6')
+    parser.add_argument('--latency-high-block-open', choices=['on', 'off'], default=None, help='高延迟是否阻断增风险动作（默认 on）')
+    parser.add_argument('--latency-metrics-window', type=int, default=None, help='延迟统计窗口（笔数），默认 50')
     args = parser.parse_args()
     if args.lighter_reconnect_base_delay <= 0:
         parser.error("--lighter-reconnect-base-delay 必须大于 0")
@@ -318,6 +324,18 @@ async def main():
         parser.error("--edge-latency-bps-per-100ms 不能小于 0")
     if args.edge_latency_free_ms is not None and args.edge_latency_free_ms < 0:
         parser.error("--edge-latency-free-ms 不能小于 0")
+    if args.latency_tier1_ms is not None and args.latency_tier1_ms < 0:
+        parser.error("--latency-tier1-ms 不能小于 0")
+    if args.latency_tier2_ms is not None and args.latency_tier2_ms < 0:
+        parser.error("--latency-tier2-ms 不能小于 0")
+    if args.latency_tier1_ms is not None and args.latency_tier2_ms is not None and args.latency_tier2_ms < args.latency_tier1_ms:
+        parser.error("--latency-tier2-ms 不能小于 --latency-tier1-ms")
+    if args.latency_mid_threshold_add_pct is not None and args.latency_mid_threshold_add_pct < 0:
+        parser.error("--latency-mid-threshold-add-pct 不能小于 0")
+    if args.latency_mid_qty_factor is not None and (args.latency_mid_qty_factor <= 0 or args.latency_mid_qty_factor > 1):
+        parser.error("--latency-mid-qty-factor 必须在 (0, 1] 区间")
+    if args.latency_metrics_window is not None and args.latency_metrics_window < 10:
+        parser.error("--latency-metrics-window 不能小于 10")
     # 加载环境变量
     if args.env_file:
         load_dotenv(args.env_file)
@@ -385,6 +403,7 @@ async def main():
     direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
     edge_filter_config = config.edge_filter if hasattr(config, 'edge_filter') and isinstance(config.edge_filter, dict) else {}
+    latency_tiers_config = config.latency_tiers if hasattr(config, 'latency_tiers') and isinstance(config.latency_tiers, dict) else {}
 
     edge_filter_enabled = edge_filter_config.get('enabled', True)
     if args.edge_filter is not None:
@@ -403,6 +422,31 @@ async def main():
         if args.edge_latency_free_ms is not None
         else float(edge_filter_config.get('latency_free_ms', 120.0))
     )
+    latency_tier1_ms = float(args.latency_tier1_ms) if args.latency_tier1_ms is not None else float(latency_tiers_config.get('tier1_ms', 150.0))
+    latency_tier2_ms = float(args.latency_tier2_ms) if args.latency_tier2_ms is not None else float(latency_tiers_config.get('tier2_ms', 400.0))
+    if latency_tier2_ms < latency_tier1_ms:
+        latency_tier2_ms = latency_tier1_ms
+    latency_mid_threshold_add_pct = (
+        float(args.latency_mid_threshold_add_pct)
+        if args.latency_mid_threshold_add_pct is not None
+        else float(latency_tiers_config.get('mid_threshold_add_pct', 0.03))
+    )
+    latency_mid_qty_factor = (
+        float(args.latency_mid_qty_factor)
+        if args.latency_mid_qty_factor is not None
+        else float(latency_tiers_config.get('mid_qty_factor', 0.6))
+    )
+    latency_mid_qty_factor = min(1.0, max(0.01, latency_mid_qty_factor))
+    if args.latency_high_block_open is not None:
+        latency_high_block_open = args.latency_high_block_open == 'on'
+    else:
+        latency_high_block_open = bool(latency_tiers_config.get('high_block_open', True))
+    latency_metrics_window = (
+        int(args.latency_metrics_window)
+        if args.latency_metrics_window is not None
+        else int(latency_tiers_config.get('metrics_window', 50))
+    )
+    latency_metrics_window = max(10, latency_metrics_window)
 
     if dynamic_threshold:
         if args.min_total_threshold is not None:
@@ -462,6 +506,12 @@ async def main():
         f"  手续费估计:   {edge_fee_bps:.2f} bps\n"
         f"  延迟风险系数: {edge_latency_bps_per_100ms:.2f} bps/100ms\n"
         f"  延迟免惩罚阈值: {edge_latency_free_ms:.0f} ms\n"
+        f"  延迟分级一级阈值: {latency_tier1_ms:.0f} ms\n"
+        f"  延迟分级二级阈值: {latency_tier2_ms:.0f} ms\n"
+        f"  中延迟阈值上浮: +{latency_mid_threshold_add_pct:.4f}%\n"
+        f"  中延迟降仓系数: x{latency_mid_qty_factor:.2f}\n"
+        f"  高延迟阻断增风险动作: {'是' if latency_high_block_open else '否'}\n"
+        f"  延迟统计窗口: {latency_metrics_window}\n"
         f"{'='*60}\n"
     )
     
@@ -550,6 +600,12 @@ async def main():
         edge_fee_bps=edge_fee_bps,
         edge_latency_bps_per_100ms=edge_latency_bps_per_100ms,
         edge_latency_free_ms=edge_latency_free_ms,
+        latency_tier1_ms=latency_tier1_ms,
+        latency_tier2_ms=latency_tier2_ms,
+        latency_mid_threshold_add_pct=latency_mid_threshold_add_pct,
+        latency_mid_qty_factor=latency_mid_qty_factor,
+        latency_high_block_open=latency_high_block_open,
+        latency_metrics_window=latency_metrics_window,
     )
     logger.info("✅ 策略创建成功\n")
     # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========

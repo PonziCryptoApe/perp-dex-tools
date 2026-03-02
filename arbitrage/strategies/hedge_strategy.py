@@ -8,6 +8,7 @@ import random
 import time
 import yaml
 import os
+from collections import deque
 from decimal import Decimal
 from typing import Optional
 
@@ -53,7 +54,13 @@ class HedgeStrategy(BaseStrategy):
         edge_base_cost_bps: float = 3.0,
         edge_fee_bps: float = 0.0,
         edge_latency_bps_per_100ms: float = 0.0,
-        edge_latency_free_ms: float = 120.0
+        edge_latency_free_ms: float = 120.0,
+        latency_tier1_ms: float = 150.0,
+        latency_tier2_ms: float = 400.0,
+        latency_mid_threshold_add_pct: float = 0.03,
+        latency_mid_qty_factor: float = 0.6,
+        latency_high_block_open: bool = True,
+        latency_metrics_window: int = 50
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -84,6 +91,14 @@ class HedgeStrategy(BaseStrategy):
         self.edge_fee_bps = max(0.0, float(edge_fee_bps))
         self.edge_latency_bps_per_100ms = max(0.0, float(edge_latency_bps_per_100ms))
         self.edge_latency_free_ms = max(0.0, float(edge_latency_free_ms))
+        self.latency_tier1_ms = max(0.0, float(latency_tier1_ms))
+        self.latency_tier2_ms = max(self.latency_tier1_ms, float(latency_tier2_ms))
+        self.latency_mid_threshold_add_pct = max(0.0, float(latency_mid_threshold_add_pct))
+        self.latency_mid_qty_factor = min(1.0, max(0.01, float(latency_mid_qty_factor)))
+        self.latency_high_block_open = bool(latency_high_block_open)
+        self.latency_metrics_window = max(10, int(latency_metrics_window))
+        self._place_durations_ms = deque(maxlen=self.latency_metrics_window)
+        self._exec_durations_ms = deque(maxlen=self.latency_metrics_window)
 
         self.start_vol_a = 0
         self.start_equity_a = 0
@@ -152,6 +167,9 @@ class HedgeStrategy(BaseStrategy):
                 'delay_filtered': 0,     # 因延迟过滤
                 'depth_insufficient': 0, # 因深度不足跳过
                 'edge_filtered': 0,      # 因边际不足跳过
+                'latency_blocked': 0,    # 因高延迟阻断增风险动作
+                'latency_threshold_filtered': 0,  # 因中延迟提阈值后未通过
+                'latency_scaled': 0,     # 因中延迟降仓
                 'depth_adjusted': 0,     # 因深度调整数量
                 'limited_a': 0,            # 因限流跳过
                 'limited_b': 0,            # 因限流跳过
@@ -164,6 +182,9 @@ class HedgeStrategy(BaseStrategy):
                 'delay_filtered': 0,
                 'depth_insufficient': 0,
                 'edge_filtered': 0,      # 因边际不足跳过
+                'latency_blocked': 0,
+                'latency_threshold_filtered': 0,
+                'latency_scaled': 0,
                 'depth_adjusted': 0,
                 'limited_a': 0,
                 'limited_b': 0,
@@ -210,7 +231,12 @@ class HedgeStrategy(BaseStrategy):
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
             f"   手续费估计: {self.edge_fee_bps:.2f} bps\n"
             f"   延迟风险系数: {self.edge_latency_bps_per_100ms:.2f} bps/100ms\n"
-            f"   延迟免惩罚阈值: {self.edge_latency_free_ms:.0f} ms"
+            f"   延迟免惩罚阈值: {self.edge_latency_free_ms:.0f} ms\n"
+            f"   延迟分级阈值: <= {self.latency_tier1_ms:.0f}ms / <= {self.latency_tier2_ms:.0f}ms / > {self.latency_tier2_ms:.0f}ms\n"
+            f"   中延迟提阈值: +{self.latency_mid_threshold_add_pct:.4f}%\n"
+            f"   中延迟降仓系数: x{self.latency_mid_qty_factor:.2f}\n"
+            f"   高延迟阻断增风险动作: {'是' if self.latency_high_block_open else '否'}\n"
+            f"   延迟统计窗口: {self.latency_metrics_window} 笔"
         )
     
     async def start(self):
@@ -477,6 +503,67 @@ class HedgeStrategy(BaseStrategy):
             'reason': 'accumulate_mode'
         }
 
+    def _calc_p90_ms(self, values) -> float:
+        """计算 P90，空样本返回 0"""
+        if not values:
+            return 0.0
+        ordered = sorted(float(v) for v in values if v and float(v) > 0)
+        if not ordered:
+            return 0.0
+        idx = max(0, int(len(ordered) * 0.9) - 1)
+        return ordered[idx]
+
+    def _record_latency_metrics_from_position(self, position: Optional[Position]):
+        """记录执行耗时样本（用于延迟分级）"""
+        if position is None:
+            return
+
+        for value in [
+            position.place_duration_a_ms,
+            position.place_duration_b_ms,
+        ]:
+            if value is not None and float(value) > 0:
+                self._place_durations_ms.append(float(value))
+
+        for value in [
+            position.execution_duration_a_ms,
+            position.execution_duration_b_ms,
+        ]:
+            if value is not None and float(value) > 0:
+                self._exec_durations_ms.append(float(value))
+
+    def _build_latency_decision(self, signal_delay_ms_a: float, signal_delay_ms_b: float) -> dict:
+        """
+        构建延迟分级决策：
+        - 低延迟：正常执行
+        - 中延迟：提阈值 + 降仓
+        - 高延迟：阻断增风险动作（可配置）
+        """
+        book_age_ms = max(float(signal_delay_ms_a), float(signal_delay_ms_b))
+        ws_gap_ms = book_age_ms  # 当前版本无独立 ws_gap，先使用同口径近似
+        place_p90_ms = self._calc_p90_ms(self._place_durations_ms)
+        exec_p90_ms = self._calc_p90_ms(self._exec_durations_ms)
+        latency_est_ms = max(book_age_ms, ws_gap_ms, place_p90_ms, exec_p90_ms)
+
+        if latency_est_ms <= self.latency_tier1_ms:
+            tier = 'low'
+        elif latency_est_ms <= self.latency_tier2_ms:
+            tier = 'mid'
+        else:
+            tier = 'high'
+
+        return {
+            'tier': tier,
+            'latency_est_ms': latency_est_ms,
+            'book_age_ms': book_age_ms,
+            'ws_gap_ms': ws_gap_ms,
+            'place_p90_ms': place_p90_ms,
+            'exec_p90_ms': exec_p90_ms,
+            'threshold_add_pct': self.latency_mid_threshold_add_pct if tier == 'mid' else 0.0,
+            'qty_factor': self.latency_mid_qty_factor if tier == 'mid' else 1.0,
+            'block_risk_increase': self.latency_high_block_open and tier == 'high',
+        }
+
     async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
         检查开仓信号
@@ -533,6 +620,42 @@ class HedgeStrategy(BaseStrategy):
 
             edge_estimate = None
             edge_apply, edge_ctx = self._should_apply_edge_filter('open')
+            latency_ctx = self._build_latency_decision(signal_delay_ms_a, signal_delay_ms_b)
+            dynamic_open_threshold = float(self.open_threshold_pct)
+            open_order_quantity = self.position_manager.position_step
+
+            if edge_apply:
+                if latency_ctx['block_risk_increase']:
+                    self.signal_stats['open']['latency_blocked'] += 1
+                    logger.warning(
+                        f"⏸️ [{self.symbol}] 高延迟，暂停增风险开仓:\n"
+                        f"   tier={latency_ctx['tier']}, latency_est={latency_ctx['latency_est_ms']:.2f}ms\n"
+                        f"   组成: book_age={latency_ctx['book_age_ms']:.2f}ms, ws_gap={latency_ctx['ws_gap_ms']:.2f}ms, "
+                        f"place_p90={latency_ctx['place_p90_ms']:.2f}ms, exec_p90={latency_ctx['exec_p90_ms']:.2f}ms\n"
+                        f"   当前仓位: {edge_ctx['current_qty']:+.4f} -> 预测仓位: {edge_ctx['projected_qty']:+.4f}"
+                    )
+                    return
+
+                dynamic_open_threshold = float(self.open_threshold_pct) + float(latency_ctx['threshold_add_pct'])
+                if spread_pct < Decimal(str(dynamic_open_threshold)):
+                    self.signal_stats['open']['latency_threshold_filtered'] += 1
+                    logger.info(
+                        f"⏭️ [{self.symbol}] 中延迟提阈值后未通过，跳过开仓:\n"
+                        f"   tier={latency_ctx['tier']}, latency_est={latency_ctx['latency_est_ms']:.2f}ms\n"
+                        f"   当前阈值: {self.open_threshold_pct:.4f}% -> 提阈值后: {dynamic_open_threshold:.4f}%\n"
+                        f"   当前价差: {spread_pct:.4f}%"
+                    )
+                    return
+
+                if latency_ctx['tier'] == 'mid' and float(latency_ctx['qty_factor']) < 1.0:
+                    raw_quantity = self.position_manager.position_step * Decimal(str(latency_ctx['qty_factor']))
+                    normalized_quantity = raw_quantity.quantize(self.quantity_precision)
+                    if normalized_quantity <= 0:
+                        normalized_quantity = self.quantity_precision
+                    if normalized_quantity < self.position_manager.position_step:
+                        self.signal_stats['open']['latency_scaled'] += 1
+                        open_order_quantity = normalized_quantity
+
             if self.edge_filter_enabled:
                 if edge_apply:
                     passed_edge, edge_estimate = self._passes_edge_filter(
@@ -569,6 +692,12 @@ class HedgeStrategy(BaseStrategy):
                         f"   边际过滤: 减风险路径放行 "
                         f"(仓位 {edge_ctx['current_qty']:+.4f} -> {edge_ctx['projected_qty']:+.4f})\n"
                     )
+            latency_text = (
+                f"   延迟分级: {latency_ctx['tier']}, latency_est={latency_ctx['latency_est_ms']:.2f}ms "
+                f"(book_age={latency_ctx['book_age_ms']:.2f}, ws_gap={latency_ctx['ws_gap_ms']:.2f}, "
+                f"place_p90={latency_ctx['place_p90_ms']:.2f}, exec_p90={latency_ctx['exec_p90_ms']:.2f})\n"
+                f"   动态阈值: {dynamic_open_threshold:.4f}% | 下单量: {open_order_quantity}\n"
+            )
 
             logger.info(
                 f"🔔 [{self.symbol}] 检测到开仓信号 #{self.open_signal_count}:\n"
@@ -578,6 +707,7 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_a.exchange_name}_bid_size: {prices.exchange_a_bid_size}\n"
                 f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
                 f"   {self.exchange_b.exchange_name}_ask_size: {prices.exchange_b_ask_size}\n"
+                f"   {latency_text}"
                 f"   {edge_text}"
                 f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)"
             )
@@ -590,7 +720,7 @@ class HedgeStrategy(BaseStrategy):
                 # ✅ 创建虚拟持仓（用于模拟）
                 virtual_position = Position(
                     symbol=self.symbol,
-                    quantity=self.position_manager.position_step,
+                    quantity=open_order_quantity,
                     exchange_a_name=self.exchange_a.exchange_name,
                     exchange_b_name=self.exchange_b.exchange_name,
                     exchange_a_signal_entry_price=prices.exchange_a_bid,
@@ -654,7 +784,7 @@ class HedgeStrategy(BaseStrategy):
                         exchange_a_quote_id=prices.exchange_a_quote_id,
                         exchange_b_quote_id=prices.exchange_b_quote_id,
                         signal_trigger_time=signal_trigger_time,
-                        actual_quantity=self.position_manager.position_step
+                        actual_quantity=open_order_quantity
                     )
                     
                     if success:
@@ -668,6 +798,7 @@ class HedgeStrategy(BaseStrategy):
                             self.position_manager.add_position(position, 'short', signal_delay_ms_a, signal_delay_ms_b)
                         else:
                             self.position_manager.set_position(position)
+                        self._record_latency_metrics_from_position(position)
 
                         # summary = self.position_manager.get_position_summary()
                         # logger.info(
@@ -778,6 +909,46 @@ class HedgeStrategy(BaseStrategy):
 
             edge_estimate = None
             edge_apply, edge_ctx = self._should_apply_edge_filter('close')
+            latency_ctx = self._build_latency_decision(signal_delay_ms_a, signal_delay_ms_b)
+            dynamic_close_threshold = float(self.close_threshold_pct)
+            close_order_quantity = self.position_manager.position_step if self.position_manager.accumulate_mode else (current_position.quantity if current_position else self.quantity)
+
+            if edge_apply:
+                if latency_ctx['block_risk_increase']:
+                    self.signal_stats['close']['latency_blocked'] += 1
+                    logger.warning(
+                        f"⏸️ [{self.symbol}] 高延迟，暂停增风险反向开仓:\n"
+                        f"   tier={latency_ctx['tier']}, latency_est={latency_ctx['latency_est_ms']:.2f}ms\n"
+                        f"   组成: book_age={latency_ctx['book_age_ms']:.2f}ms, ws_gap={latency_ctx['ws_gap_ms']:.2f}ms, "
+                        f"place_p90={latency_ctx['place_p90_ms']:.2f}ms, exec_p90={latency_ctx['exec_p90_ms']:.2f}ms\n"
+                        f"   当前仓位: {edge_ctx['current_qty']:+.4f} -> 预测仓位: {edge_ctx['projected_qty']:+.4f}"
+                    )
+                    return
+
+                dynamic_close_threshold = float(self.close_threshold_pct) + float(latency_ctx['threshold_add_pct'])
+                if spread_pct < Decimal(str(dynamic_close_threshold)):
+                    self.signal_stats['close']['latency_threshold_filtered'] += 1
+                    logger.info(
+                        f"⏭️ [{self.symbol}] 中延迟提阈值后未通过，跳过反向开仓:\n"
+                        f"   tier={latency_ctx['tier']}, latency_est={latency_ctx['latency_est_ms']:.2f}ms\n"
+                        f"   当前阈值: {self.close_threshold_pct:.4f}% -> 提阈值后: {dynamic_close_threshold:.4f}%\n"
+                        f"   当前价差: {spread_pct:.4f}%"
+                    )
+                    return
+
+                if (
+                    self.position_manager.accumulate_mode
+                    and latency_ctx['tier'] == 'mid'
+                    and float(latency_ctx['qty_factor']) < 1.0
+                ):
+                    raw_quantity = self.position_manager.position_step * Decimal(str(latency_ctx['qty_factor']))
+                    normalized_quantity = raw_quantity.quantize(self.quantity_precision)
+                    if normalized_quantity <= 0:
+                        normalized_quantity = self.quantity_precision
+                    if normalized_quantity < self.position_manager.position_step:
+                        self.signal_stats['close']['latency_scaled'] += 1
+                        close_order_quantity = normalized_quantity
+
             if self.edge_filter_enabled:
                 if edge_apply:
                     passed_edge, edge_estimate = self._passes_edge_filter(
@@ -814,6 +985,12 @@ class HedgeStrategy(BaseStrategy):
                         f"   边际过滤: 减风险路径放行 "
                         f"(仓位 {edge_ctx['current_qty']:+.4f} -> {edge_ctx['projected_qty']:+.4f})\n"
                     )
+            latency_text = (
+                f"   延迟分级: {latency_ctx['tier']}, latency_est={latency_ctx['latency_est_ms']:.2f}ms "
+                f"(book_age={latency_ctx['book_age_ms']:.2f}, ws_gap={latency_ctx['ws_gap_ms']:.2f}, "
+                f"place_p90={latency_ctx['place_p90_ms']:.2f}, exec_p90={latency_ctx['exec_p90_ms']:.2f})\n"
+                f"   动态阈值: {dynamic_close_threshold:.4f}% | 下单量: {close_order_quantity}\n"
+            )
 
             logger.info(
                 f"🔔 [{self.symbol}] 检测到反向开仓信号 #{self.close_signal_count}:\n"
@@ -823,6 +1000,7 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_a.exchange_name}_ask_size: {prices.exchange_a_ask_size}\n"
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
                 f"   {self.exchange_b.exchange_name}_bid_size: {prices.exchange_b_bid_size}\n"
+                f"   {latency_text}"
                 f"   {edge_text}"
                 f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)"
             )
@@ -836,7 +1014,7 @@ class HedgeStrategy(BaseStrategy):
                     # ✅ 创建临时 Position 用于记录
                     temp_position = Position(
                         symbol=self.symbol,
-                        quantity=self.position_manager.position_step,
+                        quantity=close_order_quantity,
                         exchange_a_name=self.exchange_a.exchange_name,
                         exchange_b_name=self.exchange_b.exchange_name,
                         exchange_a_signal_entry_price=current_position.exchange_a_entry_price if current_position else Decimal('0'),
@@ -916,7 +1094,7 @@ class HedgeStrategy(BaseStrategy):
                 try:
                     # 实际交易模式：执行平仓
                     if self.position_manager.accumulate_mode:
-                        close_quantity = self.position_manager.position_step
+                        close_quantity = close_order_quantity
                     else:
                         close_quantity = current_position.quantity if current_position else self.quantity
                     
@@ -950,6 +1128,7 @@ class HedgeStrategy(BaseStrategy):
                                 signal_delay_ms_a,
                                 signal_delay_ms_b
                             )
+                        self._record_latency_metrics_from_position(position)
                         
                         summary = self.position_manager.get_position_summary()
                         # logger.info(
@@ -1172,6 +1351,9 @@ class HedgeStrategy(BaseStrategy):
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
         edge_pct = (stats['edge_filtered'] / total * 100) if total > 0 else 0
+        latency_blocked_pct = (stats['latency_blocked'] / total * 100) if total > 0 else 0
+        latency_threshold_pct = (stats['latency_threshold_filtered'] / total * 100) if total > 0 else 0
+        latency_scaled_pct = (stats['latency_scaled'] / total * 100) if total > 0 else 0
         adjusted_pct = (stats['depth_adjusted'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
         limited_a_pct = (stats['limited_a'] / total * 100) if total > 0 else 0
@@ -1183,6 +1365,9 @@ class HedgeStrategy(BaseStrategy):
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
             f"边际不足 {stats['edge_filtered']} ({edge_pct:.1f}%) | "
+            f"高延迟阻断 {stats['latency_blocked']} ({latency_blocked_pct:.1f}%) | "
+            f"提阈值过滤 {stats['latency_threshold_filtered']} ({latency_threshold_pct:.1f}%) | "
+            f"中延迟降仓 {stats['latency_scaled']} ({latency_scaled_pct:.1f}%) | "
             # f"数量调整 {stats['depth_adjusted']} ({adjusted_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
             f"限流A {stats['limited_a']} ({limited_a_pct:.1f}%) | "
@@ -1201,6 +1386,9 @@ class HedgeStrategy(BaseStrategy):
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
         edge_pct = (stats['edge_filtered'] / total * 100) if total > 0 else 0
+        latency_blocked_pct = (stats['latency_blocked'] / total * 100) if total > 0 else 0
+        latency_threshold_pct = (stats['latency_threshold_filtered'] / total * 100) if total > 0 else 0
+        latency_scaled_pct = (stats['latency_scaled'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
         limited_a_pct = (stats['limited_a'] / total * 100) if total > 0 else 0
         limited_b_pct = (stats['limited_b'] / total * 100) if total > 0 else 0
@@ -1211,6 +1399,9 @@ class HedgeStrategy(BaseStrategy):
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
             f"边际不足 {stats['edge_filtered']} ({edge_pct:.1f}%) | "
+            f"高延迟阻断 {stats['latency_blocked']} ({latency_blocked_pct:.1f}%) | "
+            f"提阈值过滤 {stats['latency_threshold_filtered']} ({latency_threshold_pct:.1f}%) | "
+            f"中延迟降仓 {stats['latency_scaled']} ({latency_scaled_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
             f"限流A {stats['limited_a']} ({limited_a_pct:.1f}%) | "
             f"限流B {stats['limited_b']} ({limited_b_pct:.1f}%) | "
