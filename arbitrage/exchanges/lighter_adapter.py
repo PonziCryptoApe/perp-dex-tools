@@ -66,6 +66,8 @@ class LighterAdapter(ExchangeAdapter):
 
         self._order_status_data: Dict[int, dict] = {}  # key: client_order_index
         self._order_status_futures: Dict[int, asyncio.Future] = {}
+        self._last_client_order_ms = 0
+        self._client_order_seq = 0
     
     async def connect(self):
         """连接 Lighter"""
@@ -471,12 +473,38 @@ class LighterAdapter(ExchangeAdapter):
         asks_tuple = tuple(sorted((str(p), str(s)) for p, s in self.lighter_order_book["asks"].items()))
         return hash((bids_tuple, asks_tuple))
 
+    def _next_client_order_index(self) -> int:
+        """
+        生成高唯一 client_order_index。
+        规则：`毫秒时间 * 1000 + 毫秒内递增序号`。
+        """
+        now_ms = int(time.time() * 1000)
+        # 避免同毫秒内生成重复索引，强制递增
+        if now_ms <= self._last_client_order_ms:
+            now_ms = self._last_client_order_ms
+            # 同毫秒内递增序号
+            self._client_order_seq += 1
+            # 极端并发保护：同毫秒超过 1000 单时，推进到下一毫秒，避免复用。
+            if self._client_order_seq >= 1000:
+                now_ms += 1
+                self._client_order_seq = 0
+        else:
+            self._client_order_seq = 0
+
+        self._last_client_order_ms = now_ms
+        return now_ms * 1000 + self._client_order_seq
+
     def _on_order_update(self, order_update: dict):
         """处理 WebSocket 订单更新（同步回调）"""
         try:
-            client_order_index = order_update.get('client_order_index')
-            if client_order_index is None:
+            raw_client_order_index = order_update.get('client_order_index')
+            if raw_client_order_index is None:
                 logger.debug(f"⏭️ 跳过无 client_order_index 的更新")
+                return
+            try:
+                client_order_index = int(raw_client_order_index)
+            except (TypeError, ValueError):
+                logger.warning(f"⚠️ 跳过非法 client_order_index: {raw_client_order_index}")
                 return
 
             real_order_id = order_update.get('order_id')
@@ -686,7 +714,15 @@ class LighterAdapter(ExchangeAdapter):
             
             loop = asyncio.get_event_loop()
             future = loop.create_future()
-            client_order_index = int(time.time() * 1000) % 1000000
+            client_order_index = self._next_client_order_index()
+
+            # 防御性清理：理论上不应命中；若命中说明出现了 client_order_index 复用风险。
+            stale_data = self._order_status_data.pop(client_order_index, None)
+            stale_future = self._order_status_futures.pop(client_order_index, None)
+            if stale_future and not stale_future.done():
+                stale_future.cancel()
+            if stale_data is not None or stale_future is not None:
+                logger.warning(f"⚠️ 下单前发现并清理同 key 残留状态: client_idx={client_order_index}")
 
             self._order_status_futures[client_order_index] = future
             slippage = slippage if slippage is not None else self.slippage
