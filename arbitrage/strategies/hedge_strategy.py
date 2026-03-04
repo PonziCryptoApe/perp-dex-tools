@@ -1056,6 +1056,8 @@ class HedgeStrategy(BaseStrategy):
         mode_text = "虚拟" if self.monitor_only else "实际"
         actual_slippage = position.calculate_slippage()
         logger.info(f'----------actual-------------{actual_slippage}')
+        spread_label = ""
+        time_label = ""
         if direction == 'long':
             title = f'对冲开多通知（{mode_text}）'
             a_slippage = actual_slippage['exit_a_slippage_pct'].quantize(Decimal('0.0001'))
@@ -1064,6 +1066,8 @@ class HedgeStrategy(BaseStrategy):
             trigger_time = position.exit_time.strftime('%Y-%m-%d %H:%M:%S')
             threshold = self.close_threshold_pct
             qty = -self.quantity
+            spread_label = "反向开仓信号价差"
+            time_label = "反向开仓时间"
         else: 
             title = f'对冲开空通知（{mode_text}）'
             a_slippage = actual_slippage['entry_a_slippage_pct'].quantize(Decimal('0.0001'))
@@ -1072,15 +1076,17 @@ class HedgeStrategy(BaseStrategy):
             trigger_time = position.entry_time.strftime('%Y-%m-%d %H:%M:%S')
             threshold = self.open_threshold_pct
             qty = self.quantity
+            spread_label = "开仓信号价差"
+            time_label = "开仓时间"
         current_position_qty = self.position_manager.get_current_position_qty().quantize(Decimal('0.0001'))
         message = (
             f"🔔 {title}\n\n"
             f"交易对: {self.symbol}\n"
             f"数量: {self.quantity}\n"
             f"当前仓位: {current_position_qty + qty} --> {current_position_qty}\n"
-            f"信号价差: {spread_pct.quantize(Decimal('0.0001'))}%（阈值: {threshold}%）\n"
+            f"{spread_label}: {spread_pct.quantize(Decimal('0.0001'))}%（阈值: {threshold}%）\n"
             f"总滑点: {total_slippage}%（A: {a_slippage}% B: {b_slippage}%）\n"
-            f"开仓时间: {trigger_time}"
+            f"{time_label}: {trigger_time}"
         )
         await self.lark_bot.send_text(message)
 
