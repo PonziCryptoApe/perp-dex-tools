@@ -68,6 +68,13 @@ class LighterAdapter(ExchangeAdapter):
         self._order_status_futures: Dict[int, asyncio.Future] = {}
         self._last_client_order_ms = 0
         self._client_order_seq = 0
+        # ClientOrderIndex 上限：2^48 - 1（281474976710655）
+        self._client_order_index_max = (1 << 48) - 1
+        # 使用固定 epoch 降低时间戳位宽，保证 index 始终在 48 位内。
+        self._client_order_epoch_ms = 1704067200000  # 2024-01-01 00:00:00 UTC
+        self._client_order_seq_bits = 8              # 每毫秒最多 256 个序号
+        self._client_order_seq_max = (1 << self._client_order_seq_bits) - 1
+        self._client_order_max_delta_ms = (1 << (48 - self._client_order_seq_bits)) - 1
     
     async def connect(self):
         """连接 Lighter"""
@@ -475,24 +482,38 @@ class LighterAdapter(ExchangeAdapter):
 
     def _next_client_order_index(self) -> int:
         """
-        生成高唯一 client_order_index。
-        规则：`毫秒时间 * 1000 + 毫秒内递增序号`。
+        生成 48 位范围内的高唯一 client_order_index。
+        规则：`((now_ms - epoch_ms) << seq_bits) | seq`。
         """
         now_ms = int(time.time() * 1000)
-        # 避免同毫秒内生成重复索引，强制递增
+
+        # 避免同毫秒内生成重复索引，强制递增。
         if now_ms <= self._last_client_order_ms:
             now_ms = self._last_client_order_ms
-            # 同毫秒内递增序号
             self._client_order_seq += 1
-            # 极端并发保护：同毫秒超过 1000 单时，推进到下一毫秒，避免复用。
-            if self._client_order_seq >= 1000:
+            # 极端并发保护：同毫秒序号超过上限时，推进到下一毫秒，避免复用。
+            if self._client_order_seq > self._client_order_seq_max:
                 now_ms += 1
                 self._client_order_seq = 0
         else:
             self._client_order_seq = 0
 
         self._last_client_order_ms = now_ms
-        return now_ms * 1000 + self._client_order_seq
+        delta_ms = now_ms - self._client_order_epoch_ms
+        if delta_ms < 0:
+            delta_ms = 0
+
+        if delta_ms > self._client_order_max_delta_ms:
+            raise ValueError(
+                f"client_order_index delta_ms 超范围: {delta_ms} > {self._client_order_max_delta_ms}"
+            )
+
+        client_order_index = (delta_ms << self._client_order_seq_bits) | self._client_order_seq
+        if client_order_index > self._client_order_index_max:
+            raise ValueError(
+                f"client_order_index 超过上限: {client_order_index} > {self._client_order_index_max}"
+            )
+        return client_order_index
 
     def _on_order_update(self, order_update: dict):
         """处理 WebSocket 订单更新（同步回调）"""
