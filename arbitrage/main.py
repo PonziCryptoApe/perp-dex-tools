@@ -295,7 +295,7 @@ async def main():
     parser.add_argument('--lighter-reconnect-max-delay', type=float, default=10.0, help='Lighter WS 重连最大等待秒数（默认10）')
     parser.add_argument('--max-std-multiplier', type=float, default=4.0, help='标准差的最大系数')
     parser.add_argument('--min-std-multiplier', type=float, default=0.0, help='标准差的最小系数')
-    parser.add_argument('--edge-filter', choices=['on', 'off'], default=None, help='边际二次过滤开关（默认读取配置，配置缺失时为 on）')
+    parser.add_argument('--edge-filter', choices=['on', 'off'], default=None, help='边际二次过滤开关（默认读取配置，配置缺失时为 off）')
     parser.add_argument('--min-edge-bps', type=float, default=None, help='边际二次过滤最小安全边际（bps），默认 0.8')
     parser.add_argument('--edge-base-cost-bps', type=float, default=None, help='边际二次过滤基础成本估计（bps），默认 3.0')
     parser.add_argument('--edge-fee-bps', type=float, default=None, help='边际二次过滤手续费估计（bps），默认 0.0')
@@ -386,7 +386,7 @@ async def main():
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
     edge_filter_config = config.edge_filter if hasattr(config, 'edge_filter') and isinstance(config.edge_filter, dict) else {}
 
-    edge_filter_enabled = edge_filter_config.get('enabled', True)
+    edge_filter_enabled = edge_filter_config.get('enabled', False)
     if args.edge_filter is not None:
         edge_filter_enabled = (args.edge_filter == 'on')
 

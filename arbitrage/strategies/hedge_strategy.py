@@ -48,7 +48,7 @@ class HedgeStrategy(BaseStrategy):
         cooldown_seconds: Optional[float] = 5,
         dynamic_threshold: Optional[dict] = None,
         end_time: Optional[str] = None,
-        edge_filter_enabled: bool = True,
+        edge_filter_enabled: bool = False,
         min_edge_bps: float = 0.8,
         edge_base_cost_bps: float = 3.0,
         edge_fee_bps: float = 0.0,
