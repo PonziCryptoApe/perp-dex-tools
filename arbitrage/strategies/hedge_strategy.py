@@ -39,7 +39,8 @@ class HedgeStrategy(BaseStrategy):
         lark_bot=None,
         monitor_only: bool = False,
         trade_logger=None,
-        max_signal_delay_ms: int = 200,
+        max_signal_delay_ms_a: int = 200,
+        max_signal_delay_ms_b: int = 200,
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
@@ -69,9 +70,8 @@ class HedgeStrategy(BaseStrategy):
         self.exchange_b = exchange_b
         self.lark_bot = lark_bot
         self.monitor_only = monitor_only
-        self.max_signal_delay_ms = max_signal_delay_ms
-        self.max_signal_delay_ms_a = 200
-        self.max_signal_delay_ms_b = 60
+        self.max_signal_delay_ms_a = max_signal_delay_ms_a
+        self.max_signal_delay_ms_b = max_signal_delay_ms_b
         self.min_depth_quantity = min_depth_quantity
         self.direction_reverse = direction_reverse
         self.cooldown_seconds = cooldown_seconds
@@ -199,6 +199,7 @@ class HedgeStrategy(BaseStrategy):
             f"🎯 策略配置:\n"
             f"   Symbol: {symbol}\n"
             f"   Quantity: {quantity}\n"
+            f"   延迟阈值(A/B): {self.max_signal_delay_ms_a}/{self.max_signal_delay_ms_b} ms\n"
             f"   Open Threshold: {open_threshold_pct}%\n"
             f"   Close Threshold: {close_threshold_pct}%\n"
             f"   Exchange A: {exchange_a.exchange_name}\n"
@@ -286,7 +287,10 @@ class HedgeStrategy(BaseStrategy):
         """
         if not self.is_running:
             return
-        is_stale, stale_msg = self.monitor.is_orderbook_stale(self.max_signal_delay_ms / 1000)
+        is_stale, stale_msg = self.monitor.is_orderbook_stale(
+            max_age_a=self.max_signal_delay_ms_a / 1000,
+            max_age_b=self.max_signal_delay_ms_b / 1000,
+        )
         if is_stale:
             # logger.warning(f"⚠️ 订单簿过时，丢弃信号: {stale_msg}")
             return
@@ -303,12 +307,15 @@ class HedgeStrategy(BaseStrategy):
             signal_flag = False
             self.signal_total += 1
             # ✅ 过滤延迟过大的信号
-            if signal_delay_ms_a <= self.max_signal_delay_ms and signal_delay_ms_b <= self.max_signal_delay_ms:
+            if signal_delay_ms_a <= self.max_signal_delay_ms_a and signal_delay_ms_b <= self.max_signal_delay_ms_b:
                 signal_flag = True
             else:
                 self.signal_delay += 1
-                logger.warning(f"⚠️ [{self.symbol}] 信号延迟过大: A {signal_delay_ms_a:.2f} ms（阈值: {self.max_signal_delay_ms} ms），"
-                            f" B {signal_delay_ms_b:.2f} ms（阈值: {self.max_signal_delay_ms} ms）")
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 信号延迟过大: "
+                    f"A {signal_delay_ms_a:.2f} ms（A阈值: {self.max_signal_delay_ms_a} ms），"
+                    f" B {signal_delay_ms_b:.2f} ms（B阈值: {self.max_signal_delay_ms_b} ms）"
+                )
                 return  # 丢弃该信号
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
@@ -572,8 +579,8 @@ class HedgeStrategy(BaseStrategy):
 
             logger.info(
                 f"🔔 [{self.symbol}] 检测到开仓信号 #{self.open_signal_count}:\n"
-                f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms_a} ms)\n"
+                f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms_b} ms)\n"
                 f"   {self.exchange_a.exchange_name}_bid: ${prices.exchange_a_bid}\n"
                 f"   {self.exchange_a.exchange_name}_bid_size: {prices.exchange_a_bid_size}\n"
                 f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
@@ -817,8 +824,8 @@ class HedgeStrategy(BaseStrategy):
 
             logger.info(
                 f"🔔 [{self.symbol}] 检测到反向开仓信号 #{self.close_signal_count}:\n"
-                f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
-                f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms} ms)\n"
+                f"   延迟_a: {signal_delay_ms_a:.2f} ms (阈值: {self.max_signal_delay_ms_a} ms)\n"
+                f"   延迟_b: {signal_delay_ms_b:.2f} ms (阈值: {self.max_signal_delay_ms_b} ms)\n"
                 f"   {self.exchange_a.exchange_name}_ask: ${prices.exchange_a_ask}\n"
                 f"   {self.exchange_a.exchange_name}_ask_size: {prices.exchange_a_ask_size}\n"
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"

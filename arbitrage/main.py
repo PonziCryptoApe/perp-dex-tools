@@ -293,6 +293,9 @@ async def main():
     parser.add_argument('--exchange-b-slippage', type=float, default=None, help='交易所B的滑点')
     parser.add_argument('--lighter-reconnect-base-delay', type=float, default=0.3, help='Lighter WS 重连基础等待秒数（默认0.3）')
     parser.add_argument('--lighter-reconnect-max-delay', type=float, default=10.0, help='Lighter WS 重连最大等待秒数（默认10）')
+    parser.add_argument('--max-signal-delay-ms', type=int, default=200, help='交易所信号延迟总阈值（默认200ms）')
+    parser.add_argument('--max-signal-delay-ms-a', type=int, default=None, help='交易所 A 信号延迟阈值（ms，不传则使用 --max-signal-delay-ms）')
+    parser.add_argument('--max-signal-delay-ms-b', type=int, default=None, help='交易所 B 信号延迟阈值（ms，不传则使用 --max-signal-delay-ms）')
     parser.add_argument('--max-std-multiplier', type=float, default=4.0, help='标准差的最大系数')
     parser.add_argument('--min-std-multiplier', type=float, default=0.0, help='标准差的最小系数')
     parser.add_argument('--edge-filter', choices=['on', 'off'], default=None, help='边际二次过滤开关（默认读取配置，配置缺失时为 off）')
@@ -308,6 +311,12 @@ async def main():
         parser.error("--lighter-reconnect-max-delay 必须大于 0")
     if args.lighter_reconnect_max_delay < args.lighter_reconnect_base_delay:
         parser.error("--lighter-reconnect-max-delay 不能小于 --lighter-reconnect-base-delay")
+    if args.max_signal_delay_ms <= 0:
+        parser.error("--max-signal-delay-ms 必须大于 0")
+    if args.max_signal_delay_ms_a is not None and args.max_signal_delay_ms_a <= 0:
+        parser.error("--max-signal-delay-ms-a 必须大于 0")
+    if args.max_signal_delay_ms_b is not None and args.max_signal_delay_ms_b <= 0:
+        parser.error("--max-signal-delay-ms-b 必须大于 0")
     if args.min_edge_bps is not None and args.min_edge_bps < 0:
         parser.error("--min-edge-bps 不能小于 0")
     if args.edge_base_cost_bps is not None and args.edge_base_cost_bps < 0:
@@ -456,6 +465,8 @@ async def main():
         f"  交易所 B 滑点: {exchange_b_slippage or '--'}\n"
         f"  Lighter 重连基础等待: {args.lighter_reconnect_base_delay}s\n"
         f"  Lighter 重连最大等待: {args.lighter_reconnect_max_delay}s\n"
+        f"  信号延迟A阈值: {args.max_signal_delay_ms_a if args.max_signal_delay_ms_a is not None else args.max_signal_delay_ms} ms\n"
+        f"  信号延迟B阈值: {args.max_signal_delay_ms_b if args.max_signal_delay_ms_b is not None else args.max_signal_delay_ms} ms\n"
         f"  边际二次过滤: {'启用' if edge_filter_enabled else '禁用'}\n"
         f"  最小安全边际: {min_edge_bps:.2f} bps\n"
         f"  基础成本估计: {edge_base_cost_bps:.2f} bps\n"
@@ -537,6 +548,8 @@ async def main():
         lark_bot=lark_bot,
         monitor_only=monitor_only,  # ✅ 传递 monitor_only 参数
         trade_logger=trade_logger,  # ✅ 传递交易日志记录器
+        max_signal_delay_ms_a=args.max_signal_delay_ms_a if args.max_signal_delay_ms_a is not None else args.max_signal_delay_ms,
+        max_signal_delay_ms_b=args.max_signal_delay_ms_b if args.max_signal_delay_ms_b is not None else args.max_signal_delay_ms,
         min_depth_quantity=min_depth_quantity,  # ✅ 传递最小深度数量
         accumulate_mode=accumulate_mode,
         max_position=max_position,
