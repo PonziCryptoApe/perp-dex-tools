@@ -795,10 +795,10 @@ class VariationalAdapter(ExchangeAdapter):
                 # 启动初期或无活动订单时，portfolio WS 推来的是已有持仓快照，
                 if not self.current_order_id:
                     self.position_is_full = self.position_size != Decimal('0')
-                    logger.info(
-                        f"📊 Variational 持仓快照更新: size={self.position_size}, "
-                        f"avg_entry={position_data.get('position_info', {'avg_entry_price': '0'}).get('avg_entry_price', '0')}"
-                    )
+                    # logger.info(
+                    #     f"📊 Variational 持仓快照更新: size={self.position_size}, "
+                    #     f"avg_entry={position_data.get('position_info', {'avg_entry_price': '0'}).get('avg_entry_price', '0')}"
+                    # )
                     return
                 
                 # ✅ 部分成交

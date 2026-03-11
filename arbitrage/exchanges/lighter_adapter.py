@@ -338,7 +338,7 @@ class LighterAdapter(ExchangeAdapter):
             "update/market_stats",
             "snapshot/market_stats",
         ]:
-            logger.debug(f"📊 收到 Lighter market_stats 消息: {self.symbol} type={msg_type}")
+            # logger.debug(f"📊 收到 Lighter market_stats 消息: {self.symbol} type={msg_type}")
             self._handle_lighter_market_stats(data)
                 
         else:
@@ -451,10 +451,10 @@ class LighterAdapter(ExchangeAdapter):
                     "✅ 已收到 Lighter market_stats: "
                     f"mark_price={mark_price}, index_price={index_price}"
                 )
-            logger.debug(
-                "📊 Lighter market_stats 更新: "
-                f"mark_price={mark_price}, index_price={index_price}"
-            )
+            # logger.debug(
+            #     "📊 Lighter market_stats 更新: "
+            #     f"mark_price={mark_price}, index_price={index_price}"
+            # )
         except Exception as e:
             logger.exception(f"❌ 处理 Lighter market_stats 失败: {e}")
 
