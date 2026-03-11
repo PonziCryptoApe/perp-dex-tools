@@ -508,7 +508,7 @@ class HedgeStrategy(BaseStrategy):
                     logger.warning(
                         "🛡️ 锁定动态仓位上限: "
                         f"level={level_text}, ratio={decision_ratio}, "
-                        f"weak={weak_exchange or '--'}"
+                        f"弱腿交易所={weak_exchange or '--'}"
                     )
                 elif decision_ratio < self._locked_risk_cap_ratio:
                     old_ratio = self._locked_risk_cap_ratio
@@ -518,7 +518,7 @@ class HedgeStrategy(BaseStrategy):
                     logger.warning(
                         "🛡️ 收紧动态仓位上限锁: "
                         f"old_ratio={old_ratio}, new_ratio={decision_ratio}, "
-                        f"level={level_text}, weak={weak_exchange or '--'}"
+                        f"level={level_text}, 弱腿交易所={weak_exchange or '--'}"
                     )
 
             applied_ratio = decision_ratio
@@ -536,8 +536,8 @@ class HedgeStrategy(BaseStrategy):
                             "🛡️ 动态仓位上限保持锁定: "
                             f"level={level_text}, decision_ratio={decision_ratio}, "
                             f"locked_ratio={self._locked_risk_cap_ratio}, "
-                            f"weak={weak_exchange or '--'}, "
-                            f"lock_source={self._locked_risk_cap_level or '--'}/"
+                            f"弱腿交易所={weak_exchange or '--'}, "
+                            f"锁来源={self._locked_risk_cap_level or '--'}/"
                             f"{self._locked_risk_cap_exchange or '--'}"
                         )
                         self._last_lock_override_key = lock_override_key
@@ -550,14 +550,20 @@ class HedgeStrategy(BaseStrategy):
 
         current_effective = self.position_manager.get_effective_max_position()
         if self._last_effective_max_position != current_effective:
-            weak_exchange_text = f", weak={weak_exchange}" if weak_exchange else ""
+            weak_exchange_text = f", 弱腿交易所={weak_exchange}" if weak_exchange else ""
             ratio_text = decision_ratio if self.risk_control_enabled else Decimal("1")
             lock_text = ""
             if self._locked_risk_cap_ratio is not None:
-                lock_text = f", locked_ratio={self._locked_risk_cap_ratio}"
+                lock_text = f", 锁定上限比例={self._locked_risk_cap_ratio}"
+            previous_effective = (
+                self._last_effective_max_position
+                if self._last_effective_max_position is not None
+                else base_max_position
+            )
             logger.warning(
-                f"🛡️ 更新有效最大仓位: level={level_text}, "
-                f"base={base_max_position}, ratio={ratio_text}, effective={current_effective}"
+                f"🛡️ 更新有效最大仓位: 等级={level_text}, "
+                f"基础最大仓位={base_max_position}, 动态上限比例={ratio_text}, "
+                f"有效最大仓位={previous_effective}->{current_effective}"
                 f"{weak_exchange_text}{lock_text}"
             )
             self._last_effective_max_position = current_effective

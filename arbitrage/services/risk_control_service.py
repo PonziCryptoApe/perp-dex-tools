@@ -112,6 +112,7 @@ class RiskControlService:
         self._latest_decision = RiskDecision()
         self._last_snapshot_ts = 0.0
         self._last_status_key: Optional[tuple] = None
+        self._last_status_decision: Optional[RiskDecision] = None
 
     async def start(self):
         """启动风控后台任务。"""
@@ -405,39 +406,72 @@ class RiskControlService:
         return RiskLevel.NORMAL, ""
 
     def _log_status_change(self, decision: RiskDecision):
+        previous_decision = self._last_status_decision
         status_key = (
             decision.level,
             decision.block_open,
             decision.need_reduce,
             str(decision.target_position_ratio),
-            decision.reason,
+            str(decision.max_position_ratio),
+            decision.weak_exchange,
         )
         if status_key == self._last_status_key:
             return
 
+        previous_level = previous_decision.level.name if previous_decision else "INIT"
+        previous_block_open = previous_decision.block_open if previous_decision else "--"
+        previous_need_reduce = previous_decision.need_reduce if previous_decision else "--"
+        previous_target_ratio = (
+            previous_decision.target_position_ratio if previous_decision else "--"
+        )
+        previous_max_ratio = previous_decision.max_position_ratio if previous_decision else "--"
+        previous_weak = previous_decision.weak_exchange if previous_decision else "--"
+        current_weak = decision.weak_exchange or "--"
+
         logger.warning(
             "🛡️ 风控状态变更: "
-            f"level={decision.level.name}, block_open={decision.block_open}, "
-            f"need_reduce={decision.need_reduce}, target_ratio={decision.target_position_ratio}, "
-            f"max_ratio={decision.max_position_ratio}, weak={decision.weak_exchange or '--'}, "
-            f"cap_a={decision.exchange_a_cap_ratio}, cap_b={decision.exchange_b_cap_ratio}, "
-            f"reason={decision.reason or '--'}, "
+            f"等级={previous_level}->{decision.level.name}, "
+            f"禁止增仓={previous_block_open}->{decision.block_open}, "
+            f"需要减仓={previous_need_reduce}->{decision.need_reduce}, "
+            f"目标仓位比例={previous_target_ratio}->{decision.target_position_ratio}, "
+            f"动态上限比例={previous_max_ratio}->{decision.max_position_ratio}, "
+            f"弱腿交易所={previous_weak}->{current_weak}, "
+            f"A侧上限比例={decision.exchange_a_cap_ratio}, B侧上限比例={decision.exchange_b_cap_ratio}, "
+            f"原因={decision.reason or '--'}, "
             f"{self._format_snapshot_brief('A', decision.exchange_a_snapshot)}, "
             f"{self._format_snapshot_brief('B', decision.exchange_b_snapshot)}"
         )
         self._last_status_key = status_key
-        if self.lark_bot is not None and decision.reason:
-            asyncio.create_task(self._send_lark_notice(decision))
+        self._last_status_decision = self._clone_decision(decision)
+        if self.lark_bot is not None:
+            asyncio.create_task(self._send_lark_notice(previous_decision, decision))
 
-    async def _send_lark_notice(self, decision: RiskDecision):
+    async def _send_lark_notice(
+        self,
+        previous_decision: Optional[RiskDecision],
+        decision: RiskDecision,
+    ):
         try:
+            previous_level = previous_decision.level.name if previous_decision else "INIT"
+            previous_block_open = previous_decision.block_open if previous_decision else "--"
+            previous_need_reduce = previous_decision.need_reduce if previous_decision else "--"
+            previous_target_ratio = (
+                previous_decision.target_position_ratio if previous_decision else "--"
+            )
+            previous_max_ratio = previous_decision.max_position_ratio if previous_decision else "--"
+            previous_weak = previous_decision.weak_exchange if previous_decision else "--"
+            current_weak = decision.weak_exchange or "--"
             await self.lark_bot.send_text(
                 "🛡️ 风控状态变更\n"
-                f"等级: {decision.level.name}\n"
-                f"禁止开仓: {decision.block_open}\n"
-                f"需要减仓: {decision.need_reduce}\n"
-                f"目标仓位比例: {decision.target_position_ratio}\n"
-                f"原因: {decision.reason}"
+                f"等级: {previous_level} -> {decision.level.name}\n"
+                f"禁止增加仓位: {previous_block_open} -> {decision.block_open}\n"
+                f"需要减仓: {previous_need_reduce} -> {decision.need_reduce}\n"
+                f"目标仓位比例: {previous_target_ratio} -> {decision.target_position_ratio}\n"
+                f"动态上限比例: {previous_max_ratio} -> {decision.max_position_ratio}\n"
+                f"弱腿交易所: {previous_weak} -> {current_weak}\n"
+                f"原因: {decision.reason or '--'}\n"
+                f"{self._format_snapshot_brief('A', decision.exchange_a_snapshot)}\n"
+                f"{self._format_snapshot_brief('B', decision.exchange_b_snapshot)}"
             )
         except Exception as e:
             logger.warning(f"⚠️ 发送风控飞书通知失败: {e}")
@@ -579,10 +613,10 @@ class RiskControlService:
         if snapshot is None:
             return f"{label}=--"
         return (
-            f"{label}({snapshot.exchange_name}):pos={snapshot.position_size},"
-            f"mark={snapshot.mark_price},"
-            f"liq={snapshot.liquidation_price if snapshot.liquidation_price is not None else '--'},"
-            f"dist={self._format_pct(snapshot.liq_distance_pct)}"
+            f"{label}({snapshot.exchange_name}):仓位={snapshot.position_size},"
+            f"标记价={snapshot.mark_price},"
+            f"清算价={snapshot.liquidation_price if snapshot.liquidation_price is not None else '--'},"
+            f"距清算价距离={self._format_pct(snapshot.liq_distance_pct)}"
         )
 
     def _extract_variational_liquidation_price(
