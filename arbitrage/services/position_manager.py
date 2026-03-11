@@ -43,7 +43,8 @@ class PositionManagerService:
         
         # ✅ 累计模式配置
         self.accumulate_mode = accumulate_mode
-        self.max_position = max_position
+        self._max_position = Decimal(str(max_position))
+        self._effective_max_position = Decimal(str(max_position))
         self.position_step = position_step
         
         # ✅ 当前累计仓位（正数=多头，负数=空头）
@@ -58,6 +59,35 @@ class PositionManagerService:
             f"   最大仓位: ±{max_position}\n"
             f"   单次交易量: {position_step}"
         )
+
+    @property
+    def max_position(self) -> Decimal:
+        """基础最大仓位上限（配置值）。"""
+        return self._max_position
+
+    @max_position.setter
+    def max_position(self, value: Decimal):
+        """更新基础最大仓位，并同步约束当前有效上限。"""
+        new_value = Decimal(str(value))
+        old_base = getattr(self, "_max_position", None)
+        old_effective = getattr(self, "_effective_max_position", None)
+        self._max_position = new_value
+
+        if old_base is None or old_effective is None or old_effective == old_base:
+            self._effective_max_position = new_value
+        else:
+            self._effective_max_position = min(old_effective, new_value)
+
+    def set_effective_max_position(self, value: Decimal):
+        """设置当前有效最大仓位，上限不会超过基础最大仓位。"""
+        effective = Decimal(str(value))
+        if effective < 0:
+            effective = Decimal('0')
+        self._effective_max_position = min(effective, self.max_position)
+
+    def get_effective_max_position(self) -> Decimal:
+        """获取当前有效最大仓位。"""
+        return self._effective_max_position
     
     def has_position(self) -> bool:
         """是否有持仓"""
@@ -91,12 +121,13 @@ class PositionManagerService:
         if not self.accumulate_mode:
             # ✅ 传统模式：没有持仓才能开仓
             return not self.has_position()
+        limit_position = self.get_effective_max_position()
         # ✅ 累计模式：检查是否超过阈值
         if direction == 'short':
             # 开空：Exchange A 卖出，Exchange B 买入
             # current_position_qty 会变得更负
             new_position = self.current_position_qty - self.position_step
-            can_open = new_position >= -self.max_position
+            can_open = new_position >= -limit_position
             
             if not can_open:
                 logger.warning(
@@ -108,7 +139,7 @@ class PositionManagerService:
             # 开多：Exchange A 买入，Exchange B 卖出
             # current_position_qty 会变得更正
             new_position = self.current_position_qty + self.position_step
-            can_open = new_position <= self.max_position
+            can_open = new_position <= limit_position
             
             if not can_open:
                 logger.warning(
@@ -130,13 +161,14 @@ class PositionManagerService:
         if not self.accumulate_mode:
             # ✅ 传统模式：有持仓才能平仓
             return self.has_position()
+        limit_position = self.get_effective_max_position()
         
         # ✅ 累计模式：检查是否超过阈值
         if direction == 'long':
             # Exchange A 买入（平空），Exchange B 卖出（平多）
             # 效果：current_position_qty += position_step
             new_position = self.current_position_qty + self.position_step
-            can_close = new_position <= self.max_position
+            can_close = new_position <= limit_position
             if not can_close:
                 logger.warning(
                     f"🚫 反向开仓后达到阈值，当前 {self.current_position_qty}, 禁止开多"
@@ -147,7 +179,7 @@ class PositionManagerService:
             # Exchange A 卖出（平多），Exchange B 买入（平空）
             # 效果：current_position_qty -= position_step（向空头方向移动）
             new_position = self.current_position_qty - self.position_step
-            can_close = new_position >= -self.max_position
+            can_close = new_position >= -limit_position
             if not can_close:
                 logger.warning(
                     f"🚫 反向开仓后达到阈值，当前 {self.current_position_qty}，禁止开空"
@@ -287,7 +319,8 @@ class PositionManagerService:
         self._log_close_trade(position, pnl_pct, signal_delay_ms_a, signal_delay_ms_b)
         
         # ✅ 计算仓位利用率
-        utilization = abs(self.current_position_qty / self.max_position * 100) if self.max_position > 0 else 0
+        effective_max_position = self.get_effective_max_position()
+        utilization = abs(self.current_position_qty / effective_max_position * 100) if effective_max_position > 0 else 0
         
         # logger.info(
         #     f"📝 累计仓位更新（平仓）:\n"
@@ -345,12 +378,14 @@ class PositionManagerService:
     
     def get_position_summary(self) -> dict:
         """获取仓位摘要"""
-        utilization = abs(self.current_position_qty / self.max_position * 100) if self.max_position > 0 else 0
+        effective_max_position = self.get_effective_max_position()
+        utilization = abs(self.current_position_qty / effective_max_position * 100) if effective_max_position > 0 else 0
         
         return {
             'mode': 'accumulate' if self.accumulate_mode else 'traditional',
             'current_qty': float(self.current_position_qty),
             'max_position': float(self.max_position),
+            'effective_max_position': float(effective_max_position),
             'position_step': float(self.position_step),
             'history_count': len(self.position_history),
             'utilization': round(utilization, 2),

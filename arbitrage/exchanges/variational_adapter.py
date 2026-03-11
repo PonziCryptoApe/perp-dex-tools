@@ -230,8 +230,8 @@ class VariationalAdapter(ExchangeAdapter):
 
             # ✅ 构造订单簿格式（兼容 PriceMonitorService）
             orderbook = {
-                'bids': [[float(bid_price), float(self.query_quantity)]],  # [price, size]
-                'asks': [[float(ask_price), float(self.query_quantity)]],
+                'bids': [[float(bid_price), float(q)]],  # [price, size]
+                'asks': [[float(ask_price), float(q)]],
                 'timestamp': fetch_start,  # 秒时间戳
                 'quote_id': quote_data.get('quote_id', None),
                 'fetch_duration': fetch_duration_ms,
@@ -249,6 +249,31 @@ class VariationalAdapter(ExchangeAdapter):
     async def get_latest_orderbook(self, quantity: Optional[Decimal]) -> Optional[Dict]:
         """获取最新订单簿"""
         return await self.fetch_orderbook(quantity)
+
+    async def _get_market_quote_id(self, quantity: Decimal, quote_id: Optional[str]) -> Optional[str]:
+        """
+        获取与目标下单数量匹配的 quote_id。
+
+        Variational 市价单实际按 quote_id 绑定的数量成交；当下单数量
+        与轮询缓存的 query_quantity 不一致时，必须重新拉取 quote。
+        """
+        if quantity == self.query_quantity and quote_id:
+            return quote_id
+
+        orderbook = await self.fetch_orderbook(quantity)
+        if not orderbook or not orderbook.get('quote_id'):
+            logger.error(
+                f"❌ 获取匹配数量的 quote_id 失败 ({self.symbol}): "
+                f"quantity={quantity}, fallback_quote_id={quote_id}"
+            )
+            return None
+
+        matched_quote_id = orderbook['quote_id']
+        logger.info(
+            f"💡 Variational 重新获取 quote_id: quantity={quantity}, "
+            f"quote_id={matched_quote_id[:8]}..."
+        )
+        return matched_quote_id
     
     async def place_open_order(
         self,
@@ -272,7 +297,8 @@ class VariationalAdapter(ExchangeAdapter):
         if retry_mode == 'opportunistic':
             await self.place_limit_order(side, quantity, price)
         else:
-            if quote_id is None:
+            market_quote_id = await self._get_market_quote_id(quantity, quote_id)
+            if market_quote_id is None:
                 #_quote_id为空，无法下单
                 logger.error(f"❌ 下单失败：缺少 quote_id ({self.symbol})")
                 return {
@@ -280,10 +306,10 @@ class VariationalAdapter(ExchangeAdapter):
                     'order_id': None,
                     'error': 'Missing quote_id'
                 }
-            logger.info(f"📤 Variational 下市价单: {self.symbol} {side} (quote_id: {quote_id})")
+            logger.info(f"📤 Variational 下市价单: {self.symbol} {side} (quote_id: {market_quote_id})")
             return await self.place_market_order(
                 side=side,
-                quote_id=quote_id,
+                quote_id=market_quote_id,
                 slippage=slippage
             )
     async def place_close_order(
@@ -308,7 +334,8 @@ class VariationalAdapter(ExchangeAdapter):
         if retry_mode == 'opportunistic':
             return await self.place_limit_order(side, quantity, price)
         else:
-            if quote_id is None:
+            market_quote_id = await self._get_market_quote_id(quantity, quote_id)
+            if market_quote_id is None:
                 #_quote_id为空，无法下单
                 logger.error(f"❌ 下单失败：缺少 quote_id ({self.symbol})")
                 return {
@@ -316,10 +343,10 @@ class VariationalAdapter(ExchangeAdapter):
                     'order_id': None,
                     'error': 'Missing quote_id'
                 }
-            logger.info(f"📤 Variational 下市价单: {self.symbol} {side} (quote_id: {quote_id})")
+            logger.info(f"📤 Variational 下市价单: {self.symbol} {side} (quote_id: {market_quote_id})")
             return await self.place_market_order(
                 side=side,
-                quote_id=quote_id,
+                quote_id=market_quote_id,
                 slippage=slippage
             )
 
@@ -753,6 +780,15 @@ class VariationalAdapter(ExchangeAdapter):
             if positions:
                 position_data = positions[0]
                 self.position_size = Decimal(position_data.get('position_info', {"qty": "0"}).get('qty', '0'))
+
+                # 启动初期或无活动订单时，portfolio WS 推来的是已有持仓快照，
+                if not self.current_order_id:
+                    self.position_is_full = self.position_size != Decimal('0')
+                    logger.info(
+                        f"📊 Variational 持仓快照更新: size={self.position_size}, "
+                        f"avg_entry={position_data.get('position_info', {'avg_entry_price': '0'}).get('avg_entry_price', '0')}"
+                    )
+                    return
                 
                 # ✅ 部分成交
                 if Decimal('0') < self.position_size < self.query_quantity and not self.position_is_full:

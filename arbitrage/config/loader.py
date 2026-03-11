@@ -24,6 +24,7 @@ class PairConfig:
     max_position: Decimal = Decimal('1.0')  # ✅ 新增：最大持仓
     dynamic_threshold: Dict[str, Any] = None  # ✅ 新增：动态阈值配置
     edge_filter: Dict[str, Any] = None  # ✅ 新增：边际二次过滤配置
+    risk_control: Dict[str, Any] = None  # ✅ 新增：账户风险控制配置
 
 
 def load_pair_config(pair_id: str) -> PairConfig:
@@ -87,6 +88,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
     
     dynamic_threshold = pair_data.get('dynamic_threshold', {})
     edge_filter = pair_data.get('edge_filter', {})
+    risk_control = pair_data.get('risk_control', {})
 
     return PairConfig(
         pair_id=pair_id,
@@ -104,6 +106,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
         max_position=max_position,
         dynamic_threshold=dynamic_threshold,
         edge_filter=edge_filter,
+        risk_control=risk_control,
     )
 
 def list_all_pairs() -> list:

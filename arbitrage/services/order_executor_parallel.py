@@ -652,7 +652,8 @@ class OrderExecutor:
         exchange_a_quote_id: Optional[str] = None,
         exchange_b_quote_id: Optional[str] = None,
         signal_trigger_time: Optional[float] = None,
-        actual_quantity: Optional[Decimal] = None
+        actual_quantity: Optional[Decimal] = None,
+        execution_context: str = 'strategy',
     ) -> Tuple[bool, Optional[Position]]:
         """
         执行开仓
@@ -673,6 +674,10 @@ class OrderExecutor:
         order_quantity = actual_quantity if actual_quantity is not None else self.quantity
 
         order_quantity = self._normalize_quantity(order_quantity, "开仓数量")
+        is_risk_reduce = execution_context == 'risk_reduce'
+        action_name = "风控减仓" if is_risk_reduce else "开仓"
+        action_start_name = "开始并行减仓（首次尝试）" if is_risk_reduce else "开始并行下单（首次尝试）"
+        action_success_name = "风控减仓成功" if is_risk_reduce else "开仓成功"
 
         symbol_a = self.exchange_a.symbol
         symbol_b = self.exchange_b.symbol
@@ -684,15 +689,22 @@ class OrderExecutor:
             signal_to_execution_delay = (execution_start_time - signal_trigger_time) * 1000
             logger.info(f"⏱️ 信号触发 → 开始执行: {symbol_a}/{symbol_b} | {signal_to_execution_delay:.2f} ms")
     
-        logger.info(
-            f"📤 执行开仓: {symbol_a}/{symbol_b} | "
-            f"{self.exchange_a.exchange_name} 开空 @ ${exchange_a_price}, "
-            f"{self.exchange_b.exchange_name} 开多 @ ${exchange_b_price}"
-        )
+        if is_risk_reduce:
+            logger.info(
+                f"📤 执行风控减仓: {symbol_a}/{symbol_b} | "
+                f"{self.exchange_a.exchange_name} 卖出减仓 @ ${exchange_a_price}, "
+                f"{self.exchange_b.exchange_name} 买入减仓 @ ${exchange_b_price}"
+            )
+        else:
+            logger.info(
+                f"📤 执行开仓: {symbol_a}/{symbol_b} | "
+                f"{self.exchange_a.exchange_name} 开空 @ ${exchange_a_price}, "
+                f"{self.exchange_b.exchange_name} 开多 @ ${exchange_b_price}"
+            )
         
         try:
             # ✅ 1. 并行下单（首次尝试）
-            logger.info("🚀 开始并行下单（首次尝试）...")
+            logger.info(f"🚀 {action_start_name}...")
 
             task_a = asyncio.create_task(
                 self.exchange_a.place_open_order(
@@ -826,7 +838,7 @@ class OrderExecutor:
                     success_a = True
                     
                     logger.info(
-                        f"✅ 开仓成功（A 所重试成功）:\n"
+                        f"✅ {action_success_name}（A 所重试成功）:\n"
                         f"   {self.exchange_a.exchange_name}: {retry_result_a.get('order_id')}\n"
                         f"   {self.exchange_b.exchange_name}: {order_b_result.get('order_id')}\n"
                         f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms"
@@ -878,7 +890,7 @@ class OrderExecutor:
                     success_b = True
                     
                     logger.info(
-                        f"✅ 开仓成功（B 所重试成功）:\n"
+                        f"✅ {action_success_name}（B 所重试成功）:\n"
                         f"   {self.exchange_a.exchange_name}: {order_a_result.get('order_id')}\n"
                         f"   {self.exchange_b.exchange_name}: {retry_result_b.get('order_id')}\n"
                         f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms\n"
@@ -971,19 +983,22 @@ class OrderExecutor:
 
                 if signal_trigger_time:
                     total_delay_ms = (execution_end_time - signal_trigger_time) * 1000
-                    logger.info(f"⏱️ 信号触发 → 完成开仓: {total_delay_ms:.2f} ms")
+                    logger.info(f"⏱️ 信号触发 → 完成{action_name}: {total_delay_ms:.2f} ms")
                 else:
                     total_delay_ms = None
-                    logger.info(f"⏱️ 完成开仓总耗时: {execution_delay_ms:.2f} ms")
+                    logger.info(f"⏱️ 完成{action_name}总耗时: {execution_delay_ms:.2f} ms")
 
                 slippage_a = -((actual_price_a - exchange_a_price) / exchange_a_price * 100).quantize(Decimal('0.0001'))
                 slippage_b = ((actual_price_b - exchange_b_price) / exchange_b_price * 100).quantize(Decimal('0.0001'))
                 total_slippage = slippage_a + slippage_b
                 
-                logger.info(f"✅ 开仓成功: {symbol_a}/{symbol_b}")
+                logger.info(f"✅ {action_success_name}: {symbol_a}/{symbol_b}")
                 logger.info(f"{self.exchange_a.exchange_name}: SELL {symbol_a} {balanced_qty_a}/{order_quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
                 logger.info(f"{self.exchange_b.exchange_name}: BUY {symbol_b} {balanced_qty_b}/{order_quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
-                logger.info(f'信号价差: {spread_pct:+.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { spread_pct - total_slippage:+.4f}%')
+                if is_risk_reduce:
+                    logger.info(f'减仓信号价差: {spread_pct:+.4f}%, 减仓总滑点: {total_slippage:+.4f}%')
+                else:
+                    logger.info(f'信号价差: {spread_pct:+.4f}%, 总滑点: {total_slippage:+.4f}%, 实际利润: { spread_pct - total_slippage:+.4f}%')
                 logger.info(
                     # f"✅ 开仓成功:\n"
                     # f"   {self.exchange_a.exchange_name}:\n"
@@ -1042,7 +1057,8 @@ class OrderExecutor:
         exchange_a_quote_id: Optional[str] = None,
         exchange_b_quote_id: Optional[str] = None,
         signal_trigger_time: Optional[float] = None,
-        close_quantity: Optional[Decimal] = None
+        close_quantity: Optional[Decimal] = None,
+        execution_context: str = 'strategy',
     ) -> Tuple[bool, Optional[Position]]:
         """
         执行平仓
@@ -1064,6 +1080,20 @@ class OrderExecutor:
         """
         symbol_a = self.exchange_a.symbol
         symbol_b = self.exchange_b.symbol
+        is_risk_reduce = execution_context == 'risk_reduce'
+        is_reverse_open = execution_context == 'reverse_open'
+        if is_risk_reduce:
+            action_name = "风控减仓"
+            action_start_name = "开始并行减仓（首次尝试）"
+            action_success_name = "风控减仓成功"
+        elif is_reverse_open:
+            action_name = "反向开仓"
+            action_start_name = "开始并行反向开仓（首次尝试）"
+            action_success_name = "反向开仓成功"
+        else:
+            action_name = "平仓"
+            action_start_name = "开始并行平仓（首次尝试）"
+            action_success_name = "平仓成功"
         # ✅ 记录开始执行时间
         execution_start_time = time.time()
         # ✅ 确定平仓数量
@@ -1086,16 +1116,31 @@ class OrderExecutor:
             signal_to_execution_delay = (execution_start_time - signal_trigger_time) * 1000
             logger.info(f"⏱️ 信号触发 → 开始执行: {symbol_a}/{symbol_b} | {signal_to_execution_delay:.2f} ms")
         
-        logger.info(
-            f"📤 执行平仓: {symbol_a}/{symbol_b}\n"
-            f"   平仓数量: {close_quantity} / {position.quantity}\n"
-            f"   {self.exchange_a.exchange_name} 平空 @ ${exchange_a_price}\n"
-            f"   {self.exchange_b.exchange_name} 平多 @ ${exchange_b_price}"
-        )
+        if is_risk_reduce:
+            logger.info(
+                f"📤 执行风控减仓: {symbol_a}/{symbol_b}\n"
+                f"   减仓数量: {close_quantity} / {position.quantity}\n"
+                f"   {self.exchange_a.exchange_name} 买入减仓 @ ${exchange_a_price}\n"
+                f"   {self.exchange_b.exchange_name} 卖出减仓 @ ${exchange_b_price}"
+            )
+        elif is_reverse_open:
+            logger.info(
+                f"📤 执行反向开仓: {symbol_a}/{symbol_b}\n"
+                f"   反向开仓数量: {close_quantity} / {position.quantity}\n"
+                f"   {self.exchange_a.exchange_name} 买入 @ ${exchange_a_price}\n"
+                f"   {self.exchange_b.exchange_name} 卖出 @ ${exchange_b_price}"
+            )
+        else:
+            logger.info(
+                f"📤 执行平仓: {symbol_a}/{symbol_b}\n"
+                f"   平仓数量: {close_quantity} / {position.quantity}\n"
+                f"   {self.exchange_a.exchange_name} 平空 @ ${exchange_a_price}\n"
+                f"   {self.exchange_b.exchange_name} 平多 @ ${exchange_b_price}"
+            )
         
         try:
             # ✅ 1. 并行下单（首次尝试）
-            logger.info("🚀 开始并行平仓（首次尝试）...")
+            logger.info(f"🚀 {action_start_name}...")
 
             task_a = asyncio.create_task(
                 self.exchange_a.place_close_order(
@@ -1188,7 +1233,7 @@ class OrderExecutor:
                     success_a = True
                     
                     logger.info(
-                        f"✅ 平仓成功（A 所重试成功）:\n"
+                        f"✅ {action_success_name}（A 所重试成功）:\n"
                         f"   {self.exchange_a.exchange_name}: {retry_result_a.get('order_id')}\n"
                         f"   {self.exchange_b.exchange_name}: {order_b_result.get('order_id')}\n"
                         f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms \n"
@@ -1241,7 +1286,7 @@ class OrderExecutor:
                     success_b = True
                     
                     logger.info(
-                        f"✅ 平仓成功（B 所重试成功）:\n"
+                        f"✅ {action_success_name}（B 所重试成功）:\n"
                         f"   {self.exchange_a.exchange_name}: {order_a_result.get('order_id')}\n"
                         f"   {self.exchange_b.exchange_name}: {retry_result_b.get('order_id')}\n"
                         f"   ⏱️ 总耗时: {(time.time() - execution_start_time) * 1000:.2f} ms\n"
@@ -1326,7 +1371,7 @@ class OrderExecutor:
 
                 if signal_trigger_time:
                     total_delay_ms = (execution_end_time - signal_trigger_time) * 1000
-                    logger.info(f"⏱️ 信号触发 → 完成平仓: {total_delay_ms:.2f} ms")
+                    logger.info(f"⏱️ 信号触发 → 完成{action_name}: {total_delay_ms:.2f} ms")
                     position.exit_execution_delay_ms = total_delay_ms
                 else:
                     total_delay_ms = None
@@ -1347,18 +1392,30 @@ class OrderExecutor:
                     slippage_a = quality_report['exit_slippage']['exchange_a']
                     slippage_b = quality_report['exit_slippage']['exchange_b']
                     total_slippage = slippage_a + slippage_b
-                    logger.info(f"✅ 反向开仓成功: {symbol_a}/{symbol_b}")
+                    logger.info(f"✅ {action_success_name if (is_risk_reduce or is_reverse_open) else '反向开仓成功'}: {symbol_a}/{symbol_b}")
                     logger.info(f"{self.exchange_a.exchange_name}: BUY {symbol_a} {balanced_qty_a}/{position.quantity} @ (${exchange_a_price} --> ${actual_price_a}, {slippage_a:+.4f}%) ({order_a_result.get('order_id')})")
                     logger.info(f"{self.exchange_b.exchange_name}: SELL {symbol_b} {balanced_qty_b}/{position.quantity} @ (${exchange_b_price} --> ${actual_price_b}, {slippage_b:+.4f}%) ({order_b_result.get('order_id')})")
                     # 平仓场景要使用“本次反向信号价差”，不能复用持仓里的开仓价差
                     close_signal_spread_pct = Decimal('0')
                     if exchange_a_price > 0 and exchange_b_price > 0:
                         close_signal_spread_pct = (exchange_b_price - exchange_a_price) / exchange_a_price * 100
-                    logger.info(
-                        f'信号价差: {close_signal_spread_pct:+.4f}%, '
-                        f'总滑点: {total_slippage:+.4f}%, '
-                        f'实际利润: {close_signal_spread_pct - total_slippage:+.4f}%'
-                    )
+                    if is_risk_reduce:
+                        logger.info(
+                            f'减仓信号价差: {close_signal_spread_pct:+.4f}%, '
+                            f'减仓总滑点: {total_slippage:+.4f}%'
+                        )
+                    elif is_reverse_open:
+                        logger.info(
+                            f'反向开仓信号价差: {close_signal_spread_pct:+.4f}%, '
+                            f'反向开仓总滑点: {total_slippage:+.4f}%, '
+                            f'实际利润: {close_signal_spread_pct - total_slippage:+.4f}%'
+                        )
+                    else:
+                        logger.info(
+                            f'信号价差: {close_signal_spread_pct:+.4f}%, '
+                            f'总滑点: {total_slippage:+.4f}%, '
+                            f'实际利润: {close_signal_spread_pct - total_slippage:+.4f}%'
+                        )
 
                     # logger.info(
                     #     f"✅ 反向开仓成功:\n"
@@ -1389,7 +1446,7 @@ class OrderExecutor:
                 else:
                     # ✅ 虚拟 Position：简化日志
                     logger.info(
-                        f"✅ 平仓成功 (反向开仓):\n"
+                        f"✅ {'风控减仓成功' if is_risk_reduce else ('反向开仓成功' if is_reverse_open else '平仓成功 (反向开仓)')}:\n"
                         f"   {self.exchange_a.exchange_name}:\n"
                         f"      订单 ID: {order_a_result.get('order_id')}\n"
                         f"      成交价格: ${actual_price_a}\n"

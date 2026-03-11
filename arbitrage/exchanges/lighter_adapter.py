@@ -9,7 +9,7 @@ import time
 import lighter
 import websockets
 from decimal import Decimal
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable, Dict, Any
 from .base import ExchangeAdapter
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,23 @@ class LighterAdapter(ExchangeAdapter):
         self._order_status_futures: Dict[int, asyncio.Future] = {}
         self._last_client_order_ms = 0
         self._client_order_seq = 0
+        # ✅ Lighter 账户统计（WS: user_stats）缓存
+        self._lighter_user_stats_raw: Dict[str, Any] = {}
+        self._lighter_user_stats_ts: float = 0.0
+        self._lighter_user_stats_seen: bool = False
+        self._lighter_user_stats_parsed: Dict[str, Optional[Decimal]] = {
+            'leverage': None,
+            'collateral': None,
+            'portfolio_value': None,
+        }
+        # ✅ Lighter 市场统计（WS: market_stats）缓存
+        self._lighter_market_stats_raw: Dict[str, Any] = {}
+        self._lighter_market_stats_ts: float = 0.0
+        self._lighter_market_stats_seen: bool = False
+        self._lighter_market_stats_parsed: Dict[str, Optional[Decimal]] = {
+            'mark_price': None,
+            'index_price': None,
+        }
         # ClientOrderIndex 上限：2^48 - 1（281474976710655）
         self._client_order_index_max = (1 << 48) - 1
         # 使用固定 epoch 降低时间戳位宽，保证 index 始终在 48 位内。
@@ -177,6 +194,12 @@ class LighterAdapter(ExchangeAdapter):
                     }
                     await ws.send(json.dumps(subscribe_msg))
                     logger.info(f"📡 已订阅 Lighter 订单簿: {self.symbol} market {self.market_index}")
+                    subscribe_market_stats_msg = {
+                        "type": "subscribe",
+                        "channel": f"market_stats/{self.market_index}"
+                    }
+                    await ws.send(json.dumps(subscribe_market_stats_msg))
+                    logger.info(f"📡 已订阅 Lighter 市场统计: {self.symbol} market {self.market_index}")
                     try:
 
                         # ✅ 新增：订阅订单更新流
@@ -251,6 +274,21 @@ class LighterAdapter(ExchangeAdapter):
         self.lighter_last_update_ts = 0.0
         self._order_book_fingerprint = None
         self.lighter_last_notify_ts = 0.0
+        self._lighter_user_stats_raw = {}
+        self._lighter_user_stats_ts = 0.0
+        self._lighter_user_stats_seen = False
+        self._lighter_user_stats_parsed = {
+            'leverage': None,
+            'collateral': None,
+            'portfolio_value': None,
+        }
+        self._lighter_market_stats_raw = {}
+        self._lighter_market_stats_ts = 0.0
+        self._lighter_market_stats_seen = False
+        self._lighter_market_stats_parsed = {
+            'mark_price': None,
+            'index_price': None,
+        }
     
     async def _process_lighter_message(self, data: dict):
         """
@@ -290,12 +328,190 @@ class LighterAdapter(ExchangeAdapter):
                 # logger.info(f"---------order-data---------{order_data}")
                 # 调用订单更新 handler
                 self._on_order_update(order_data)
+
+        elif msg_type in ["subscribed/user_stats", "update/user_stats", "snapshot/user_stats"] or channel.startswith("user_stats"):
+            logger.info(f"📊 收到 Lighter user_stats 消息: {self.symbol} type={msg_type}")
+            self._handle_lighter_user_stats(data)
+
+        elif channel.startswith("market_stats") or msg_type in [
+            "subscribed/market_stats",
+            "update/market_stats",
+            "snapshot/market_stats",
+        ]:
+            logger.debug(f"📊 收到 Lighter market_stats 消息: {self.symbol} type={msg_type}")
+            self._handle_lighter_market_stats(data)
                 
         else:
             # 未知消息类型
             if self.message_count <= 5:
                 logger.debug(f"⏭️ 跳过消息类型: {msg_type}")
-    
+
+    def _handle_lighter_user_stats(self, data: dict):
+        """处理 Lighter user_stats 消息并缓存关键风控字段"""
+        try:
+            # 常见结构：{"type":"update/user_stats","stats":{...}}
+            user_stats = data.get("stats")
+            if not isinstance(user_stats, dict):
+                # 兼容其它可能字段名
+                for key in ("user_stats", "stats", "data", "payload"):
+                    candidate = data.get(key)
+                    if isinstance(candidate, dict):
+                        user_stats = candidate
+                        break
+
+            # 仍未命中时，尝试将顶层当作 payload（排除通用元字段）
+            if not isinstance(user_stats, dict):
+                fallback = {
+                    k: v for k, v in data.items()
+                    if k not in {"type", "channel", "ts", "timestamp"}
+                }
+                if fallback:
+                    user_stats = fallback
+
+            if not isinstance(user_stats, dict) or not user_stats:
+                logger.debug(f"⏭️ user_stats 消息无有效 payload: {data}")
+                return
+
+            leverage = self._extract_nested_decimal(
+                user_stats,
+                ("leverage",),
+                ("total_stats", "leverage"),
+                ("cross_stats", "leverage"),
+            )
+            collateral = self._extract_nested_decimal(
+                user_stats,
+                ("collateral",),
+                ("balance",),
+                ("total_stats", "collateral"),
+            )
+            portfolio_value = self._extract_nested_decimal(
+                user_stats,
+                ("portfolio_value",),
+                ("total_stats", "portfolio_value"),
+            )
+
+            self._lighter_user_stats_raw = user_stats
+            self._lighter_user_stats_ts = time.time()
+            self._lighter_user_stats_parsed = {
+                'leverage': leverage,
+                'collateral': collateral,
+                'portfolio_value': portfolio_value,
+            }
+
+            if not self._lighter_user_stats_seen:
+                self._lighter_user_stats_seen = True
+                logger.info(
+                    "✅ 已收到 Lighter user_stats: "
+                    f"leverage={leverage}, collateral={collateral}, portfolio_value={portfolio_value}"
+                )
+            logger.debug(
+                "📊 Lighter user_stats 更新: "
+                f"leverage={leverage}, collateral={collateral}, portfolio_value={portfolio_value}"
+            )
+        except Exception as e:
+            logger.exception(f"❌ 处理 Lighter user_stats 失败: {e}")
+
+    def get_lighter_user_stats(self) -> Optional[dict]:
+        """获取最近一次 user_stats 缓存（供风控模块读取）"""
+        if not self._lighter_user_stats_seen:
+            return None
+        return {
+            'timestamp': self._lighter_user_stats_ts,
+            'raw': dict(self._lighter_user_stats_raw) if isinstance(self._lighter_user_stats_raw, dict) else {},
+            'parsed': dict(self._lighter_user_stats_parsed),
+        }
+
+    def _handle_lighter_market_stats(self, data: dict):
+        """处理 Lighter market_stats 消息并缓存标记价"""
+        try:
+            market_stats = self._extract_market_stats_payload(data)
+            if not isinstance(market_stats, dict) or not market_stats:
+                logger.debug(f"⏭️ market_stats 消息无有效 payload: {data}")
+                return
+
+            mark_price = self._extract_nested_decimal(
+                market_stats,
+                ("mark_price",),
+            )
+            index_price = self._extract_nested_decimal(
+                market_stats,
+                ("index_price",),
+            )
+
+            self._lighter_market_stats_raw = market_stats
+            self._lighter_market_stats_ts = time.time()
+            self._lighter_market_stats_parsed = {
+                'mark_price': mark_price,
+                'index_price': index_price,
+            }
+
+            if not self._lighter_market_stats_seen:
+                self._lighter_market_stats_seen = True
+                logger.info(
+                    "✅ 已收到 Lighter market_stats: "
+                    f"mark_price={mark_price}, index_price={index_price}"
+                )
+            logger.debug(
+                "📊 Lighter market_stats 更新: "
+                f"mark_price={mark_price}, index_price={index_price}"
+            )
+        except Exception as e:
+            logger.exception(f"❌ 处理 Lighter market_stats 失败: {e}")
+
+    def get_lighter_market_stats(self) -> Optional[dict]:
+        """获取最近一次 market_stats 缓存（供风控模块读取）"""
+        if not self._lighter_market_stats_seen:
+            return None
+        return {
+            'timestamp': self._lighter_market_stats_ts,
+            'raw': dict(self._lighter_market_stats_raw) if isinstance(self._lighter_market_stats_raw, dict) else {},
+            'parsed': dict(self._lighter_market_stats_parsed),
+        }
+
+    def _extract_market_stats_payload(self, data: dict) -> Any:
+        candidates = [
+            data.get("market_stats"),
+            data.get("stats"),
+            data.get("data"),
+            data.get("payload"),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return candidate
+        fallback = {
+            k: v for k, v in data.items()
+            if k not in {"type", "channel", "ts", "timestamp"}
+        }
+        return fallback
+
+    @staticmethod
+    def _extract_nested_value(data: dict, *paths: tuple[str, ...]):
+        for path in paths:
+            current = data
+            ok = True
+            for key in path:
+                if not isinstance(current, dict) or key not in current:
+                    ok = False
+                    break
+                current = current[key]
+            if ok:
+                return current
+        return None
+
+    @classmethod
+    def _extract_nested_decimal(cls, data: dict, *paths: tuple[str, ...]) -> Optional[Decimal]:
+        value = cls._extract_nested_value(data, *paths)
+        return cls._safe_decimal(value)
+
+    @staticmethod
+    def _safe_decimal(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
     async def _handle_lighter_snapshot(self, data: dict):
         """处理 Lighter 快照消息"""
         try:
@@ -424,7 +640,7 @@ class LighterAdapter(ExchangeAdapter):
             'asks': [[float(self.lighter_best_ask), ask_size]],
             'timestamp': ts,
             'poll_duration_ms': 0,  # WebSocket 无延迟
-            'mark_price': None  # Lighter 无该字段
+            'mark_price': self._lighter_market_stats_parsed.get('mark_price')
         }
         self.client.order_book = {
                     'bids': dict(self.lighter_order_book['bids']),
@@ -1030,10 +1246,39 @@ class LighterAdapter(ExchangeAdapter):
 
     async def get_latest_orderbook(self, quantity: Optional[Decimal]) -> Optional[Dict]:
         """获取最新订单簿"""
-        return await self.client.get_orderbook()
+        orderbook = self._orderbook or await self.client.get_orderbook()
+        if not isinstance(orderbook, dict):
+            return orderbook
+        merged_orderbook = dict(orderbook)
+        if merged_orderbook.get('mark_price') is None:
+            merged_orderbook['mark_price'] = self._lighter_market_stats_parsed.get('mark_price')
+        return merged_orderbook
     
     async def get_position(self, symbol: str) -> Optional[dict]:
         try :
+            position_snapshot = None
+            if hasattr(self.client, 'get_position_snapshot'):
+                try:
+                    position_snapshot = await self.client.get_position_snapshot()
+                except Exception:
+                    position_snapshot = None
+
+            if isinstance(position_snapshot, dict):
+                position_size = Decimal(str(position_snapshot.get('position', '0')))
+                sign = int(position_snapshot.get('sign', 1) or 1)
+                if position_size != 0:
+                    logger.info(
+                        f"📊 lighter 持仓:  {'+' if sign == 1 else '-'}{position_size} {position_snapshot.get('symbol', symbol)} @ {position_snapshot.get('avg_entry_price')}"
+                    )
+                    return {
+                        'symbol': symbol,
+                        'side': 'long' if sign == 1 else 'short',
+                        'size': position_size,
+                        'entry_price': position_snapshot.get('avg_entry_price'),
+                        'unrealized_pnl': position_snapshot.get('unrealized_pnl'),
+                        'liquidation_price': position_snapshot.get('liquidation_price'),
+                    }
+
             position = await self.client.get_position_info()
 
             if position and Decimal(position.position) != 0:
@@ -1046,6 +1291,7 @@ class LighterAdapter(ExchangeAdapter):
                     'size': Decimal(position.position),
                     'entry_price': position.avg_entry_price,
                     'unrealized_pnl': position.unrealized_pnl,
+                    'liquidation_price': getattr(position, 'liquidation_price', None),
                     }
             else:
                 logger.info(f"📊 {self.exchange_name} 无持仓: {symbol}")
@@ -1055,6 +1301,7 @@ class LighterAdapter(ExchangeAdapter):
                     'size': 0,
                     'entry_price': '--',
                     'unrealized_pnl': 0,
+                    'liquidation_price': None,
                 }
             
         except Exception as e:

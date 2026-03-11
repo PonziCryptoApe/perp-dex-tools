@@ -394,6 +394,7 @@ async def main():
     direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
     edge_filter_config = config.edge_filter if hasattr(config, 'edge_filter') and isinstance(config.edge_filter, dict) else {}
+    risk_control_config = config.risk_control if hasattr(config, 'risk_control') and isinstance(config.risk_control, dict) else {}
 
     edge_filter_enabled = edge_filter_config.get('enabled', False)
     if args.edge_filter is not None:
@@ -436,6 +437,15 @@ async def main():
     dt_max_std_multiplier = dynamic_threshold.get('max_std_multiplier', '--') if isinstance(dynamic_threshold, dict) else '--'
     dt_min_std_multiplier = dynamic_threshold.get('min_std_multiplier', '--') if isinstance(dynamic_threshold, dict) else '--'
     dt_enabled_text = '启用' if isinstance(dynamic_threshold, dict) and dynamic_threshold.get('enabled', False) else '禁用'
+    risk_control_enabled = bool(risk_control_config.get('enabled', False))  # 风控模块总开关
+    risk_poll_interval = float(risk_control_config.get('poll_interval_seconds', 1.0))  # 风控后台轮询间隔（秒）
+    risk_stale_after = float(risk_control_config.get('stale_after_seconds', 3.0))  # 风控快照过期判定阈值（秒）
+    risk_reduce_ratio = float(risk_control_config.get('reduce_position_ratio', 0.5))  # 进入 REDUCE 后目标仓位比例
+    risk_stop_ratio = float(risk_control_config.get('stop_position_ratio', 0.0))  # 进入 STOP 后目标仓位比例
+    risk_reduce_cooldown = float(risk_control_config.get('reduce_cooldown_seconds', 5.0))  # 两次风控主动减仓的最小间隔（秒）
+    risk_liq_distance_warn = float(risk_control_config.get('liq_distance_warn', 0.20))  # 离清算价距离 WARN 阈值
+    risk_liq_distance_reduce = float(risk_control_config.get('liq_distance_reduce', 0.10))  # 离清算价距离 REDUCE 阈值
+    risk_liq_distance_stop = float(risk_control_config.get('liq_distance_stop', 0.05))  # 离清算价距离 STOP 阈值
 
     logger.info(
         f"\n"
@@ -473,6 +483,13 @@ async def main():
         f"  手续费估计:   {edge_fee_bps:.2f} bps\n"
         f"  延迟风险系数: {edge_latency_bps_per_100ms:.2f} bps/100ms\n"
         f"  延迟免惩罚阈值: {edge_latency_free_ms:.0f} ms\n"
+        f"  风控模块:     {'启用' if risk_control_enabled else '禁用'}\n"
+        f"  风控轮询间隔: {risk_poll_interval:.2f}s\n"
+        f"  风控过期阈值: {risk_stale_after:.2f}s\n"
+        f"  风控减仓冷却: {risk_reduce_cooldown:.2f}s\n"
+        f"  风控减仓目标: {risk_reduce_ratio:.2f}\n"
+        f"  风控清仓目标: {risk_stop_ratio:.2f}\n"
+        f"  清算距离阈值: WARN={risk_liq_distance_warn:.2%} REDUCE={risk_liq_distance_reduce:.2%} STOP={risk_liq_distance_stop:.2%}\n"
         f"{'='*60}\n"
     )
     
@@ -563,6 +580,7 @@ async def main():
         edge_fee_bps=edge_fee_bps,
         edge_latency_bps_per_100ms=edge_latency_bps_per_100ms,
         edge_latency_free_ms=edge_latency_free_ms,
+        risk_control=risk_control_config,
     )
     logger.info("✅ 策略创建成功\n")
     # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========

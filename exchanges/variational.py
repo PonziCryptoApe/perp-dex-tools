@@ -51,6 +51,7 @@ class VariationalClient(BaseExchangeClient):
         # Authentication
         self.auth_token = None
         self.cookies = None
+        self._request_lock = asyncio.Lock()
         # 为 Variational API 使用 cloudscraper
         self.scraper = cloudscraper.create_scraper(
             browser='chrome',                  # 模仿 Chrome
@@ -77,6 +78,11 @@ class VariationalClient(BaseExchangeClient):
         # ✅ 添加连接状态标志
         self._portfolio_ws_connected = False
         self._portfolio_ws_lock = threading.Lock()
+        self._portfolio_snapshot_lock = threading.Lock()
+        self._portfolio_snapshot_raw = {}
+        self._portfolio_snapshot_normalized = {}
+        self._portfolio_snapshot_seen = False
+        self._portfolio_snapshot_ts = 0.0
         
         # 订单簿和状态管理
         self.orderbook = None
@@ -141,20 +147,26 @@ class VariationalClient(BaseExchangeClient):
     async def _make_var_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
         """使用 cloudscraper 发起 Variational API 请求"""
         loop = asyncio.get_event_loop()
+        request_kwargs = dict(kwargs)
+        cookies = request_kwargs.get("cookies")
+        if isinstance(cookies, dict):
+            # cloudscraper/requests 会在请求过程中遍历 cookies；这里复制一份，避免共享字典并发修改。
+            request_kwargs["cookies"] = dict(cookies)
         
         try:
-            if method.upper() == 'POST':
-                response = await loop.run_in_executor(
-                    None, 
-                    lambda: self.scraper.post(url, **kwargs)
-                )
-            elif method.upper() == 'GET':
-                response = await loop.run_in_executor(
-                    None, 
-                    lambda: self.scraper.get(url, **kwargs)
-                )
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+            async with self._request_lock:
+                if method.upper() == 'POST':
+                    response = await loop.run_in_executor(
+                        None, 
+                        lambda: self.scraper.post(url, **request_kwargs)
+                    )
+                elif method.upper() == 'GET':
+                    response = await loop.run_in_executor(
+                        None, 
+                        lambda: self.scraper.get(url, **request_kwargs)
+                    )
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
             
             response.raise_for_status()
             return response.json()
@@ -475,17 +487,239 @@ class VariationalClient(BaseExchangeClient):
         """处理投资组合 WebSocket 消息"""
         try:
             data = json.loads(message)
+            portfolio_data = self._extract_portfolio_snapshot(data)
+
+            if portfolio_data is not None:
+                with self._portfolio_snapshot_lock:
+                    merged_snapshot = self._merge_portfolio_snapshot(
+                        self._portfolio_snapshot_normalized if self._portfolio_snapshot_seen else None,
+                        portfolio_data,
+                    )
+                    self._portfolio_snapshot_raw = dict(data) if isinstance(data, dict) else {}
+                    self._portfolio_snapshot_normalized = merged_snapshot
+                    self._portfolio_snapshot_seen = True
+                    self._portfolio_snapshot_ts = time.time()
+
             # 处理仓位更新
-            if 'positions' in data:
+            positions = portfolio_data.get('positions') if isinstance(portfolio_data, dict) else None
+            if positions is None and isinstance(data, dict):
+                positions = data.get('positions')
+
+            if positions is not None:
                 # for position_update in data['positions']:
                     if self._order_update_handler:
-                        result = self._order_update_handler(data['positions'])
+                        result = self._order_update_handler(positions)
                         if asyncio.iscoroutine(result):
                             asyncio.run(result)
         except json.JSONDecodeError:
             self.logger.log(f"【VARIATIONAL】Failed to parse portfolio message: {message[:200]}", "WARNING")
         except Exception as e:
             self.logger.log(f"【VARIATIONAL】Error handling portfolio message: {e}", "ERROR")
+
+    def _extract_portfolio_snapshot(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """从 portfolio WS 消息中提取账户快照。"""
+        if not isinstance(data, dict):
+            return None
+
+        portfolio_data = self._find_portfolio_payload(data)
+        if not isinstance(portfolio_data, dict):
+            return None
+
+        has_risk_fields = any(
+            key in portfolio_data
+            for key in ('balance', 'upnl', 'positions', 'published_at', 'leverage')
+        )
+        if not has_risk_fields:
+            return None
+
+        normalized_positions = self._normalize_portfolio_positions(
+            portfolio_data.get('positions')
+        )
+        snapshot = {
+            'balance': portfolio_data.get('balance'),
+            'upnl': portfolio_data.get('upnl'),
+            'positions': normalized_positions,
+            'published_at': portfolio_data.get('published_at') or data.get('published_at'),
+        }
+        if 'leverage' in portfolio_data:
+            snapshot['leverage'] = portfolio_data.get('leverage')
+        if 'portfolio_value' in portfolio_data:
+            snapshot['portfolio_value'] = portfolio_data.get('portfolio_value')
+        if normalized_positions is None:
+            self.logger.log(
+                f"【VARIATIONAL】Portfolio WS 快照缺少 positions，payload keys={list(portfolio_data.keys())[:10]}",
+                "INFO"
+            )
+        return snapshot
+
+    def _merge_portfolio_snapshot(
+        self,
+        previous: Optional[Dict[str, Any]],
+        current: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """合并 portfolio 增量消息，避免局部更新把完整快照冲掉。"""
+        if not isinstance(previous, dict):
+            return dict(current)
+
+        merged = dict(previous)
+        for key in ("balance", "upnl", "published_at", "leverage", "portfolio_value"):
+            current_value = current.get(key)
+            if current_value is not None:
+                merged[key] = current_value
+
+        merged["positions"] = self._merge_portfolio_positions(
+            previous.get("positions"),
+            current.get("positions"),
+        )
+        return merged
+
+    def _merge_portfolio_positions(
+        self,
+        previous_positions: Any,
+        current_positions: Any,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """按标的合并仓位，保留旧快照中的清算价等稳定字段。"""
+        normalized_previous = self._normalize_portfolio_positions(previous_positions) or []
+        normalized_current = self._normalize_portfolio_positions(current_positions)
+        if normalized_current is None:
+            return normalized_previous or None
+
+        merged_by_key: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+
+        for entry in normalized_previous:
+            key = self._portfolio_position_merge_key(entry)
+            if key not in merged_by_key:
+                order.append(key)
+            merged_by_key[key] = entry
+
+        for entry in normalized_current:
+            key = self._portfolio_position_merge_key(entry)
+            previous_entry = merged_by_key.get(key)
+            merged_entry = self._deep_merge_position_entry(previous_entry, entry)
+            if key not in merged_by_key:
+                order.append(key)
+            merged_by_key[key] = merged_entry
+
+        return [merged_by_key[key] for key in order]
+
+    @staticmethod
+    def _portfolio_position_merge_key(entry: Dict[str, Any]) -> str:
+        """生成仓位合并键，优先按标的匹配。"""
+        if not isinstance(entry, dict):
+            return "unknown"
+
+        position_info = entry.get("position_info")
+        if isinstance(position_info, dict):
+            instrument = position_info.get("instrument")
+            if isinstance(instrument, dict):
+                underlying = instrument.get("underlying")
+                instrument_type = instrument.get("instrument_type")
+                if underlying:
+                    return f"{instrument_type}:{underlying}"
+
+        symbol = entry.get("symbol")
+        if symbol:
+            return str(symbol)
+        return str(id(entry))
+
+    def _deep_merge_position_entry(
+        self,
+        previous: Optional[Dict[str, Any]],
+        current: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """浅层递归合并仓位字段，允许新值覆盖，空值回退旧值。"""
+        if not isinstance(previous, dict):
+            return dict(current)
+
+        merged = dict(previous)
+        for key, current_value in current.items():
+            previous_value = merged.get(key)
+            if isinstance(previous_value, dict) and isinstance(current_value, dict):
+                merged[key] = self._deep_merge_position_entry(previous_value, current_value)
+                continue
+            if current_value is not None:
+                merged[key] = current_value
+        return merged
+
+    def _find_portfolio_payload(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """递归查找真正承载 portfolio 风险字段的那层字典。"""
+        queue: List[Any] = []
+        preferred_keys = (
+            'pool_portfolio_result',
+            'portfolio',
+            'result',
+            'data',
+            'payload',
+        )
+        for key in preferred_keys:
+            value = data.get(key)
+            if isinstance(value, dict):
+                queue.append(value)
+
+        queue.append(data)
+        seen: set[int] = set()
+        best_with_positions: Optional[Dict[str, Any]] = None
+        best_risk_like: Optional[Dict[str, Any]] = None
+
+        while queue:
+            current = queue.pop(0)
+            if not isinstance(current, dict):
+                continue
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+
+            current_keys = set(current.keys())
+            has_positions_key = 'positions' in current_keys
+            has_risk_like = bool(current_keys & {'balance', 'upnl', 'positions', 'published_at', 'leverage'})
+
+            if has_positions_key:
+                positions_value = current.get('positions')
+                if isinstance(positions_value, list):
+                    return current
+                if best_with_positions is None:
+                    best_with_positions = current
+
+            if has_risk_like and best_risk_like is None:
+                best_risk_like = current
+
+            for value in current.values():
+                if isinstance(value, dict):
+                    queue.append(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            queue.append(item)
+
+        return best_with_positions or best_risk_like
+
+    @staticmethod
+    def _normalize_portfolio_positions(positions: Any) -> Optional[List[Dict[str, Any]]]:
+        """统一将 portfolio positions 归一化为 list[dict]。"""
+        if isinstance(positions, list):
+            return [item for item in positions if isinstance(item, dict)]
+        if isinstance(positions, dict):
+            normalized = []
+            for value in positions.values():
+                if isinstance(value, dict):
+                    normalized.append(value)
+                elif isinstance(value, list):
+                    normalized.extend(item for item in value if isinstance(item, dict))
+            return normalized
+        return None
+
+    def get_cached_portfolio_ws(self) -> Optional[Dict[str, Any]]:
+        """获取最近一次 portfolio WS 快照（供风控读取）。"""
+        with self._portfolio_snapshot_lock:
+            if not self._portfolio_snapshot_seen:
+                return None
+            return {
+                'timestamp': self._portfolio_snapshot_ts,
+                'raw': dict(self._portfolio_snapshot_raw) if isinstance(self._portfolio_snapshot_raw, dict) else {},
+                'portfolio': dict(self._portfolio_snapshot_normalized),
+            }
 
     def _on_portfolio_error(self, ws, error):
         """投资组合 WebSocket 错误"""
@@ -1019,7 +1253,8 @@ class VariationalClient(BaseExchangeClient):
                     "maintenance_margin": "0"
                 },
                 "balance": "1.889881",
-                "upnl": "0"
+                "upnl": "0",
+                "positions": []
             }
         """
         try:

@@ -6,6 +6,7 @@ import os
 import asyncio
 import time
 import logging
+import requests
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -523,6 +524,42 @@ class LighterClient(BaseExchangeClient):
                 return Decimal(position.position)
 
         return Decimal(0)
+
+    @query_retry(reraise=True)
+    async def _fetch_account_snapshot_with_retry(self) -> Dict[str, Any]:
+        """直接通过 RESTful 账户接口获取原始账户快照。"""
+        url = f"{self.base_url}/api/v1/account"
+        params = {
+            "by": "index",
+            "value": str(self.account_index),
+        }
+        headers = {"accept": "application/json"}
+
+        def _do_request():
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response.raise_for_status()
+            return response.json()
+
+        data = await asyncio.to_thread(_do_request)
+        if not isinstance(data, dict) or "accounts" not in data or not data["accounts"]:
+            self.logger.log("Failed to get account snapshot", "ERROR")
+            raise ValueError("Failed to get account snapshot")
+        return data["accounts"][0]
+
+    async def get_account_snapshot(self) -> Dict[str, Any]:
+        """获取 REST 账户原始快照。"""
+        return await self._fetch_account_snapshot_with_retry()
+
+    async def get_position_snapshot(self) -> Optional[Dict[str, Any]]:
+        """获取当前市场的 REST 持仓快照。"""
+        account = await self._fetch_account_snapshot_with_retry()
+        positions = account.get("positions", [])
+        current_market_id = str(self.config.contract_id)
+        for position in positions:
+            if str(position.get("market_id")) == current_market_id:
+                return position
+        return None
+
     async def get_position_info(self) -> Dict:
         positions = await self._fetch_positions_with_retry()
 
@@ -569,9 +606,9 @@ class LighterClient(BaseExchangeClient):
         return self.config.contract_id, self.config.tick_size
     
     async def get_portfolio(self):
-        balance_info = await self._fetch_accounts_with_retry()
+        balance_info = await self._fetch_account_snapshot_with_retry()
         return {
-                'balance': balance_info.collateral,
+                'balance': balance_info.get('collateral', '0'),
                 'upnl': '-'
             }
     @query_retry(reraise=True)

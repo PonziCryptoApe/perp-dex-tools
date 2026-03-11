@@ -8,7 +8,7 @@ import random
 import time
 import yaml
 import os
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
 from helpers.util import beijing_to_timestamp
@@ -18,6 +18,7 @@ from ..services.price_monitor import PriceMonitorService
 from ..services.position_manager import PositionManagerService
 from ..services.order_executor_parallel import OrderExecutor
 from ..services.dynamic_threshold import DynamicThresholdManager
+from ..services.risk_control_service import RiskControlService, RiskLevel
 from ..models.position import Position
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,8 @@ class HedgeStrategy(BaseStrategy):
         edge_base_cost_bps: float = 3.0,
         edge_fee_bps: float = 0.0,
         edge_latency_bps_per_100ms: float = 0.0,
-        edge_latency_free_ms: float = 120.0
+        edge_latency_free_ms: float = 120.0,
+        risk_control: Optional[dict] = None
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -84,6 +86,18 @@ class HedgeStrategy(BaseStrategy):
         self.edge_fee_bps = max(0.0, float(edge_fee_bps))
         self.edge_latency_bps_per_100ms = max(0.0, float(edge_latency_bps_per_100ms))
         self.edge_latency_free_ms = max(0.0, float(edge_latency_free_ms))
+        self.risk_control_config = risk_control if isinstance(risk_control, dict) else {}
+        self.risk_control_enabled = bool(self.risk_control_config.get('enabled', False))
+        self.risk_control_service = RiskControlService(
+            exchange_a=exchange_a,
+            exchange_b=exchange_b,
+            symbol_a=symbol_a,
+            symbol_b=symbol_b,
+            config=self.risk_control_config,
+            lark_bot=lark_bot
+        )
+        self._risk_reduce_cooldown_seconds = float(self.risk_control_config.get('reduce_cooldown_seconds', 5.0))
+        self._last_risk_reduce_time = 0.0
 
         self.start_vol_a = 0
         self.start_equity_a = 0
@@ -179,6 +193,11 @@ class HedgeStrategy(BaseStrategy):
         self._last_yaml_check_time = None
         self._yaml_check_interval = 60  # 每 60 秒检查一次 YAML 配置文件
         self._is_executed = False
+        self._last_effective_max_position: Optional[Decimal] = None
+        self._locked_risk_cap_ratio: Optional[Decimal] = None
+        self._locked_risk_cap_level: Optional[str] = None
+        self._locked_risk_cap_exchange: str = ""
+        self._last_lock_override_key: Optional[tuple] = None
         # self._last_threshold_check_time = None
         # 动态阈值管理器
         dt_config = dynamic_threshold
@@ -206,6 +225,7 @@ class HedgeStrategy(BaseStrategy):
             f"   Exchange B: {exchange_b.exchange_name}\n"
             f"   Monitor Only: {monitor_only}\n"
             f"   累计模式: {'✅ 启用' if accumulate_mode else '❌ 禁用'}\n"
+            f"   风控模块: {'✅ 启用' if self.risk_control_enabled else '❌ 禁用'}\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
@@ -220,6 +240,9 @@ class HedgeStrategy(BaseStrategy):
         
         # 启动价格监控
         await self.monitor.start()
+        # 启动后台风控（异步监控，不阻塞信号热路径）
+        if self.risk_control_enabled:
+            await self.risk_control_service.start()
         # ✅ 新增：启动时同步仓位
         if self.position_manager.accumulate_mode:
             logger.info("🔄 累计模式启动，同步交易所仓位...")
@@ -262,6 +285,8 @@ class HedgeStrategy(BaseStrategy):
         
         # 停止价格监控
         await self.monitor.stop()
+        if self.risk_control_enabled:
+            await self.risk_control_service.stop()
         
         logger.info(f"✅ 策略已停止: {self.strategy_name}")
 
@@ -320,6 +345,28 @@ class HedgeStrategy(BaseStrategy):
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
+            # ✅ 风控快照只读：热路径不做外部 IO
+            risk_block_open = False
+            risk_decision = None
+            if self.risk_control_enabled:
+                risk_decision = self.risk_control_service.get_latest_decision()
+                risk_block_open = risk_decision.block_open
+                effective_max_position = self._apply_risk_position_cap(risk_decision)
+                reduced, reduced_target_abs = await self._try_apply_dynamic_position_cap(
+                    prices,
+                    risk_decision,
+                    effective_max_position,
+                )
+                if reduced:
+                    return
+                if risk_decision.need_reduce:
+                    reduced = await self._try_apply_risk_reduction(
+                        prices,
+                        risk_decision.target_position_ratio,
+                        target_abs_override=reduced_target_abs,
+                    )
+                    if reduced:
+                        return
             # if self._last_threshold_check_time is None:
                 # self._last_threshold_check_time = time.time()
             # now = time.time()
@@ -356,11 +403,18 @@ class HedgeStrategy(BaseStrategy):
                     if self._is_executed is True:
                         logger.info('开仓信号已经执行过了，直接返回')
                         return
+                    if risk_block_open:
+                        return
                     # ✅ 检查开仓信号（如果可以开仓）
                     await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 else:
-                    # ✅ 优先检查平仓信号（如果可以平仓）
-                    await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    # ✅ 正仓位时，open 方向是减风险；0 仓位时 open 属于增风险
+                    if current_qty > 0:
+                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    elif not risk_block_open:
+                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    else:
+                        return
 
                         # ✅ 如果正在执行，跳过开仓检查
                     if self._executing_lock.locked():
@@ -368,6 +422,8 @@ class HedgeStrategy(BaseStrategy):
                     if self._is_executed is True:
                         logger.info('平仓已经执行过了，直接返回')
                         return 
+                    if risk_block_open:
+                        return
                     # ✅ 检查开仓信号（如果可以开仓）
                     await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 
@@ -375,6 +431,8 @@ class HedgeStrategy(BaseStrategy):
                 # ✅ 根据持仓状态决定检查哪种信号
                 if not self.position_manager.has_position():
                     # 无持仓，检查开仓信号
+                    if risk_block_open:
+                        return
                     await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
                 else:
                     # 有持仓，检查平仓信号
@@ -426,6 +484,271 @@ class HedgeStrategy(BaseStrategy):
         if ts_val > 1e10:
             ts_val = ts_val / 1000.0
         return ts_val
+
+    def _apply_risk_position_cap(self, risk_decision) -> Decimal:
+        """根据风控决策刷新当前有效最大仓位。"""
+        base_max_position = self.position_manager.max_position
+        level_name = getattr(risk_decision, "level", None)
+        level_text = level_name.name if level_name is not None else "--"
+        weak_exchange = getattr(risk_decision, "weak_exchange", "") if risk_decision else ""
+        decision_ratio = Decimal("1")
+        if not self.risk_control_enabled:
+            self._last_lock_override_key = None
+            effective_max_position = base_max_position
+        else:
+            decision_ratio = max(
+                Decimal("0"),
+                min(Decimal("1"), Decimal(str(getattr(risk_decision, "max_position_ratio", Decimal("1"))))),
+            )
+            if level_name in {RiskLevel.REDUCE, RiskLevel.STOP}:
+                if self._locked_risk_cap_ratio is None:
+                    self._locked_risk_cap_ratio = decision_ratio
+                    self._locked_risk_cap_level = level_text
+                    self._locked_risk_cap_exchange = weak_exchange
+                    logger.warning(
+                        "🛡️ 锁定动态仓位上限: "
+                        f"level={level_text}, ratio={decision_ratio}, "
+                        f"weak={weak_exchange or '--'}"
+                    )
+                elif decision_ratio < self._locked_risk_cap_ratio:
+                    old_ratio = self._locked_risk_cap_ratio
+                    self._locked_risk_cap_ratio = decision_ratio
+                    self._locked_risk_cap_level = level_text
+                    self._locked_risk_cap_exchange = weak_exchange
+                    logger.warning(
+                        "🛡️ 收紧动态仓位上限锁: "
+                        f"old_ratio={old_ratio}, new_ratio={decision_ratio}, "
+                        f"level={level_text}, weak={weak_exchange or '--'}"
+                    )
+
+            applied_ratio = decision_ratio
+            if self._locked_risk_cap_ratio is not None:
+                applied_ratio = min(applied_ratio, self._locked_risk_cap_ratio)
+                if decision_ratio > self._locked_risk_cap_ratio:
+                    lock_override_key = (
+                        level_text,
+                        str(decision_ratio),
+                        str(self._locked_risk_cap_ratio),
+                        weak_exchange,
+                    )
+                    if lock_override_key != self._last_lock_override_key:
+                        logger.warning(
+                            "🛡️ 动态仓位上限保持锁定: "
+                            f"level={level_text}, decision_ratio={decision_ratio}, "
+                            f"locked_ratio={self._locked_risk_cap_ratio}, "
+                            f"weak={weak_exchange or '--'}, "
+                            f"lock_source={self._locked_risk_cap_level or '--'}/"
+                            f"{self._locked_risk_cap_exchange or '--'}"
+                        )
+                        self._last_lock_override_key = lock_override_key
+                else:
+                    self._last_lock_override_key = None
+
+            effective_max_position = base_max_position * applied_ratio
+
+        self.position_manager.set_effective_max_position(effective_max_position)
+
+        current_effective = self.position_manager.get_effective_max_position()
+        if self._last_effective_max_position != current_effective:
+            weak_exchange_text = f", weak={weak_exchange}" if weak_exchange else ""
+            ratio_text = decision_ratio if self.risk_control_enabled else Decimal("1")
+            lock_text = ""
+            if self._locked_risk_cap_ratio is not None:
+                lock_text = f", locked_ratio={self._locked_risk_cap_ratio}"
+            logger.warning(
+                f"🛡️ 更新有效最大仓位: level={level_text}, "
+                f"base={base_max_position}, ratio={ratio_text}, effective={current_effective}"
+                f"{weak_exchange_text}{lock_text}"
+            )
+            self._last_effective_max_position = current_effective
+
+        return current_effective
+
+    async def _try_apply_dynamic_position_cap(
+        self,
+        prices: PriceSnapshot,
+        risk_decision,
+        effective_max_position: Decimal,
+    ) -> tuple[bool, Optional[Decimal]]:
+        """若当前仓位已超过动态上限，立即减仓到上限以下。"""
+        current_qty = self.position_manager.get_current_position_qty()
+        current_abs = abs(current_qty)
+        if current_abs <= Decimal("0"):
+            return False, None
+
+        base_max_position = abs(self.position_manager.max_position)
+        dynamic_target_abs = max(Decimal("0"), effective_max_position)
+        target_abs = dynamic_target_abs
+        if getattr(risk_decision, "need_reduce", False) and base_max_position > Decimal("0"):
+            reduce_ratio = max(
+                Decimal("0"),
+                min(Decimal("1"), Decimal(str(getattr(risk_decision, "target_position_ratio", Decimal("1"))))),
+            )
+            level_target_abs = base_max_position * reduce_ratio
+            target_abs = min(target_abs, level_target_abs)
+
+        if current_abs <= target_abs:
+            return False, target_abs
+
+        weak_exchange = getattr(risk_decision, "weak_exchange", "")
+        level_name = getattr(risk_decision, "level", None)
+        level_text = level_name.name if level_name is not None else "--"
+        reason_text = f"动态仓位上限({level_text})"
+        if weak_exchange:
+            reason_text = f"{reason_text}({weak_exchange})"
+        reduced = await self._try_apply_risk_reduction(
+            prices,
+            target_ratio=Decimal("1"),
+            target_abs_override=target_abs,
+            bypass_cooldown=True,
+            reason_text=reason_text,
+        )
+        return reduced, target_abs
+
+    async def _try_apply_risk_reduction(
+        self,
+        prices: PriceSnapshot,
+        target_ratio: Decimal,
+        target_abs_override: Optional[Decimal] = None,
+        bypass_cooldown: bool = False,
+        reason_text: str = "风控触发",
+    ) -> bool:
+        """
+        根据风控目标仓位比例执行减仓。
+
+        返回:
+            True: 本次执行了减仓（或监控模式下完成模拟减仓）
+            False: 本次未执行减仓
+        """
+        now = time.time()
+        if (
+            not bypass_cooldown
+            and now - self._last_risk_reduce_time < self._risk_reduce_cooldown_seconds
+        ):
+            logger.info(
+                f"🛡️ 跳过风控减仓: 仍在冷却中 "
+                f"({now - self._last_risk_reduce_time:.2f}s < {self._risk_reduce_cooldown_seconds:.2f}s)"
+            )
+            return False
+
+        if not self.position_manager.accumulate_mode:
+            logger.warning("⚠️ 风控减仓当前仅支持累计模式，传统模式仅执行开仓阻断")
+            return False
+
+        # 风控减仓只在有仓位时生效
+        current_qty = self.position_manager.get_current_position_qty()
+        current_abs = abs(current_qty)
+        if current_abs <= Decimal("0"):
+            logger.info("🛡️ 跳过风控减仓: 当前无持仓")
+            return False
+
+        # 目标绝对仓位按 max_position 比例计算，避免重复按“当前仓位”连环折半
+        if target_abs_override is not None:
+            target_abs = max(Decimal("0"), Decimal(str(target_abs_override)))
+        else:
+            max_position_abs = abs(self.position_manager.max_position)
+            if max_position_abs <= Decimal("0"):
+                target_abs = Decimal("0")
+            else:
+                ratio = max(Decimal("0"), min(Decimal("1"), Decimal(str(target_ratio))))
+                target_abs = max_position_abs * ratio
+
+        if current_abs <= target_abs:
+            logger.info(
+                f"🛡️ 跳过风控减仓: 当前仓位={current_qty:+.4f}, "
+                f"目标绝对仓位<={target_abs:.4f}"
+            )
+            return False
+
+        reduce_qty = current_abs - target_abs
+        if self.quantity_precision > 0:
+            reduce_qty = (reduce_qty / self.quantity_precision).to_integral_value(rounding=ROUND_DOWN) * self.quantity_precision
+
+        # 精度截断后无可执行数量
+        if reduce_qty <= Decimal("0"):
+            logger.info(
+                f"🛡️ 跳过风控减仓: 目标减仓量经精度截断后为 {reduce_qty:.4f}"
+            )
+            return False
+
+        # 保护：不可超过当前仓位
+        if reduce_qty > current_abs:
+            reduce_qty = current_abs
+
+        logger.warning(
+            f"🛡️ {reason_text}: 当前仓位={current_qty:+.4f}, 当前绝对仓位={current_abs:.4f}, "
+            f"目标绝对仓位<={target_abs:.4f}, "
+            f"本次减仓={reduce_qty:.4f}"
+        )
+
+        # 监控模式不下单，直接模拟仓位变化
+        if self.monitor_only:
+            if current_qty < 0:
+                self.position_manager.current_position_qty += reduce_qty
+            else:
+                self.position_manager.current_position_qty -= reduce_qty
+            self._last_risk_reduce_time = now
+            logger.warning(
+                f"🛡️ 风控减仓(监控模式): 调整后仓位={self.position_manager.get_current_position_qty():+.4f}"
+            )
+            return True
+
+        # 避免与正常开平仓并发
+        if self._executing_lock.locked():
+            logger.info("🛡️ 跳过风控减仓: 当前已有执行中的订单流程")
+            return False
+
+        async with self._executing_lock:
+            self._is_executing = True
+            try:
+                signal_trigger_time = time.time()
+                success = False
+
+                if current_qty < 0:
+                    # 负仓位（A空/B多）减仓：A 买入，B 卖出
+                    success, position = await self.executor.execute_close(
+                        position=self.position_manager.get_position() or self._create_dummy_position(),
+                        exchange_a_price=prices.exchange_a_ask,
+                        exchange_b_price=prices.exchange_b_bid,
+                        exchange_a_quote_id=prices.exchange_a_quote_id,
+                        exchange_b_quote_id=prices.exchange_b_quote_id,
+                        signal_trigger_time=signal_trigger_time,
+                        close_quantity=reduce_qty,
+                        execution_context='risk_reduce',
+                    )
+                    if success and position:
+                        self.position_manager.reduce_position(position, 'long', 0, 0)
+
+                else:
+                    # 正仓位（A多/B空）减仓：A 卖出，B 买入
+                    success, position = await self.executor.execute_open(
+                        exchange_a_price=prices.exchange_a_bid,
+                        exchange_b_price=prices.exchange_b_ask,
+                        spread_pct=prices.calculate_spread_pct(),
+                        exchange_a_quote_id=prices.exchange_a_quote_id,
+                        exchange_b_quote_id=prices.exchange_b_quote_id,
+                        signal_trigger_time=signal_trigger_time,
+                        actual_quantity=reduce_qty,
+                        execution_context='risk_reduce',
+                    )
+                    if success and position:
+                        # 这里用 add_position('short') 使净仓位向 0 收敛
+                        self.position_manager.add_position(position, 'short', 0, 0)
+
+                if not success:
+                    logger.error("❌ 风控减仓下单失败，保持当前仓位")
+                    return False
+
+                self._last_risk_reduce_time = time.time()
+                logger.warning(
+                    f"🛡️ 风控减仓执行完成: 新仓位={self.position_manager.get_current_position_qty():+.4f}"
+                )
+
+                await asyncio.sleep(1.0)
+                await self.executor.check_position_balance()
+                return True
+            finally:
+                self._is_executing = False
 
     def _estimate_cost_bps(self, signal_delay_ms_a: float, signal_delay_ms_b: float) -> dict:
         """估算执行成本（bps）"""
@@ -934,7 +1257,8 @@ class HedgeStrategy(BaseStrategy):
                         exchange_a_quote_id=prices.exchange_a_quote_id,
                         exchange_b_quote_id=prices.exchange_b_quote_id,
                         signal_trigger_time=signal_trigger_time,
-                        close_quantity=close_quantity
+                        close_quantity=close_quantity,
+                        execution_context='reverse_open' if self.position_manager.accumulate_mode else 'strategy',
                     )
                     
                     if success:
@@ -1125,12 +1449,13 @@ class HedgeStrategy(BaseStrategy):
         try:
             # ✅ 根据模式调整通知内容
             mode_text = "虚拟" if self.monitor_only else "实际"
+            is_accumulate_mode = self.position_manager.accumulate_mode
             
             # ✅ 检查 position 是否为 None
             if position is None:
                 # ✅ 反向开仓：没有原始持仓信息
                 message = (
-                    f"🔔 对冲平仓通知 ({mode_text}) - 反向开仓\n\n"
+                    f"🔔 {'对冲反向开仓通知' if is_accumulate_mode else '对冲平仓通知'} ({mode_text}) - 反向开仓\n\n"
                     f"交易对: {self.symbol}\n"
                     f"盈亏: {pnl_pct:.4f}%\n"
                     f"数量: {self.position_manager.position_step}\n\n"
@@ -1153,7 +1478,7 @@ class HedgeStrategy(BaseStrategy):
                     / prices.exchange_b_bid * 100
                 )
                 message = (
-                    f"🔔 对冲平仓通知 ({mode_text})\n\n"
+                    f"🔔 {'对冲反向开仓通知' if is_accumulate_mode else '对冲平仓通知'} ({mode_text})\n\n"
                     f"交易对: {self.symbol}\n"
                     f"盈亏: {pnl_pct:.4f}%\n"
                     f"数量: {position.quantity}\n\n"
@@ -1163,7 +1488,7 @@ class HedgeStrategy(BaseStrategy):
                     f"  信号价差: {position.spread_pct:.4f}%\n\n"
                     f"  实际价差: {actual_entry_spread_pct:.4f}%\n"  # ✅ 新增
                     f"  价差损失: {(position.spread_pct - actual_entry_spread_pct):.4f}%\n\n"  # ✅ 新增
-                    f"平仓信息:\n"
+                    f"{'反向开仓信息' if is_accumulate_mode else '平仓信息'}:\n"
                     f"  {self.exchange_a.exchange_name}: ${prices.exchange_a_ask}\n"
                     f"  {self.exchange_b.exchange_name}: ${prices.exchange_b_bid}\n\n"
                     f"  实际价差: {actual_exit_spread_pct:.4f}%\n"  # ✅ 新增
