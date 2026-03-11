@@ -60,7 +60,7 @@ class PriceMonitorService:
         # 断流恢复保护：
         # 当某一侧订单簿长时间断流后刚恢复时，先进入短暂保护期，
         # 避免恢复瞬间的异常价差直接参与信号判断。
-        self.recovery_grace_seconds = 1.0
+        self.recovery_grace_seconds = 3.0
         self.recovery_stale_threshold_seconds = 3.0
         self._long_stale_a = False
         self._long_stale_b = False

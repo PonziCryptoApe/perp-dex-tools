@@ -72,6 +72,17 @@ class VariationalAdapter(ExchangeAdapter):
             f"   Polling Interval: {self.polling_interval}s\n"
             f"   Query Quantity: {self.query_quantity}"
         )
+
+    @staticmethod
+    def _build_unknown_position(symbol: str) -> dict:
+        """构造持仓未知的兜底返回值。"""
+        return {
+            'symbol': symbol,
+            'side': 'unknown',
+            'size': 0,
+            'entry_price': '--',
+            'unrealized_pnl': 0
+        }
     
     async def connect(self):
         """连接交易所"""
@@ -837,19 +848,35 @@ class VariationalAdapter(ExchangeAdapter):
             # ✅ 直接调用 VariationalClient 的方法
             # 注意：需要先在 variational.py 中添加 get_position() 方法
             position = await self.client.get_position(symbol)
-            
-            if position:
+
+            # 接口偶发返回空结果时，等待 1 秒后再确认一次。
+            if position is None:
+                logger.warning(f"⚠️ Variational 持仓查询为空，1秒后重试: {symbol}")
+                await asyncio.sleep(1)
+                position = await self.client.get_position(symbol)
+
+            if position is None:
+                position = self._build_unknown_position(symbol)
+                logger.warning(f"⚠️ Variational 持仓状态未知: {symbol}（两次查询均无有效结果）")
+                return position
+
+            side = str(position.get('side', '')).lower()
+            if side in ('long', 'short'):
                 logger.info(
                     f"📊 Variational 持仓:  {'+' if position['side'] == 'long' else '-'}{position['size']} {position['symbol']} @ {position['entry_price']}"
                 )
-            else:
+            elif side == 'neutral':
                 logger.info(f"📊 Variational 无持仓: {symbol}")
-            
+            elif side == 'unknown':
+                logger.warning(f"⚠️ Variational 持仓状态未知: {symbol}")
+            else:
+                logger.info(f"📊 Variational 持仓状态异常: {symbol}, side={side}")
+
             return position
         
         except Exception as e:
             logger.error(f"❌ Variational 获取持仓失败: {e}", exc_info=True)
-            return None
+            return self._build_unknown_position(symbol)
         
     async def get_trade_volume(self) -> Decimal:
         """

@@ -59,6 +59,9 @@ class OrderExecutor:
         self.sleep_interval = 30
         self.sleep_interval_enhance = 61
         self.sleep_retries = 0
+        self.unknown_status_balance_guard_seconds = 10.0
+        self._position_balance_guard_until = 0.0
+        self._position_balance_guard_reason = ''
         self.lark_token = os.getenv("LARK_TOKEN_SERIOUS")
         self.lark_index_text = f'【{os.getenv("ENV_INDEX")}】' if os.getenv("ENV_INDEX", None) else ''
         if self.lark_token:
@@ -75,6 +78,11 @@ class OrderExecutor:
             f"   Max Retries: {max_retries}\n"
             f"   Retry Delay: {retry_delay}s"
         )
+
+    @staticmethod
+    def _is_unknown_position(position: Optional[dict]) -> bool:
+        """判断仓位是否处于未知状态。"""
+        return bool(position) and str(position.get('side', '')).lower() == 'unknown'
 
     def _normalize_quantity(self, quantity: Decimal, exchange_name: str = None) -> Decimal:
         """标准化数量精度"""
@@ -100,6 +108,7 @@ class OrderExecutor:
         处理“订单状态未知”场景：
         - 发送高优先级告警
         """
+        self._activate_position_balance_guard(exchange_name, order_type, side, error)
         # 尝试从上游错误信息中提取状态提示（可能提取不到）
         status_hint = "UNKNOWN"
         if error:
@@ -117,6 +126,38 @@ class OrderExecutor:
         logger.critical(msg)
         if self.lark_bot:
             await self.lark_bot.send_text(msg)
+
+    def _activate_position_balance_guard(
+        self,
+        exchange_name: str,
+        order_type: str,
+        side: str,
+        error: str
+    ) -> None:
+        """命中未知订单状态后，短时间内禁止自动仓位平衡补单。"""
+        self._position_balance_guard_until = max(
+            self._position_balance_guard_until,
+            time.time() + self.unknown_status_balance_guard_seconds
+        )
+        self._position_balance_guard_reason = (
+            f"{exchange_name} {order_type}/{side} unknown_status"
+            + (f" | {error}" if error else "")
+        )
+        logger.warning(
+            f"🛡️ 启动仓位平衡保护窗: {self.unknown_status_balance_guard_seconds:.1f}s | "
+            f"原因: {self._position_balance_guard_reason}"
+        )
+
+    def _get_position_balance_guard(self) -> tuple[bool, float, str]:
+        """返回自动仓位平衡保护窗状态。"""
+        now = time.time()
+        remain = self._position_balance_guard_until - now
+        if remain > 0:
+            return True, remain, self._position_balance_guard_reason
+        if self._position_balance_guard_until != 0.0:
+            self._position_balance_guard_until = 0.0
+            self._position_balance_guard_reason = ''
+        return False, 0.0, ''
 
     def _log_extra_trade(
         self,
@@ -1594,6 +1635,12 @@ class OrderExecutor:
             )
 
     async def check_position_balance(self):
+        guard_active, guard_remain, guard_reason = self._get_position_balance_guard()
+        if guard_active:
+            logger.warning(
+                f"🛡️ 跳过自动仓位平衡: 保护窗剩余 {guard_remain:.2f}s | 原因: {guard_reason}"
+            )
+            return
         logger.info("🔍 检查两所仓位平衡情况...")
         symbol_a = self.exchange_a.symbol
         symbol_b = self.exchange_b.symbol
@@ -1618,6 +1665,12 @@ class OrderExecutor:
         # 检查仓位是否平衡
         pos_a = await self.exchange_a.get_position(symbol_a)
         pos_b = await self.exchange_b.get_position(symbol_b)
+        if self._is_unknown_position(pos_a) or self._is_unknown_position(pos_b):
+            logger.warning(
+                f"⚠️ 跳过自动仓位平衡: 持仓状态未知 | "
+                f"{self.exchange_a.exchange_name}={pos_a} | {self.exchange_b.exchange_name}={pos_b}"
+            )
+            return
         pos_a_size = pos_a['size'] if pos_a else Decimal('0')
         pos_a_side = pos_a['side'] if pos_a else 'neutral'
         pos_b_size = pos_b['size'] if pos_b else Decimal('0')
@@ -1790,6 +1843,12 @@ class OrderExecutor:
 
         pos_a = await self.exchange_a.get_position(symbol_a)
         pos_b = await self.exchange_b.get_position(symbol_b)
+        if self._is_unknown_position(pos_a) or self._is_unknown_position(pos_b):
+            logger.warning(
+                f"⚠️ 仓位复核结果未知，跳过自动补单后的最终平衡判定 | "
+                f"{self.exchange_a.exchange_name}={pos_a} | {self.exchange_b.exchange_name}={pos_b}"
+            )
+            return
         pos_a_size = pos_a['size'] if pos_a else Decimal('0')
         pos_a_side = pos_a['side'] if pos_a else 'neutral'
         pos_b_size = pos_b['size'] if pos_b else Decimal('0')

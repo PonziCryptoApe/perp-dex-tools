@@ -800,7 +800,7 @@ class LighterAdapter(ExchangeAdapter):
         except Exception as e:
             logger.exception(f"❌ 处理订单更新失败: {e}")
 
-    async def _wait_for_order_status(self, client_order_index: int, timeout: float = 1.0) -> dict:
+    async def _wait_for_order_status(self, client_order_index: int, timeout: float = 1.5) -> dict:
         """等待订单状态（使用 Future）"""
         cached = self._order_status_data.pop(client_order_index, None)
         if cached:
@@ -826,7 +826,7 @@ class LighterAdapter(ExchangeAdapter):
     async def _wait_for_late_order_status(
         self,
         client_order_index: int,
-        timeout: float = 2.0,
+        timeout: float = 3.0,
         poll_interval: float = 0.1
     ) -> Optional[dict]:
         """等待晚到的订单状态回报（用于 WS 超时后的短暂兜底）"""
@@ -1109,7 +1109,7 @@ class LighterAdapter(ExchangeAdapter):
 
             # 下单成功后，判断订单是否成交
             try:
-                status_data = await self._wait_for_order_status(client_order_index, timeout=1.0)
+                status_data = await self._wait_for_order_status(client_order_index, timeout=1.5)
                 status_data = await self._wait_until_terminal_order_status(
                     client_order_index=client_order_index,
                     status_data=status_data,
@@ -1170,7 +1170,7 @@ class LighterAdapter(ExchangeAdapter):
 
                 late_status_data = await self._wait_for_late_order_status(
                     client_order_index=client_order_index,
-                    timeout=2.0,
+                    timeout=3.0,
                     poll_interval=0.1
                 )
 

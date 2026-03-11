@@ -60,6 +60,11 @@ class PositionManagerService:
             f"   单次交易量: {position_step}"
         )
 
+    @staticmethod
+    def _is_unknown_position(position: Optional[dict]) -> bool:
+        """判断仓位是否处于未知状态。"""
+        return bool(position) and str(position.get('side', '')).lower() == 'unknown'
+
     @property
     def max_position(self) -> Decimal:
         """基础最大仓位上限（配置值）。"""
@@ -415,6 +420,13 @@ class PositionManagerService:
             # 获取交易所仓位
             position_a = await exchange_a.get_position(symbol_a)
             position_b = await exchange_b.get_position(symbol_b)
+
+            if self._is_unknown_position(position_a) or self._is_unknown_position(position_b):
+                logger.warning(
+                    f"⚠️ 跳过仓位同步: 检测到持仓状态未知 | "
+                    f"{exchange_a.exchange_name}={position_a} | {exchange_b.exchange_name}={position_b}"
+                )
+                return None
 
             # 解析仓位数量
             qty_a = Decimal(str(position_a.get('size', 0))) if position_a else Decimal('0')

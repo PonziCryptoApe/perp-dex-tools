@@ -594,7 +594,9 @@ async def main():
                 symbol_b=symbol_b
             )
             
-            if synced_qty is not None and synced_qty != 0:
+            if synced_qty is None:
+                logger.warning("⚠️ 仓位状态未知，保留本地默认值，不按空仓初始化")
+            elif synced_qty != 0:
                 logger.warning(
                     f"⚠️ 检测到未平仓位: {synced_qty:+.4f}\n"
                     f"   已同步到本地，策略将继续运行"
