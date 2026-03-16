@@ -168,6 +168,7 @@ class HedgeStrategy(BaseStrategy):
                 'total': 0,              # 总信号数（满足阈值）
                 'delay_filtered': 0,     # 因延迟过滤
                 'depth_insufficient': 0, # 因深度不足跳过
+                'threshold_filtered': 0, # 因动态阈值和不足跳过
                 'edge_filtered': 0,      # 因边际不足跳过
                 'depth_adjusted': 0,     # 因深度调整数量
                 'limited_a': 0,            # 因限流跳过
@@ -180,6 +181,7 @@ class HedgeStrategy(BaseStrategy):
                 'total': 0,
                 'delay_filtered': 0,
                 'depth_insufficient': 0,
+                'threshold_filtered': 0,
                 'edge_filtered': 0,      # 因边际不足跳过
                 'depth_adjusted': 0,
                 'limited_a': 0,
@@ -819,6 +821,25 @@ class HedgeStrategy(BaseStrategy):
             'reason': 'accumulate_mode'
         }
 
+    def _should_block_due_to_threshold_quality(self, signal_type: str) -> tuple[bool, dict]:
+        """
+        当动态阈值管理器已经判定“标准差系数打满且阈值和仍不足”时，
+        统一阻断当前信号，不再继续下单。
+        """
+        if not self.threshold_manager or not self.threshold_manager.is_trade_blocked():
+            return False, {
+                'reason': 'threshold_ok',
+                'current_qty': self.position_manager.get_current_position_qty(),
+                'projected_qty': self.position_manager.get_current_position_qty(),
+                'risk_increasing': False,
+                'block_reason': '',
+            }
+
+        risk_increasing, ctx = self._should_apply_edge_filter(signal_type)
+        ctx = dict(ctx)
+        ctx['block_reason'] = self.threshold_manager.get_trade_block_reason()
+        return True, ctx
+
     async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
         """
         检查开仓信号
@@ -850,6 +871,19 @@ class HedgeStrategy(BaseStrategy):
             self.signal_stats['open']['total'] += 1
             # 记录信号触发时间
             signal_trigger_time = time.time()
+
+            blocked_by_threshold, threshold_ctx = self._should_block_due_to_threshold_quality('open')
+            if blocked_by_threshold:
+                self.signal_stats['open']['threshold_filtered'] += 1
+                logger.info(
+                    f"⏭️ [{self.symbol}] 开仓信号因动态阈值和不足被拦截:\n"
+                    f"   当前仓位: {threshold_ctx['current_qty']:+.4f} -> "
+                    f"预测仓位: {threshold_ctx['projected_qty']:+.4f}\n"
+                    f"   当前阈值和: {getattr(self.threshold_manager, 'current_threshold_sum', None) or 0:.4f}%\n"
+                    f"   拦截原因: {threshold_ctx['block_reason']}\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)"
+                )
+                return
 
             # ========== ✅ 新增：检查深度 ==========
             # Exchange A: 卖出（使用买一深度）
@@ -1095,6 +1129,19 @@ class HedgeStrategy(BaseStrategy):
 
             # 记录信号触发时间
             signal_trigger_time = time.time()
+
+            blocked_by_threshold, threshold_ctx = self._should_block_due_to_threshold_quality('close')
+            if blocked_by_threshold:
+                self.signal_stats['close']['threshold_filtered'] += 1
+                logger.info(
+                    f"⏭️ [{self.symbol}] 反向开仓信号因动态阈值和不足被拦截:\n"
+                    f"   当前仓位: {threshold_ctx['current_qty']:+.4f} -> "
+                    f"预测仓位: {threshold_ctx['projected_qty']:+.4f}\n"
+                    f"   当前阈值和: {getattr(self.threshold_manager, 'current_threshold_sum', None) or 0:.4f}%\n"
+                    f"   拦截原因: {threshold_ctx['block_reason']}\n"
+                    f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)"
+                )
+                return
 
             # ========== ✅ 新增：检查平仓深度 ==========
             # Exchange A: 买入平空（使用卖一深度）
@@ -1522,6 +1569,7 @@ class HedgeStrategy(BaseStrategy):
         # 计算比例
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
+        threshold_pct = (stats['threshold_filtered'] / total * 100) if total > 0 else 0
         edge_pct = (stats['edge_filtered'] / total * 100) if total > 0 else 0
         adjusted_pct = (stats['depth_adjusted'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
@@ -1533,6 +1581,7 @@ class HedgeStrategy(BaseStrategy):
             f"总信号 {total} | "
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
+            f"阈值拦截 {stats['threshold_filtered']} ({threshold_pct:.1f}%) | "
             f"边际不足 {stats['edge_filtered']} ({edge_pct:.1f}%) | "
             # f"数量调整 {stats['depth_adjusted']} ({adjusted_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
@@ -1551,6 +1600,7 @@ class HedgeStrategy(BaseStrategy):
         
         delay_pct = (stats['delay_filtered'] / total * 100) if total > 0 else 0
         depth_pct = (stats['depth_insufficient'] / total * 100) if total > 0 else 0
+        threshold_pct = (stats['threshold_filtered'] / total * 100) if total > 0 else 0
         edge_pct = (stats['edge_filtered'] / total * 100) if total > 0 else 0
         exec_pct = (stats['executed'] / total * 100) if total > 0 else 0
         limited_a_pct = (stats['limited_a'] / total * 100) if total > 0 else 0
@@ -1561,6 +1611,7 @@ class HedgeStrategy(BaseStrategy):
             f"总信号 {total} | "
             f"延迟过滤 {stats['delay_filtered']} ({delay_pct:.1f}%) | "
             f"深度不足 {stats['depth_insufficient']} ({depth_pct:.1f}%) | "
+            f"阈值拦截 {stats['threshold_filtered']} ({threshold_pct:.1f}%) | "
             f"边际不足 {stats['edge_filtered']} ({edge_pct:.1f}%) | "
             f"执行 {stats['executed']} ({exec_pct:.1f}%) | "
             f"限流A {stats['limited_a']} ({limited_a_pct:.1f}%) | "
@@ -1582,6 +1633,8 @@ class HedgeStrategy(BaseStrategy):
                     f"   当前: 开仓{stats.get('current_open', 0):.4f}% "
                     f"        平仓{stats.get('current_close', 0):.4f}% "
                     f"(调整{stats['adjustment_count']}次)\n"
+                    f"   阈值和: {stats.get('current_threshold_sum', 0) or 0:.4f}% | "
+                    f"交易拦截: {'是' if stats.get('trade_blocked') else '否'}\n"
                     f"   样本: 开仓{stats['open_samples']} 平仓{stats['close_samples']}\n"
                 )
                 sample_time_length = self.threshold_manager.get_time_length()

@@ -60,6 +60,10 @@ class DynamicThresholdManager:
         # 当前阈值
         self.current_open_threshold = None
         self.current_close_threshold = None
+        self.current_threshold_sum = None
+        self.trade_blocked = False
+        self.trade_block_reason = ""
+        self._last_trade_blocked = None
         
         # 统计信息
         self.adjustment_count = 0
@@ -291,6 +295,27 @@ class DynamicThresholdManager:
                             f"→ 调整后: {threshold_sum:.4f}%"
                         )
         self.std_multiplier = adjusted_multiplier
+        self.current_threshold_sum = threshold_sum
+
+        # 当标准差系数已经打满但阈值和仍然不足时，说明当前信号质量偏弱。
+        self.trade_blocked = (
+            threshold_sum < self.min_total_threshold
+            and adjusted_multiplier >= self.max_std_multiplier
+        )
+        if self.trade_blocked:
+            self.trade_block_reason = (
+                f"标准差系数已达上限 {self.max_std_multiplier:.2f}σ，"
+                f"当前阈值和 {threshold_sum:.4f}% 仍低于最小要求 {self.min_total_threshold:.4f}%"
+            )
+        else:
+            self.trade_block_reason = ""
+
+        if self._last_trade_blocked != self.trade_blocked:
+            if self.trade_blocked:
+                logger.warning(f"⛔ 动态阈值交易拦截已启用: {self.trade_block_reason}")
+            else:
+                logger.info("✅ 动态阈值交易拦截已解除")
+            self._last_trade_blocked = self.trade_blocked
 
         # ✅ 记录调整
         old_open = self.current_open_threshold
@@ -336,6 +361,7 @@ class DynamicThresholdManager:
         if self.enable_logging and self.adjustment_count % 100 == 0:
             self._save_stats_snapshot()
         return new_open, new_close
+
     def _save_stats_snapshot(self):
         """保存统计摘要快照"""
         stats = self.get_stats()
@@ -361,6 +387,15 @@ class DynamicThresholdManager:
                     stats['close_min'],
                     stats['close_max']
                 ])
+
+    def is_trade_blocked(self) -> bool:
+        """当前是否需要因阈值和不足而阻断新增风险下单。"""
+        return self.trade_blocked
+
+    def get_trade_block_reason(self) -> str:
+        """返回当前阈值拦截原因。"""
+        return self.trade_block_reason
+
     def get_stats(self) -> dict:
         """获取统计信息"""
         if len(self.open_spreads) < self.min_samples or len(self.close_spreads) < self.min_samples:
@@ -369,7 +404,9 @@ class DynamicThresholdManager:
                 'total_samples': self.total_samples_added,
                 'open_samples': len(self.open_spreads),
                 'close_samples': len(self.close_spreads),
-                'status': 'collecting'
+                'status': 'collecting',
+                'trade_blocked': self.trade_blocked,
+                'trade_block_reason': self.trade_block_reason,
             }
         
         open_values = np.array(list(self.open_spreads))
@@ -390,7 +427,10 @@ class DynamicThresholdManager:
             'close_std': float(np.std(close_values)),
             'close_min': float(np.min(close_values)),
             'close_max': float(np.max(close_values)),
-            'status': 'active'
+            'status': 'active',
+            'current_threshold_sum': self.current_threshold_sum,
+            'trade_blocked': self.trade_blocked,
+            'trade_block_reason': self.trade_block_reason,
         }
     def get_time_length(self) -> float:
         if len(self.time_spreads) >= self.sample_size:

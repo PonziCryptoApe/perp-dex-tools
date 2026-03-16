@@ -264,8 +264,8 @@ class VariationalClient(BaseExchangeClient):
                 except:
                     pass
             
-            # ✅ 等待线程退出
-            time.sleep(2)
+            # ✅ 等待 WebSocket 线程退出，避免在事件循环收尾时残留底层 transport
+            await asyncio.sleep(2)
             
             # ✅ 重置状态
             with self._portfolio_ws_lock:

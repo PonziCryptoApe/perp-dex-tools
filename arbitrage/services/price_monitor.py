@@ -74,6 +74,7 @@ class PriceMonitorService:
         # 状态
         self._running = False
         self.suppress_health_logs = False  # 等待结束阶段可关闭健康日志
+        self._health_task: Optional[asyncio.Task] = None
         
         logger.info(
             f"🔧 初始化价格监控:\n"
@@ -129,7 +130,7 @@ class PriceMonitorService:
             self._running = True
             
             # 启动监控任务
-            asyncio.create_task(self._monitor_orderbook_health())
+            self._health_task = asyncio.create_task(self._monitor_orderbook_health())
         
         except Exception as e:
             logger.error(f"❌ 启动价格监控失败: {e}")
@@ -139,6 +140,14 @@ class PriceMonitorService:
         """停止监控"""
         logger.info(f"⏹️ 停止价格监控: {self.symbol}")
         self._running = False
+
+        if self._health_task:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            self._health_task = None
         
         await self.exchange_a.disconnect()
         await self.exchange_b.disconnect()
