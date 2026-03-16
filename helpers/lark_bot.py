@@ -31,6 +31,10 @@ class LarkBot:
         """close ClientSession"""
         if self.session:
             await self.session.close()
+            self.session = None
+        if self.connector:
+            await self.connector.close()
+            self.connector = None
 
     async def send_text(self, content: str) -> Dict[str, Any]:
         payload = {

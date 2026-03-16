@@ -79,6 +79,12 @@ class OrderExecutor:
             f"   Retry Delay: {retry_delay}s"
         )
 
+    async def close(self):
+        """关闭执行器持有的外部资源。"""
+        if self.lark_bot is not None:
+            await self.lark_bot.close()
+            self.lark_bot = None
+
     @staticmethod
     def _is_unknown_position(position: Optional[dict]) -> bool:
         """判断仓位是否处于未知状态。"""

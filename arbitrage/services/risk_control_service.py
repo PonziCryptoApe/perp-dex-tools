@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from enum import IntEnum
 from typing import Any, Optional
 
@@ -53,6 +53,7 @@ class RiskDecision:
     weak_exchange: str = ""
     exchange_a_cap_ratio: Decimal = Decimal("1")
     exchange_b_cap_ratio: Decimal = Decimal("1")
+    current_max_position: Optional[Decimal] = None
     timestamp: float = field(default_factory=time.time)
     exchange_a_snapshot: Optional[ExchangeRiskSnapshot] = None
     exchange_b_snapshot: Optional[ExchangeRiskSnapshot] = None
@@ -69,21 +70,29 @@ class RiskControlService:
         symbol_b: str,
         config: Optional[dict] = None,
         lark_bot=None,
+        base_max_position: Optional[Decimal] = None,
+        position_step: Optional[Decimal] = None,
     ):
         self.exchange_a = exchange_a
         self.exchange_b = exchange_b
         self.symbol_a = symbol_a
         self.symbol_b = symbol_b
         self.config = config or {}
+        self._base_max_position = (
+            Decimal(str(base_max_position)) if base_max_position is not None else None
+        )
+        self._position_step = (
+            abs(Decimal(str(position_step))) if position_step is not None else None
+        )
+        self.enabled = bool(self.config.get("enabled", False))
         serious_lark_token = os.getenv("LARK_TOKEN_SERIOUS")
         self._owns_lark_bot = False
-        if serious_lark_token:
+        if self.enabled and serious_lark_token:
             self.lark_bot = LarkBot(serious_lark_token)
             self._owns_lark_bot = True
         else:
             self.lark_bot = lark_bot
 
-        self.enabled = bool(self.config.get("enabled", False))
         self.poll_interval_seconds = float(self.config.get("poll_interval_seconds", 1.0))
         self.stale_after_seconds = float(self.config.get("stale_after_seconds", 3.0))
         self.fail_safe_block_open = bool(self.config.get("fail_safe_block_open", True))
@@ -106,6 +115,18 @@ class RiskControlService:
             self.config.get("dynamic_position_cap_enabled", self.enabled)
         )
         self.warn_position_ratio = Decimal("1")
+        raw_liq_distance_warn_recover = self._to_decimal(
+            self.config.get("liq_distance_warn_recover"),
+            None,
+        )
+        normalized_warn_recover = self._normalize_single_liq_distance_threshold(
+            raw_liq_distance_warn_recover
+        )
+        default_warn_recover = min(Decimal("1"), self.liq_distance_warn + Decimal("0.03"))
+        if normalized_warn_recover is None:
+            self.liq_distance_warn_recover = default_warn_recover
+        else:
+            self.liq_distance_warn_recover = max(self.liq_distance_warn, normalized_warn_recover)
 
         self._task: Optional[asyncio.Task] = None
         self._is_running = False
@@ -113,6 +134,7 @@ class RiskControlService:
         self._last_snapshot_ts = 0.0
         self._last_status_key: Optional[tuple] = None
         self._last_status_decision: Optional[RiskDecision] = None
+        self._last_exchange_levels: dict[str, RiskLevel] = {}
 
     async def start(self):
         """启动风控后台任务。"""
@@ -127,7 +149,9 @@ class RiskControlService:
         logger.info(
             "🛡️ 风控模块已启动: "
             f"poll={self.poll_interval_seconds:.2f}s, stale={self.stale_after_seconds:.2f}s, "
-            f"liq_warn={self.liq_distance_warn:.2%}, liq_reduce={self.liq_distance_reduce:.2%}, liq_stop={self.liq_distance_stop:.2%}, "
+            f"liq_warn={self.liq_distance_warn:.2%}, "
+            f"liq_warn_recover={self.liq_distance_warn_recover:.2%}, "
+            f"liq_reduce={self.liq_distance_reduce:.2%}, liq_stop={self.liq_distance_stop:.2%}, "
             f"dynamic_cap={self.dynamic_position_cap_enabled}"
         )
 
@@ -164,6 +188,10 @@ class RiskControlService:
                 decision.reason = "stale"
             return decision
         return self._clone_decision(self._latest_decision)
+
+    def set_base_max_position(self, value: Decimal):
+        """同步策略当前基础最大仓位，供风控日志和通知展示。"""
+        self._base_max_position = Decimal(str(value))
 
     async def _run_loop(self):
         while self._is_running:
@@ -229,15 +257,31 @@ class RiskControlService:
         elif worst_level == RiskLevel.REDUCE:
             block_open = True
             need_reduce = True
-            target_position_ratio = self.reduce_position_ratio
+            target_position_ratio = (
+                min(self.reduce_position_ratio, max_position_ratio)
+                if self.dynamic_position_cap_enabled
+                else self.reduce_position_ratio
+            )
         elif worst_level == RiskLevel.STOP:
             block_open = True
             need_reduce = True
-            target_position_ratio = self.stop_position_ratio
+            target_position_ratio = (
+                min(self.stop_position_ratio, max_position_ratio)
+                if self.dynamic_position_cap_enabled
+                else self.stop_position_ratio
+            )
 
         if has_stale_or_error:
             stale_reasons = [snapshot.error for snapshot in (snapshot_a, snapshot_b) if snapshot.error]
             reasons.extend(stale_reasons)
+
+        self._last_exchange_levels[snapshot_a.exchange_name] = level_a
+        self._last_exchange_levels[snapshot_b.exchange_name] = level_b
+        current_max_position = None
+        if self._base_max_position is not None:
+            current_max_position = self._align_position_limit_to_step(
+                self._base_max_position * max_position_ratio
+            )
 
         return RiskDecision(
             level=worst_level,
@@ -249,6 +293,7 @@ class RiskControlService:
             weak_exchange=weak_exchange,
             exchange_a_cap_ratio=exchange_a_cap_ratio,
             exchange_b_cap_ratio=exchange_b_cap_ratio,
+            current_max_position=current_max_position,
             timestamp=time.time(),
             exchange_a_snapshot=snapshot_a,
             exchange_b_snapshot=snapshot_b,
@@ -353,9 +398,7 @@ class RiskControlService:
                 position_size=snapshot.position_size,
             )
 
-            if exchange_name_lower == "lighter" and (
-                lighter_market_stats or lighter_account_positions or lighter_account_all
-            ):
+            if exchange_name_lower == "lighter" and lighter_market_stats:
                 logger.info(
                     "🛡️ Lighter 风控快照: "
                     f"mark_price={snapshot.mark_price}, "
@@ -383,6 +426,7 @@ class RiskControlService:
             return snapshot
 
     def _evaluate_exchange_level(self, snapshot: ExchangeRiskSnapshot) -> tuple[RiskLevel, str]:
+        previous_level = self._last_exchange_levels.get(snapshot.exchange_name, RiskLevel.NORMAL)
         if snapshot.error:
             return RiskLevel.WARN, snapshot.error
 
@@ -403,6 +447,11 @@ class RiskControlService:
             return RiskLevel.REDUCE, f"liq_distance={snapshot.liq_distance_pct:.2%} <= {self.liq_distance_reduce:.2%}"
         if snapshot.liq_distance_pct <= self.liq_distance_warn:
             return RiskLevel.WARN, f"liq_distance={snapshot.liq_distance_pct:.2%} <= {self.liq_distance_warn:.2%}"
+        if previous_level >= RiskLevel.WARN and snapshot.liq_distance_pct < self.liq_distance_warn_recover:
+            return RiskLevel.WARN, (
+                f"liq_distance={snapshot.liq_distance_pct:.2%} < "
+                f"WARN恢复阈值{self.liq_distance_warn_recover:.2%}"
+            )
         return RiskLevel.NORMAL, ""
 
     def _log_status_change(self, decision: RiskDecision):
@@ -411,32 +460,30 @@ class RiskControlService:
             decision.level,
             decision.block_open,
             decision.need_reduce,
-            str(decision.target_position_ratio),
-            str(decision.max_position_ratio),
             decision.weak_exchange,
         )
         if status_key == self._last_status_key:
             return
 
+        # 首次初始化且当前仍为 NORMAL 时，只建立基线状态，不输出噪声日志/通知。
+        if previous_decision is None and decision.level == RiskLevel.NORMAL:
+            self._last_status_key = status_key
+            self._last_status_decision = self._clone_decision(decision)
+            return
+
         previous_level = previous_decision.level.name if previous_decision else "INIT"
-        previous_block_open = previous_decision.block_open if previous_decision else "--"
-        previous_need_reduce = previous_decision.need_reduce if previous_decision else "--"
-        previous_target_ratio = (
-            previous_decision.target_position_ratio if previous_decision else "--"
-        )
-        previous_max_ratio = previous_decision.max_position_ratio if previous_decision else "--"
-        previous_weak = previous_decision.weak_exchange if previous_decision else "--"
+        # previous_block_open = previous_decision.block_open if previous_decision else "--"
+        # previous_need_reduce = previous_decision.need_reduce if previous_decision else "--"
         current_weak = decision.weak_exchange or "--"
+        current_position_summary = self._format_position_limit_summary(decision)
 
         logger.warning(
             "🛡️ 风控状态变更: "
             f"等级={previous_level}->{decision.level.name}, "
-            f"禁止增仓={previous_block_open}->{decision.block_open}, "
-            f"需要减仓={previous_need_reduce}->{decision.need_reduce}, "
-            f"目标仓位比例={previous_target_ratio}->{decision.target_position_ratio}, "
-            f"动态上限比例={previous_max_ratio}->{decision.max_position_ratio}, "
-            f"弱腿交易所={previous_weak}->{current_weak}, "
-            f"A侧上限比例={decision.exchange_a_cap_ratio}, B侧上限比例={decision.exchange_b_cap_ratio}, "
+            f"禁止增仓={decision.block_open}, "
+            f"需要减仓={decision.need_reduce}, "
+            f"{current_position_summary}, "
+            f"弱腿交易所={current_weak}, "
             f"原因={decision.reason or '--'}, "
             f"{self._format_snapshot_brief('A', decision.exchange_a_snapshot)}, "
             f"{self._format_snapshot_brief('B', decision.exchange_b_snapshot)}"
@@ -453,22 +500,15 @@ class RiskControlService:
     ):
         try:
             previous_level = previous_decision.level.name if previous_decision else "INIT"
-            previous_block_open = previous_decision.block_open if previous_decision else "--"
-            previous_need_reduce = previous_decision.need_reduce if previous_decision else "--"
-            previous_target_ratio = (
-                previous_decision.target_position_ratio if previous_decision else "--"
-            )
-            previous_max_ratio = previous_decision.max_position_ratio if previous_decision else "--"
-            previous_weak = previous_decision.weak_exchange if previous_decision else "--"
             current_weak = decision.weak_exchange or "--"
+            current_position_summary = self._format_position_limit_summary(decision)
             await self.lark_bot.send_text(
                 "🛡️ 风控状态变更\n"
                 f"等级: {previous_level} -> {decision.level.name}\n"
-                f"禁止增加仓位: {previous_block_open} -> {decision.block_open}\n"
-                f"需要减仓: {previous_need_reduce} -> {decision.need_reduce}\n"
-                f"目标仓位比例: {previous_target_ratio} -> {decision.target_position_ratio}\n"
-                f"动态上限比例: {previous_max_ratio} -> {decision.max_position_ratio}\n"
-                f"弱腿交易所: {previous_weak} -> {current_weak}\n"
+                f"禁止增加仓位: {decision.block_open}\n"
+                f"需要减仓: {decision.need_reduce}\n"
+                f"{current_position_summary}\n"
+                f"弱腿交易所: {current_weak}\n"
                 f"原因: {decision.reason or '--'}\n"
                 f"{self._format_snapshot_brief('A', decision.exchange_a_snapshot)}\n"
                 f"{self._format_snapshot_brief('B', decision.exchange_b_snapshot)}"
@@ -488,6 +528,7 @@ class RiskControlService:
             weak_exchange=decision.weak_exchange,
             exchange_a_cap_ratio=decision.exchange_a_cap_ratio,
             exchange_b_cap_ratio=decision.exchange_b_cap_ratio,
+            current_max_position=decision.current_max_position,
             timestamp=decision.timestamp,
             exchange_a_snapshot=decision.exchange_a_snapshot,
             exchange_b_snapshot=decision.exchange_b_snapshot,
@@ -521,6 +562,15 @@ class RiskControlService:
             reverse=True,
         )
         return ordered[0], ordered[1], ordered[2]
+
+    @staticmethod
+    def _normalize_single_liq_distance_threshold(value: Optional[Decimal]) -> Optional[Decimal]:
+        if value is None:
+            return None
+        half = Decimal("0.5")
+        if value >= half:
+            return Decimal("1") - value
+        return value
 
     @staticmethod
     def _to_decimal(value: Any, default: Optional[Decimal] = Decimal("0")) -> Optional[Decimal]:
@@ -567,8 +617,45 @@ class RiskControlService:
         if liq_distance <= self.liq_distance_stop:
             return stop_ratio
         if liq_distance <= self.liq_distance_reduce:
-            return reduce_ratio
+            return self._interpolate_ratio(
+                current_value=liq_distance,
+                lower_threshold=self.liq_distance_stop,
+                upper_threshold=self.liq_distance_reduce,
+                lower_ratio=stop_ratio,
+                upper_ratio=reduce_ratio,
+            )
+        if liq_distance < self.liq_distance_warn_recover:
+            return self._interpolate_ratio(
+                current_value=liq_distance,
+                lower_threshold=self.liq_distance_reduce,
+                upper_threshold=self.liq_distance_warn_recover,
+                lower_ratio=reduce_ratio,
+                upper_ratio=Decimal("1"),
+            )
         return Decimal("1")
+
+    @staticmethod
+    def _interpolate_ratio(
+        current_value: Decimal,
+        lower_threshold: Decimal,
+        upper_threshold: Decimal,
+        lower_ratio: Decimal,
+        upper_ratio: Decimal,
+    ) -> Decimal:
+        """在线性区间内按当前距离值插值计算仓位比例。"""
+        if upper_threshold <= lower_threshold:
+            return upper_ratio
+        progress = (current_value - lower_threshold) / (upper_threshold - lower_threshold)
+        progress = max(Decimal("0"), min(Decimal("1"), progress))
+        return lower_ratio + progress * (upper_ratio - lower_ratio)
+
+    def _align_position_limit_to_step(self, value: Decimal) -> Decimal:
+        """将最大仓位按单次成交步长向下对齐，保证目标仓位可执行。"""
+        aligned_value = max(Decimal("0"), Decimal(str(value)))
+        if self._position_step is None or self._position_step <= Decimal("0"):
+            return aligned_value
+        step_count = (aligned_value / self._position_step).to_integral_value(rounding=ROUND_DOWN)
+        return step_count * self._position_step
 
     @classmethod
     def _extract_signed_position_size(cls, position: dict) -> Decimal:
@@ -609,13 +696,50 @@ class RiskControlService:
             return "--"
         return f"{value:.2%}"
 
+    @staticmethod
+    def _format_price(value: Optional[Decimal]) -> str:
+        if value is None:
+            return "--"
+        return f"{value:.2f}"
+
+    @staticmethod
+    def _format_position_value(value: Optional[Decimal]) -> str:
+        if value is None:
+            return "--"
+        text = format(value.normalize(), "f") if value != 0 else "0"
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    def _format_position_limit_summary(self, decision: RiskDecision) -> str:
+        current_position = self._extract_current_position_abs(decision)
+        current_max_position = decision.current_max_position
+        return (
+            "当前仓位/最大仓位: "
+            f"{self._format_position_value(current_position)} / "
+            f"{self._format_position_value(current_max_position)}"
+        )
+
+    @staticmethod
+    def _extract_current_position_abs(decision: RiskDecision) -> Optional[Decimal]:
+        snapshots = (
+            decision.exchange_a_snapshot,
+            decision.exchange_b_snapshot,
+        )
+        sizes = [
+            abs(snapshot.position_size)
+            for snapshot in snapshots
+            if snapshot is not None
+        ]
+        if not sizes:
+            return None
+        return max(sizes)
+
     def _format_snapshot_brief(self, label: str, snapshot: Optional[ExchangeRiskSnapshot]) -> str:
         if snapshot is None:
             return f"{label}=--"
         return (
             f"{label}({snapshot.exchange_name}):仓位={snapshot.position_size},"
-            f"标记价={snapshot.mark_price},"
-            f"清算价={snapshot.liquidation_price if snapshot.liquidation_price is not None else '--'},"
+            f"标记价={self._format_price(snapshot.mark_price)},"
+            f"清算价={self._format_price(snapshot.liquidation_price)},"
             f"距清算价距离={self._format_pct(snapshot.liq_distance_pct)}"
         )
 
@@ -647,10 +771,10 @@ class RiskControlService:
         elif isinstance(matched_entry.get("position_info"), dict):
             raw_liq = matched_entry.get("position_info", {}).get("estimated_liquidation_price")
 
-        logger.info(
-            "🛡️ Variational 清算价匹配结果: "
-            f"symbol={symbol}, position_size={position_size}, raw_liq={raw_liq}, matched_entry={matched_entry}"
-        )
+        # logger.info(
+        #     "🛡️ Variational 清算价匹配结果: "
+        #     f"symbol={symbol}, position_size={position_size}, raw_liq={raw_liq}, matched_entry={matched_entry}"
+        # )
 
         return self._extract_decimal_from_paths(
             matched_entry,
@@ -690,6 +814,7 @@ class RiskControlService:
                 ("size",),
                 ("position",),
                 ("position_info", "size"),
+                ("position_info", "qty"),
                 ("position_info", "quantity"),
                 ("qty",),
             )

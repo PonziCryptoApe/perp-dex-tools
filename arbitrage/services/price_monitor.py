@@ -449,10 +449,10 @@ class PriceMonitorService:
                 if age_a >= self.recovery_stale_threshold_seconds:
                     self._long_stale_a = True
                 self._recovery_ready_time_a = 0.0
-                logger.debug(
-                    f"⚠️ [{self.symbol}] 订单簿过时: "
-                    f"{self.exchange_a.exchange_name} age_ms={age_a*1000:.0f}, threshold_ms={threshold_a*1000:.0f}"
-                )
+                # logger.debug(
+                #     f"⚠️ [{self.symbol}] 订单簿过时: "
+                #     f"{self.exchange_a.exchange_name} age_ms={age_a*1000:.0f}, threshold_ms={threshold_a*1000:.0f}"
+                # )
                 return True, f"{self.exchange_a.exchange_name} 订单簿已 {age_a:.1f}s 未更新"
             if self._long_stale_a:
                 if self._recovery_ready_time_a == 0.0:
@@ -482,10 +482,10 @@ class PriceMonitorService:
                 if age_b >= self.recovery_stale_threshold_seconds:
                     self._long_stale_b = True
                 self._recovery_ready_time_b = 0.0
-                logger.debug(
-                    f"⚠️ [{self.symbol}] 订单簿过时: "
-                    f"{self.exchange_b.exchange_name} age_ms={age_b*1000:.0f}, threshold_ms={threshold_b*1000:.0f}"
-                )
+                # logger.debug(
+                #     f"⚠️ [{self.symbol}] 订单簿过时: "
+                #     f"{self.exchange_b.exchange_name} age_ms={age_b*1000:.0f}, threshold_ms={threshold_b*1000:.0f}"
+                # )
                 return True, f"{self.exchange_b.exchange_name} 订单簿已 {age_b:.1f}s 未更新"
             if self._long_stale_b:
                 if self._recovery_ready_time_b == 0.0:

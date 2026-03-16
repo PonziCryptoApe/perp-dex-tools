@@ -9,6 +9,7 @@ import websocket
 import threading
 import time
 import traceback
+import copy
 from typing import Dict, Any, Optional, Tuple, List
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone, timedelta
@@ -53,14 +54,8 @@ class VariationalClient(BaseExchangeClient):
         self.cookies = None
         self._request_lock = asyncio.Lock()
         # 为 Variational API 使用 cloudscraper
-        self.scraper = cloudscraper.create_scraper(
-            browser='chrome',                  # 模仿 Chrome
-            enable_tls_fingerprinting=True,    # 启用 TLS 指纹伪装
-            enable_tls_rotation=True,          # 启用 JA3/ cipher 旋转
-            enable_enhanced_spoofing=True,     # 额外 spoofing
-            enable_stealth=False,              # 关闭人类模拟（最大减延迟）
-            compatibility_mode=True, 
-        )
+        self.scraper = self._create_scraper()
+        self._post_scraper = self._create_scraper()
         
         # 初始化日志
         self.logger = TradingLogger(
@@ -90,6 +85,40 @@ class VariationalClient(BaseExchangeClient):
         self._order_update_handler = None
 
         self.logger.log("【VARIATIONAL】VariationalClient initialized", "INFO")
+
+    @staticmethod
+    def _create_scraper():
+        """创建新的 cloudscraper 实例。"""
+        return cloudscraper.create_scraper(
+            browser='chrome',                  # 模仿 Chrome
+            enable_tls_fingerprinting=True,    # 启用 TLS 指纹伪装
+            enable_tls_rotation=True,          # 启用 JA3/ cipher 旋转
+            enable_enhanced_spoofing=True,     # 额外 spoofing
+            enable_stealth=False,              # 关闭人类模拟（最大减延迟）
+            compatibility_mode=True,
+        )
+
+    @staticmethod
+    def _clone_request_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """复制请求参数，避免共享可变字典在 requests/cloudscraper 内部被并发修改。"""
+        request_kwargs: Dict[str, Any] = {}
+        for key, value in kwargs.items():
+            if isinstance(value, dict):
+                request_kwargs[key] = copy.deepcopy(value)
+            elif isinstance(value, list):
+                request_kwargs[key] = list(value)
+            else:
+                request_kwargs[key] = value
+        return request_kwargs
+
+    @staticmethod
+    def _execute_scraper_request(scraper, method: str, url: str, request_kwargs: Dict[str, Any]):
+        """同步执行单次 cloudscraper 请求。"""
+        if method.upper() == 'POST':
+            return scraper.post(url, **request_kwargs)
+        if method.upper() == 'GET':
+            return scraper.get(url, **request_kwargs)
+        raise ValueError(f"Unsupported HTTP method: {method}")
     def _load_private_key(self) -> str:
         """✅ 加载并解密私钥"""
         encrypted_key = os.getenv('VAR_PRIVATE_KEY_ENCRYPTED')
@@ -147,31 +176,41 @@ class VariationalClient(BaseExchangeClient):
     async def _make_var_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
         """使用 cloudscraper 发起 Variational API 请求"""
         loop = asyncio.get_event_loop()
-        request_kwargs = dict(kwargs)
-        cookies = request_kwargs.get("cookies")
-        if isinstance(cookies, dict):
-            # cloudscraper/requests 会在请求过程中遍历 cookies；这里复制一份，避免共享字典并发修改。
-            request_kwargs["cookies"] = dict(cookies)
+        request_kwargs = self._clone_request_kwargs(kwargs)
         
         try:
             async with self._request_lock:
-                if method.upper() == 'POST':
-                    response = await loop.run_in_executor(
-                        None, 
-                        lambda: self.scraper.post(url, **request_kwargs)
-                    )
-                elif method.upper() == 'GET':
-                    response = await loop.run_in_executor(
-                        None, 
-                        lambda: self.scraper.get(url, **request_kwargs)
-                    )
-                else:
-                    raise ValueError(f"Unsupported HTTP method: {method}")
+                # POST 请求使用独立的专用 scraper，既隔离下单状态，又避免每次请求
+                # 都重建 scraper 触发 cloudscraper 内部初始化噪声日志。
+                request_scraper = self._post_scraper if method.upper() == 'POST' else self.scraper
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._execute_scraper_request(request_scraper, method, url, request_kwargs)
+                )
             
             response.raise_for_status()
             return response.json()
             
         except Exception as e:
+            if "dictionary changed size during iteration" in str(e):
+                self.logger.log(
+                    "【VARIATIONAL】检测到共享字典并发修改异常，重建 scraper 后重试一次",
+                    "WARNING"
+                )
+                async with self._request_lock:
+                    if method.upper() == 'POST':
+                        self._post_scraper = self._create_scraper()
+                        retry_scraper = self._post_scraper
+                    else:
+                        self.scraper = self._create_scraper()
+                        retry_scraper = self.scraper
+                    retry_kwargs = self._clone_request_kwargs(kwargs)
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: self._execute_scraper_request(retry_scraper, method, url, retry_kwargs)
+                    )
+                response.raise_for_status()
+                return response.json()
             self.logger.log(f"【VARIATIONAL】Variational API request failed: {e}", "ERROR")
             raise
 
@@ -521,33 +560,43 @@ class VariationalClient(BaseExchangeClient):
         if not isinstance(data, dict):
             return None
 
-        portfolio_data = self._find_portfolio_payload(data)
-        if not isinstance(portfolio_data, dict):
+        risk_payload = data.get("pool_portfolio_result")
+        if not isinstance(risk_payload, dict):
+            risk_payload = self._find_portfolio_payload(data)
+        if not isinstance(risk_payload, dict):
             return None
 
+        # Variational 的 portfolio WS 存在两种常见结构：
+        # 1. 风险字段和 positions 都在同一层
+        # 2. 风险字段位于 pool_portfolio_result，而 positions 与其同级
+        # 因此这里需要兼容“内层没有 positions，外层同级补齐”的情况。
+        raw_positions = risk_payload.get('positions')
+        if raw_positions is None:
+            raw_positions = data.get('positions')
+
         has_risk_fields = any(
-            key in portfolio_data
+            key in risk_payload
             for key in ('balance', 'upnl', 'positions', 'published_at', 'leverage')
-        )
+        ) or raw_positions is not None
         if not has_risk_fields:
             return None
 
-        normalized_positions = self._normalize_portfolio_positions(
-            portfolio_data.get('positions')
-        )
+        normalized_positions = self._normalize_portfolio_positions(raw_positions)
         snapshot = {
-            'balance': portfolio_data.get('balance'),
-            'upnl': portfolio_data.get('upnl'),
+            'balance': risk_payload.get('balance'),
+            'upnl': risk_payload.get('upnl'),
             'positions': normalized_positions,
-            'published_at': portfolio_data.get('published_at') or data.get('published_at'),
+            'published_at': risk_payload.get('published_at') or data.get('published_at'),
         }
-        if 'leverage' in portfolio_data:
-            snapshot['leverage'] = portfolio_data.get('leverage')
-        if 'portfolio_value' in portfolio_data:
-            snapshot['portfolio_value'] = portfolio_data.get('portfolio_value')
+        if 'leverage' in risk_payload:
+            snapshot['leverage'] = risk_payload.get('leverage')
+        if 'portfolio_value' in risk_payload:
+            snapshot['portfolio_value'] = risk_payload.get('portfolio_value')
         if normalized_positions is None:
             self.logger.log(
-                f"【VARIATIONAL】Portfolio WS 快照缺少 positions，payload keys={list(portfolio_data.keys())[:10]}",
+                "【VARIATIONAL】Portfolio WS 快照缺少 positions，"
+                f"payload keys={list(risk_payload.keys())[:10]}, "
+                f"outer keys={list(data.keys())[:10]}",
                 "INFO"
             )
         return snapshot
@@ -628,7 +677,12 @@ class VariationalClient(BaseExchangeClient):
         previous: Optional[Dict[str, Any]],
         current: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """浅层递归合并仓位字段，允许新值覆盖，空值回退旧值。"""
+        """浅层递归合并仓位字段。
+
+        对大多数字段仍保持“空值回退旧值”，但清算价这类风险字段需要允许
+        WebSocket 显式下发 `null` 来清空旧值，避免反转过零后继续沿用上一次仓位
+        的清算价。
+        """
         if not isinstance(previous, dict):
             return dict(current)
 
@@ -637,6 +691,9 @@ class VariationalClient(BaseExchangeClient):
             previous_value = merged.get(key)
             if isinstance(previous_value, dict) and isinstance(current_value, dict):
                 merged[key] = self._deep_merge_position_entry(previous_value, current_value)
+                continue
+            if key == "estimated_liquidation_price" and key in current:
+                merged[key] = current_value
                 continue
             if current_value is not None:
                 merged[key] = current_value
@@ -1099,8 +1156,14 @@ class VariationalClient(BaseExchangeClient):
             
             # ✅ 检查返回数据
             if not data:
-                self.logger.log("No positions data", "DEBUG")
-                return None
+                self.logger.log("No positions data", "INFO")
+                return  {
+                    'symbol': symbol,
+                    'side': 'neutral',
+                    'size': 0,
+                    'entry_price': '--',
+                    'unrealized_pnl': 0
+                }
             
             # ✅ 关键修正：data 本身就是数组，不需要 data['positions']
             positions = data if isinstance(data, list) else []
@@ -1121,7 +1184,7 @@ class VariationalClient(BaseExchangeClient):
                     
                     # ✅ 无持仓
                     if size == 0:
-                        self.logger.log(f"Found {symbol} position but size is 0", "DEBUG")
+                        self.logger.log(f"Found {symbol} position but size is 0", "INFO")
                         return {
                             'symbol': symbol,
                             'side': 'neutral',
@@ -1169,9 +1232,9 @@ class VariationalClient(BaseExchangeClient):
             }
         
         except Exception as e:
-            self.logger.log(f"Error getting position for {symbol}: {e}", "ERROR")
+            self.logger.log(f"❌ Error getting position for {symbol}: {e}", "ERROR")
             import traceback
-            self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            self.logger.log(f"❌ Traceback: {traceback.format_exc()}", "ERROR")
             return None
     
     def setup_order_update_handler(self, handler) -> None:

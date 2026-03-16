@@ -22,6 +22,24 @@ class ZoneFormatter(logging.Formatter):
             s = dt.strftime("%Y-%m-%d %H:%M:%S")
         # ✅ 修复：将 record.msecs 转换为整数再格式化
         return f"{s}.{int(record.msecs):03d}"
+
+
+class NoiseFilter(logging.Filter):
+    """过滤已知第三方库噪声日志，避免淹没策略主日志。"""
+
+    BLOCKED_MESSAGE_PARTS = (
+        "ProxyManager initialized with",
+        "Rotated TLS fingerprint:",
+        "Switched to behavior profile:",
+        "Applied spoofing level:",
+        "Applied timing multiplier:",
+        "Applied ML strategy:",
+        "Recorded ML attempt:",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(part in message for part in self.BLOCKED_MESSAGE_PARTS)
     
 def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     """
@@ -58,11 +76,13 @@ def setup_logging(pair: str, log_dir: Path) -> logging.Logger:
     file_handler.suffix = "%Y%m%d"
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(log_format)
+    file_handler.addFilter(NoiseFilter())
     
     # ✅ 控制台 Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG)
     console_handler.setFormatter(log_format)
+    console_handler.addFilter(NoiseFilter())
     
     # ✅ 配置根日志记录器
     root_logger = logging.getLogger()

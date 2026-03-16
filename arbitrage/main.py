@@ -304,6 +304,15 @@ async def main():
     parser.add_argument('--edge-fee-bps', type=float, default=None, help='边际二次过滤手续费估计（bps），默认 0.0')
     parser.add_argument('--edge-latency-bps-per-100ms', type=float, default=None, help='边际二次过滤延迟风险系数（每 100ms 增加 bps），默认 0.0')
     parser.add_argument('--edge-latency-free-ms', type=float, default=None, help='边际二次过滤延迟免惩罚阈值（ms），默认 120')
+    parser.add_argument('--risk-poll-interval-seconds', type=float, default=None, help='风控后台轮询间隔（秒），不传则使用当前配置')
+    parser.add_argument('--risk-stale-after-seconds', type=float, default=None, help='风控快照过期判定阈值（秒），不传则使用当前配置')
+    parser.add_argument('--risk-reduce-position-ratio', type=float, default=None, help='REDUCE 档目标仓位比例，不传则使用当前配置')
+    parser.add_argument('--risk-stop-position-ratio', type=float, default=None, help='STOP 档目标仓位比例，不传则使用当前配置')
+    parser.add_argument('--risk-reduce-cooldown-seconds', type=float, default=None, help='风控减仓冷却时间（秒），不传则使用当前配置')
+    parser.add_argument('--risk-liq-distance-warn', type=float, default=None, help='清算距离 WARN 阈值，不传则使用当前配置')
+    parser.add_argument('--risk-liq-distance-warn-recover', type=float, default=None, help='清算距离 WARN 恢复阈值，不传则使用当前配置')
+    parser.add_argument('--risk-liq-distance-reduce', type=float, default=None, help='清算距离 REDUCE 阈值，不传则使用当前配置')
+    parser.add_argument('--risk-liq-distance-stop', type=float, default=None, help='清算距离 STOP 阈值，不传则使用当前配置')
     args = parser.parse_args()
     if args.lighter_reconnect_base_delay <= 0:
         parser.error("--lighter-reconnect-base-delay 必须大于 0")
@@ -327,6 +336,24 @@ async def main():
         parser.error("--edge-latency-bps-per-100ms 不能小于 0")
     if args.edge_latency_free_ms is not None and args.edge_latency_free_ms < 0:
         parser.error("--edge-latency-free-ms 不能小于 0")
+    if args.risk_poll_interval_seconds is not None and args.risk_poll_interval_seconds <= 0:
+        parser.error("--risk-poll-interval-seconds 必须大于 0")
+    if args.risk_stale_after_seconds is not None and args.risk_stale_after_seconds <= 0:
+        parser.error("--risk-stale-after-seconds 必须大于 0")
+    if args.risk_reduce_position_ratio is not None and not 0 <= args.risk_reduce_position_ratio <= 1:
+        parser.error("--risk-reduce-position-ratio 必须在 [0, 1] 区间内")
+    if args.risk_stop_position_ratio is not None and not 0 <= args.risk_stop_position_ratio <= 1:
+        parser.error("--risk-stop-position-ratio 必须在 [0, 1] 区间内")
+    if args.risk_reduce_cooldown_seconds is not None and args.risk_reduce_cooldown_seconds < 0:
+        parser.error("--risk-reduce-cooldown-seconds 不能小于 0")
+    if args.risk_liq_distance_warn is not None and args.risk_liq_distance_warn < 0:
+        parser.error("--risk-liq-distance-warn 不能小于 0")
+    if args.risk_liq_distance_warn_recover is not None and args.risk_liq_distance_warn_recover < 0:
+        parser.error("--risk-liq-distance-warn-recover 不能小于 0")
+    if args.risk_liq_distance_reduce is not None and args.risk_liq_distance_reduce < 0:
+        parser.error("--risk-liq-distance-reduce 不能小于 0")
+    if args.risk_liq_distance_stop is not None and args.risk_liq_distance_stop < 0:
+        parser.error("--risk-liq-distance-stop 不能小于 0")
     # 加载环境变量
     if args.env_file:
         load_dotenv(args.env_file)
@@ -394,7 +421,7 @@ async def main():
     direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
     edge_filter_config = config.edge_filter if hasattr(config, 'edge_filter') and isinstance(config.edge_filter, dict) else {}
-    risk_control_config = config.risk_control if hasattr(config, 'risk_control') and isinstance(config.risk_control, dict) else {}
+    risk_control_config = dict(config.risk_control) if hasattr(config, 'risk_control') and isinstance(config.risk_control, dict) else {}
 
     edge_filter_enabled = edge_filter_config.get('enabled', False)
     if args.edge_filter is not None:
@@ -438,14 +465,25 @@ async def main():
     dt_min_std_multiplier = dynamic_threshold.get('min_std_multiplier', '--') if isinstance(dynamic_threshold, dict) else '--'
     dt_enabled_text = '启用' if isinstance(dynamic_threshold, dict) and dynamic_threshold.get('enabled', False) else '禁用'
     risk_control_enabled = bool(risk_control_config.get('enabled', False))  # 风控模块总开关
-    risk_poll_interval = float(risk_control_config.get('poll_interval_seconds', 1.0))  # 风控后台轮询间隔（秒）
-    risk_stale_after = float(risk_control_config.get('stale_after_seconds', 3.0))  # 风控快照过期判定阈值（秒）
-    risk_reduce_ratio = float(risk_control_config.get('reduce_position_ratio', 0.5))  # 进入 REDUCE 后目标仓位比例
-    risk_stop_ratio = float(risk_control_config.get('stop_position_ratio', 0.0))  # 进入 STOP 后目标仓位比例
-    risk_reduce_cooldown = float(risk_control_config.get('reduce_cooldown_seconds', 5.0))  # 两次风控主动减仓的最小间隔（秒）
-    risk_liq_distance_warn = float(risk_control_config.get('liq_distance_warn', 0.20))  # 离清算价距离 WARN 阈值
-    risk_liq_distance_reduce = float(risk_control_config.get('liq_distance_reduce', 0.10))  # 离清算价距离 REDUCE 阈值
-    risk_liq_distance_stop = float(risk_control_config.get('liq_distance_stop', 0.05))  # 离清算价距离 STOP 阈值
+    risk_poll_interval = float(args.risk_poll_interval_seconds) if args.risk_poll_interval_seconds is not None else float(risk_control_config.get('poll_interval_seconds', 1.0))  # 风控后台轮询间隔（秒）
+    risk_stale_after = float(args.risk_stale_after_seconds) if args.risk_stale_after_seconds is not None else float(risk_control_config.get('stale_after_seconds', 3.0))  # 风控快照过期判定阈值（秒）
+    risk_reduce_ratio = float(args.risk_reduce_position_ratio) if args.risk_reduce_position_ratio is not None else float(risk_control_config.get('reduce_position_ratio', 0.5))  # 进入 REDUCE 后目标仓位比例
+    risk_stop_ratio = float(args.risk_stop_position_ratio) if args.risk_stop_position_ratio is not None else float(risk_control_config.get('stop_position_ratio', 0.0))  # 进入 STOP 后目标仓位比例
+    risk_reduce_cooldown = float(args.risk_reduce_cooldown_seconds) if args.risk_reduce_cooldown_seconds is not None else float(risk_control_config.get('reduce_cooldown_seconds', 5.0))  # 两次风控主动减仓的最小间隔（秒）
+    risk_liq_distance_warn = float(args.risk_liq_distance_warn) if args.risk_liq_distance_warn is not None else float(risk_control_config.get('liq_distance_warn', 0.20))  # 离清算价距离 WARN 阈值
+    risk_liq_distance_warn_recover = float(args.risk_liq_distance_warn_recover) if args.risk_liq_distance_warn_recover is not None else float(risk_control_config.get('liq_distance_warn_recover', risk_control_config.get('liq_distance_warn', 0.20)))  # 离清算价距离 WARN 恢复阈值
+    risk_liq_distance_reduce = float(args.risk_liq_distance_reduce) if args.risk_liq_distance_reduce is not None else float(risk_control_config.get('liq_distance_reduce', 0.10))  # 离清算价距离 REDUCE 阈值
+    risk_liq_distance_stop = float(args.risk_liq_distance_stop) if args.risk_liq_distance_stop is not None else float(risk_control_config.get('liq_distance_stop', 0.05))  # 离清算价距离 STOP 阈值
+
+    risk_control_config['poll_interval_seconds'] = risk_poll_interval
+    risk_control_config['stale_after_seconds'] = risk_stale_after
+    risk_control_config['reduce_position_ratio'] = risk_reduce_ratio
+    risk_control_config['stop_position_ratio'] = risk_stop_ratio
+    risk_control_config['reduce_cooldown_seconds'] = risk_reduce_cooldown
+    risk_control_config['liq_distance_warn'] = risk_liq_distance_warn
+    risk_control_config['liq_distance_warn_recover'] = risk_liq_distance_warn_recover
+    risk_control_config['liq_distance_reduce'] = risk_liq_distance_reduce
+    risk_control_config['liq_distance_stop'] = risk_liq_distance_stop
 
     logger.info(
         f"\n"
@@ -489,7 +527,7 @@ async def main():
         f"  风控减仓冷却: {risk_reduce_cooldown:.2f}s\n"
         f"  风控减仓目标: {risk_reduce_ratio:.2f}\n"
         f"  风控清仓目标: {risk_stop_ratio:.2f}\n"
-        f"  清算距离阈值: WARN={risk_liq_distance_warn:.2%} REDUCE={risk_liq_distance_reduce:.2%} STOP={risk_liq_distance_stop:.2%}\n"
+        f"  清算距离阈值: WARN={risk_liq_distance_warn:.2%} WARN恢复={risk_liq_distance_warn_recover:.2%} REDUCE={risk_liq_distance_reduce:.2%} STOP={risk_liq_distance_stop:.2%}\n"
         f"{'='*60}\n"
     )
     
@@ -651,6 +689,9 @@ async def main():
     finally:
         logger.info("🧹 清理资源...")
         await strategy.stop()
+        if lark_bot is not None:
+            await lark_bot.close()
+        await asyncio.sleep(0.1)
         logger.info("✅ 程序已退出")
 
 if __name__ == '__main__':

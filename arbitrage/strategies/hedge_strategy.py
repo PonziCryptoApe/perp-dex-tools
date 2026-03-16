@@ -94,7 +94,9 @@ class HedgeStrategy(BaseStrategy):
             symbol_a=symbol_a,
             symbol_b=symbol_b,
             config=self.risk_control_config,
-            lark_bot=lark_bot
+            lark_bot=lark_bot,
+            base_max_position=max_position,
+            position_step=quantity,
         )
         self._risk_reduce_cooldown_seconds = float(self.risk_control_config.get('reduce_cooldown_seconds', 5.0))
         self._last_risk_reduce_time = 0.0
@@ -121,6 +123,7 @@ class HedgeStrategy(BaseStrategy):
             max_position=max_position,
             position_step=quantity
         )
+        self.risk_control_service.set_base_max_position(max_position)
 
         # 价格监控服务
         self.monitor = PriceMonitorService(
@@ -194,10 +197,7 @@ class HedgeStrategy(BaseStrategy):
         self._yaml_check_interval = 60  # 每 60 秒检查一次 YAML 配置文件
         self._is_executed = False
         self._last_effective_max_position: Optional[Decimal] = None
-        self._locked_risk_cap_ratio: Optional[Decimal] = None
-        self._locked_risk_cap_level: Optional[str] = None
-        self._locked_risk_cap_exchange: str = ""
-        self._last_lock_override_key: Optional[tuple] = None
+        self._last_non_zero_strategy_qty = Decimal('0')
         # self._last_threshold_check_time = None
         # 动态阈值管理器
         dt_config = dynamic_threshold
@@ -287,6 +287,8 @@ class HedgeStrategy(BaseStrategy):
         await self.monitor.stop()
         if self.risk_control_enabled:
             await self.risk_control_service.stop()
+        if self.executor is not None:
+            await self.executor.close()
         
         logger.info(f"✅ 策略已停止: {self.strategy_name}")
 
@@ -391,6 +393,7 @@ class HedgeStrategy(BaseStrategy):
 
             if self.position_manager.accumulate_mode:
                 current_qty = self.position_manager.get_current_position_qty()
+                self._remember_last_non_zero_strategy_qty(current_qty)
                 logger.debug(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
                 self._is_executed = False
                 if current_qty < 0:
@@ -446,9 +449,11 @@ class HedgeStrategy(BaseStrategy):
                     # 如果仓位不为0，设置最大仓位为0
                     if self.position_manager.get_current_position_qty() != 0:
                         self.position_manager.max_position = 0
+                        self.risk_control_service.set_base_max_position(Decimal("0"))
                     # 如果最大仓位不为0，设置最大仓位为0
                     if self.position_manager.max_position != 0:
                         self.position_manager.max_position = 0
+                        self.risk_control_service.set_base_max_position(Decimal("0"))
                     # 最大仓位为0，并且当前仓位为0，停止策略
                     if self.position_manager.max_position == 0 and self.position_manager.get_current_position_qty() == 0:
                         logger.info(f"⏰ 达到策略结束时间，仓位减为0，等待5min后拉取B所交易量和权益并停止策略")
@@ -460,8 +465,12 @@ class HedgeStrategy(BaseStrategy):
 
                         volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
                         logger.info(
-                            f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f}"
-                            f"   预估损耗: {((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b) * 2) * 100:.4f}%"
+                            self._build_equity_loss_summary(
+                                equity_a=equity_a,
+                                equity_b=equity_b,
+                                volume_delta=volume_b,
+                                volume_label="B所交易量",
+                            )
                         )
                         
                         await self.stop()
@@ -491,70 +500,24 @@ class HedgeStrategy(BaseStrategy):
         level_name = getattr(risk_decision, "level", None)
         level_text = level_name.name if level_name is not None else "--"
         weak_exchange = getattr(risk_decision, "weak_exchange", "") if risk_decision else ""
-        decision_ratio = Decimal("1")
         if not self.risk_control_enabled:
-            self._last_lock_override_key = None
+            applied_ratio = Decimal("1")
             effective_max_position = base_max_position
         else:
-            decision_ratio = max(
+            applied_ratio = max(
                 Decimal("0"),
                 min(Decimal("1"), Decimal(str(getattr(risk_decision, "max_position_ratio", Decimal("1"))))),
             )
-            if level_name in {RiskLevel.REDUCE, RiskLevel.STOP}:
-                if self._locked_risk_cap_ratio is None:
-                    self._locked_risk_cap_ratio = decision_ratio
-                    self._locked_risk_cap_level = level_text
-                    self._locked_risk_cap_exchange = weak_exchange
-                    logger.warning(
-                        "🛡️ 锁定动态仓位上限: "
-                        f"level={level_text}, ratio={decision_ratio}, "
-                        f"弱腿交易所={weak_exchange or '--'}"
-                    )
-                elif decision_ratio < self._locked_risk_cap_ratio:
-                    old_ratio = self._locked_risk_cap_ratio
-                    self._locked_risk_cap_ratio = decision_ratio
-                    self._locked_risk_cap_level = level_text
-                    self._locked_risk_cap_exchange = weak_exchange
-                    logger.warning(
-                        "🛡️ 收紧动态仓位上限锁: "
-                        f"old_ratio={old_ratio}, new_ratio={decision_ratio}, "
-                        f"level={level_text}, 弱腿交易所={weak_exchange or '--'}"
-                    )
-
-            applied_ratio = decision_ratio
-            if self._locked_risk_cap_ratio is not None:
-                applied_ratio = min(applied_ratio, self._locked_risk_cap_ratio)
-                if decision_ratio > self._locked_risk_cap_ratio:
-                    lock_override_key = (
-                        level_text,
-                        str(decision_ratio),
-                        str(self._locked_risk_cap_ratio),
-                        weak_exchange,
-                    )
-                    if lock_override_key != self._last_lock_override_key:
-                        logger.warning(
-                            "🛡️ 动态仓位上限保持锁定: "
-                            f"level={level_text}, decision_ratio={decision_ratio}, "
-                            f"locked_ratio={self._locked_risk_cap_ratio}, "
-                            f"弱腿交易所={weak_exchange or '--'}, "
-                            f"锁来源={self._locked_risk_cap_level or '--'}/"
-                            f"{self._locked_risk_cap_exchange or '--'}"
-                        )
-                        self._last_lock_override_key = lock_override_key
-                else:
-                    self._last_lock_override_key = None
-
-            effective_max_position = base_max_position * applied_ratio
+            effective_max_position = self._align_position_limit_to_step(
+                base_max_position * applied_ratio
+            )
 
         self.position_manager.set_effective_max_position(effective_max_position)
 
         current_effective = self.position_manager.get_effective_max_position()
         if self._last_effective_max_position != current_effective:
             weak_exchange_text = f", 弱腿交易所={weak_exchange}" if weak_exchange else ""
-            ratio_text = decision_ratio if self.risk_control_enabled else Decimal("1")
-            lock_text = ""
-            if self._locked_risk_cap_ratio is not None:
-                lock_text = f", 锁定上限比例={self._locked_risk_cap_ratio}"
+            ratio_text = applied_ratio if self.risk_control_enabled else Decimal("1")
             previous_effective = (
                 self._last_effective_max_position
                 if self._last_effective_max_position is not None
@@ -562,9 +525,9 @@ class HedgeStrategy(BaseStrategy):
             )
             logger.warning(
                 f"🛡️ 更新有效最大仓位: 等级={level_text}, "
-                f"基础最大仓位={base_max_position}, 动态上限比例={ratio_text}, "
+                f"基础最大仓位={base_max_position}, 当前仓位上限比例={ratio_text}, "
                 f"有效最大仓位={previous_effective}->{current_effective}"
-                f"{weak_exchange_text}{lock_text}"
+                f"{weak_exchange_text}"
             )
             self._last_effective_max_position = current_effective
 
@@ -585,13 +548,10 @@ class HedgeStrategy(BaseStrategy):
         base_max_position = abs(self.position_manager.max_position)
         dynamic_target_abs = max(Decimal("0"), effective_max_position)
         target_abs = dynamic_target_abs
-        if getattr(risk_decision, "need_reduce", False) and base_max_position > Decimal("0"):
-            reduce_ratio = max(
-                Decimal("0"),
-                min(Decimal("1"), Decimal(str(getattr(risk_decision, "target_position_ratio", Decimal("1"))))),
-            )
-            level_target_abs = base_max_position * reduce_ratio
-            target_abs = min(target_abs, level_target_abs)
+        target_abs = self._align_position_limit_to_step(target_abs)
+
+        if not getattr(risk_decision, "need_reduce", False):
+            return False, target_abs
 
         if current_abs <= target_abs:
             return False, target_abs
@@ -658,6 +618,7 @@ class HedgeStrategy(BaseStrategy):
             else:
                 ratio = max(Decimal("0"), min(Decimal("1"), Decimal(str(target_ratio))))
                 target_abs = max_position_abs * ratio
+        target_abs = self._align_position_limit_to_step(target_abs)
 
         if current_abs <= target_abs:
             logger.info(
@@ -755,6 +716,51 @@ class HedgeStrategy(BaseStrategy):
                 return True
             finally:
                 self._is_executing = False
+
+    def _align_position_limit_to_step(self, value: Decimal) -> Decimal:
+        """将风控计算出的目标仓位按单次成交量向下取整。"""
+        aligned_value = max(Decimal("0"), Decimal(str(value)))
+        step = abs(Decimal(str(self.position_manager.position_step)))
+        if step <= Decimal("0"):
+            return aligned_value
+        step_count = (aligned_value / step).to_integral_value(rounding=ROUND_DOWN)
+        return step_count * step
+
+    def _remember_last_non_zero_strategy_qty(self, current_qty: Decimal) -> None:
+        """记录最近一次非零策略仓位，用于空仓时补充说明刚刚归零的方向。"""
+        if current_qty != 0:
+            self._last_non_zero_strategy_qty = Decimal(str(current_qty))
+
+    def _get_flatten_direction_text(self) -> str:
+        """返回最近一次从哪一侧仓位归零。"""
+        if self._last_non_zero_strategy_qty > 0:
+            return "多->0"
+        if self._last_non_zero_strategy_qty < 0:
+            return "空->0"
+        return "--"
+
+    def _build_equity_loss_summary(
+        self,
+        equity_a: Decimal,
+        equity_b: Decimal,
+        volume_delta: Decimal,
+        volume_label: str,
+    ) -> str:
+        """构建统一的权益损耗摘要日志。"""
+        total_equity_loss = (self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)
+        equity_diff = equity_a - equity_b
+        flatten_direction = self._get_flatten_direction_text()
+        if volume_delta > 0:
+            estimated_loss = total_equity_loss / (volume_delta * 2) * 100
+        else:
+            estimated_loss = Decimal("0")
+        return (
+            f"💰 当前权益损耗: ${total_equity_loss:.2f}, "
+            f"A-B权益差值: {equity_diff:.2f}, "
+            f"本次策略仓位归零方向: {flatten_direction}, "
+            f"{volume_label}: {volume_delta:.2f}, "
+            f"预估损耗(权益减量/交易增量 * 100%): {estimated_loss:.4f}%"
+        )
 
     def _estimate_cost_bps(self, signal_delay_ms_a: float, signal_delay_ms_b: float) -> dict:
         """估算执行成本（bps）"""
@@ -1356,6 +1362,7 @@ class HedgeStrategy(BaseStrategy):
                     if new_max_position != self.position_manager.max_position:
                         logger.info(f"🔄 从 YAML 配置更新 max_position: {self.position_manager.max_position} --> {new_max_position}")
                         self.position_manager.max_position = new_max_position
+                        self.risk_control_service.set_base_max_position(new_max_position)
                     
             except Exception as e:
                 logger.exception(f"⚠️ 检查 YAML 配置文件时出错: {e}")
@@ -1638,16 +1645,23 @@ class HedgeStrategy(BaseStrategy):
                 try:
                     volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
                     if volume_b > self.start_vol_b:
+                        volume_delta = volume_b - self.start_vol_b
                         logger.info(
-                            f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f},"
-                            f"   B所交易增量 {volume_b - self.start_vol_b},"
-                            f"   预估损耗(权益减量/交易增量 * 100%): {((self.start_equity_a + self.start_equity_b) - (equity_a + equity_b)) / ((volume_b - self.start_vol_b) * 2) * 100:.4f}%"
+                            self._build_equity_loss_summary(
+                                equity_a=equity_a,
+                                equity_b=equity_b,
+                                volume_delta=volume_delta,
+                                volume_label="B所交易增量",
+                            )
                         )
                     else:
                         logger.info(
-                            f"💰 当前权益损耗: ${(self.start_equity_a + self.start_equity_b) - (equity_a + equity_b):.2f},"
-                            f"   B所交易增量量 0,"
-                            f"   预估损耗(权益减量/交易增量 * 100%): 0.0%"
+                            self._build_equity_loss_summary(
+                                equity_a=equity_a,
+                                equity_b=equity_b,
+                                volume_delta=Decimal("0"),
+                                volume_label="B所交易增量",
+                            )
                         )
                 except Exception as e:
                     logger.exception(f"❌ 获取账户权益或交易量失败: {e}")
