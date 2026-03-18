@@ -18,6 +18,7 @@ from ..services.price_monitor import PriceMonitorService
 from ..services.position_manager import PositionManagerService
 from ..services.order_executor_parallel import OrderExecutor
 from ..services.dynamic_threshold import DynamicThresholdManager
+from ..services.quantile_signal_manager import QuantileSignalManager
 from ..services.risk_control_service import RiskControlService, RiskLevel
 from ..models.position import Position
 
@@ -49,6 +50,7 @@ class HedgeStrategy(BaseStrategy):
         cooldown_range: tuple = (10.0, 10.0),
         cooldown_seconds: Optional[float] = 5,
         dynamic_threshold: Optional[dict] = None,
+        signal_logic: Optional[dict] = None,
         end_time: Optional[str] = None,
         edge_filter_enabled: bool = False,
         min_edge_bps: float = 0.8,
@@ -201,19 +203,35 @@ class HedgeStrategy(BaseStrategy):
         self._last_effective_max_position: Optional[Decimal] = None
         self._last_non_zero_strategy_qty = Decimal('0')
         # self._last_threshold_check_time = None
-        # 动态阈值管理器
-        dt_config = dynamic_threshold
-        if dt_config.get('enabled', False):
-            self.threshold_manager = DynamicThresholdManager(
-                sample_size=dt_config.get('sample_size', 1000),
-                min_samples=dt_config.get('min_samples', 200),
-                std_multiplier=dt_config.get('std_multiplier', 1.0),
-                min_total_threshold=dt_config.get('min_total_threshold', 0.02),
-                max_std_multiplier=dt_config.get('max_std_multiplier', 4.0),
-                min_std_multiplier=dt_config.get('min_std_multiplier', 0.0)
+        # 信号逻辑配置（默认沿用旧逻辑）
+        self.signal_logic = signal_logic if isinstance(signal_logic, dict) else {}
+        self.signal_mode = str(self.signal_logic.get('mode', 'legacy')).lower()
+        self.signal_quantile = float(self.signal_logic.get('quantile', 0.6))
+        self.signal_sample_size = int(self.signal_logic.get('sample_size', 2000))
+        self.signal_min_samples = int(self.signal_logic.get('min_samples', self.signal_sample_size))
+
+        # 分位数信号管理器（新逻辑）
+        self.quantile_manager = None
+        if self.signal_mode == 'quantile':
+            self.quantile_manager = QuantileSignalManager(
+                sample_size=self.signal_sample_size,
+                min_samples=self.signal_min_samples,
+                quantile=self.signal_quantile,
             )
-        else:
-            self.threshold_manager = None
+
+        # 动态阈值管理器（旧逻辑）
+        self.threshold_manager = None
+        if self.signal_mode != 'quantile':
+            dt_config = dynamic_threshold if isinstance(dynamic_threshold, dict) else {}
+            if dt_config.get('enabled', False):
+                self.threshold_manager = DynamicThresholdManager(
+                    sample_size=dt_config.get('sample_size', 1000),
+                    min_samples=dt_config.get('min_samples', 200),
+                    std_multiplier=dt_config.get('std_multiplier', 1.0),
+                    min_total_threshold=dt_config.get('min_total_threshold', 0.02),
+                    max_std_multiplier=dt_config.get('max_std_multiplier', 4.0),
+                    min_std_multiplier=dt_config.get('min_std_multiplier', 0.0)
+                )
         
         
         logger.info(
@@ -228,6 +246,8 @@ class HedgeStrategy(BaseStrategy):
             f"   Monitor Only: {monitor_only}\n"
             f"   累计模式: {'✅ 启用' if accumulate_mode else '❌ 禁用'}\n"
             f"   风控模块: {'✅ 启用' if self.risk_control_enabled else '❌ 禁用'}\n"
+            f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else '标准差'}\n"
+            f"   分位数配置: P{int(self.signal_quantile * 100)} | 样本{self.signal_sample_size} | 最小样本{self.signal_min_samples}\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
@@ -375,6 +395,9 @@ class HedgeStrategy(BaseStrategy):
                 # self._last_threshold_check_time = time.time()
             # now = time.time()
             # ✅ 新增：记录价差并尝试调整阈值
+            if self.quantile_manager and signal_flag:
+                self.quantile_manager.add_spreads(spread_pct, reverse_spread_pct)
+
             if self.threshold_manager and signal_flag:
                 # 添加数据
                 self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
@@ -396,7 +419,7 @@ class HedgeStrategy(BaseStrategy):
             if self.position_manager.accumulate_mode:
                 current_qty = self.position_manager.get_current_position_qty()
                 self._remember_last_non_zero_strategy_qty(current_qty)
-                logger.debug(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
+                # logger.debug(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
                 self._is_executed = False
                 if current_qty < 0:
                     # ✅ 优先检查平仓信号（如果可以平仓）
@@ -495,6 +518,25 @@ class HedgeStrategy(BaseStrategy):
         if ts_val > 1e10:
             ts_val = ts_val / 1000.0
         return ts_val
+
+    def _calculate_avg_local_spread_pct(self, prices: PriceSnapshot) -> Decimal:
+        """计算两所平均点差（百分比）。"""
+        mid_a = (prices.exchange_a_bid + prices.exchange_a_ask) / 2
+        mid_b = (prices.exchange_b_bid + prices.exchange_b_ask) / 2
+        if mid_a <= 0 or mid_b <= 0:
+            return Decimal('0')
+        spread_a = (prices.exchange_a_ask - prices.exchange_a_bid) / mid_a * Decimal('100')
+        spread_b = (prices.exchange_b_ask - prices.exchange_b_bid) / mid_b * Decimal('100')
+        return (spread_a + spread_b) / 2
+
+    def _get_quantile_thresholds(self) -> tuple[Optional[Decimal], Optional[Decimal]]:
+        """获取分位数阈值（开仓/平仓）。"""
+        if not self.quantile_manager:
+            return None, None
+        open_q, close_q = self.quantile_manager.get_thresholds()
+        if open_q is None or close_q is None:
+            return None, None
+        return Decimal(str(open_q)), Decimal(str(close_q))
 
     def _apply_risk_position_cap(self, risk_decision) -> Decimal:
         """根据风控决策刷新当前有效最大仓位。"""
@@ -867,7 +909,26 @@ class HedgeStrategy(BaseStrategy):
         base_direction = prices.calculate_direction_b('long')
         direction_ok = base_direction if not self.direction_reverse else not base_direction
         # 判断是否满足开仓阈值
-        if spread_pct >= Decimal(str(self.open_threshold_pct)):
+        compare_spread_pct = spread_pct
+        threshold_pct = Decimal(str(self.open_threshold_pct))
+        threshold_label = "阈值"
+        spread_label = "价差"
+        extra_spread_info = ""
+        if self.signal_mode == 'quantile' and self.quantile_manager:
+            open_q, _ = self._get_quantile_thresholds()
+            if open_q is None:
+                return
+            avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
+            compare_spread_pct = spread_pct - avg_local_spread_pct
+            threshold_pct = open_q
+            threshold_label = f"P{int(self.signal_quantile * 100)}"
+            spread_label = "修正价差"
+            extra_spread_info = (
+                f"   平均点差: {avg_local_spread_pct:.4f}%\n"
+                f"   原始价差: {spread_pct:.4f}%\n"
+            )
+
+        if compare_spread_pct >= threshold_pct:
             self.signal_stats['open']['total'] += 1
             # 记录信号触发时间
             signal_trigger_time = time.time()
@@ -903,7 +964,8 @@ class HedgeStrategy(BaseStrategy):
                     f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
                     f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
                     f"   最小深度: {min_depth} < 阈值: {self.min_depth_quantity}\n"
-                    f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)"
+                    f"{extra_spread_info}"
+                    f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
                 )
                 return
 
@@ -955,7 +1017,8 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_b.exchange_name}_ask: ${prices.exchange_b_ask}\n"
                 f"   {self.exchange_b.exchange_name}_ask_size: {prices.exchange_b_ask_size}\n"
                 f"   {edge_text}"
-                f"   价差: {spread_pct:.4f}% (阈值: {self.open_threshold_pct}%)"
+                f"{extra_spread_info}"
+                f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
             )
 
             # ✅ 检查是否为监控模式
@@ -1085,7 +1148,7 @@ class HedgeStrategy(BaseStrategy):
                         if current_time - self.last_log_time >= self.log_interval:
                             logger.debug(
                                 f"📊 当前价差: {spread_pct:.4f}% "
-                                f"(开仓阈值: {self.open_threshold_pct}%) - 监控开仓中..."
+                                f"({spread_label}: {compare_spread_pct:.4f}%, {threshold_label}: {threshold_pct:.4f}%) - 监控开仓中..."
                             )
                             self.last_log_time = current_time
 
@@ -1124,7 +1187,26 @@ class HedgeStrategy(BaseStrategy):
         base_direction = prices.calculate_direction_b('short')
         direction_ok = base_direction if not self.direction_reverse else not base_direction
         # 判断是否满足平仓阈值
-        if spread_pct >= Decimal(str(self.close_threshold_pct)):
+        compare_spread_pct = spread_pct
+        threshold_pct = Decimal(str(self.close_threshold_pct))
+        threshold_label = "阈值"
+        spread_label = "价差"
+        extra_spread_info = ""
+        if self.signal_mode == 'quantile' and self.quantile_manager:
+            _, close_q = self._get_quantile_thresholds()
+            if close_q is None:
+                return
+            avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
+            compare_spread_pct = spread_pct - avg_local_spread_pct
+            threshold_pct = close_q
+            threshold_label = f"P{int(self.signal_quantile * 100)}"
+            spread_label = "修正价差"
+            extra_spread_info = (
+                f"   平均点差: {avg_local_spread_pct:.4f}%\n"
+                f"   原始价差: {spread_pct:.4f}%\n"
+            )
+
+        if compare_spread_pct >= threshold_pct:
             self.signal_stats['close']['total'] += 1
 
             # 记录信号触发时间
@@ -1161,7 +1243,8 @@ class HedgeStrategy(BaseStrategy):
                     f"   {self.exchange_a.exchange_name} 卖一深度: {depth_a}\n"
                     f"   {self.exchange_b.exchange_name} 买一深度: {depth_b}\n"
                     f"   最小深度: {min_depth} < 阈值: {self.min_depth_quantity}\n"
-                    f"   价差: {spread_pct:.4f}% (阈值: {self.close_threshold_pct}%)"
+                    f"{extra_spread_info}"
+                    f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
                 )
                 return
 
@@ -1213,7 +1296,8 @@ class HedgeStrategy(BaseStrategy):
                 f"   {self.exchange_b.exchange_name}_bid: ${prices.exchange_b_bid}\n"
                 f"   {self.exchange_b.exchange_name}_bid_size: {prices.exchange_b_bid_size}\n"
                 f"   {edge_text}"
-                f"   价差: {spread_pct:.4f}%(阈值: {self.close_threshold_pct}%)"
+                f"{extra_spread_info}"
+                f"   {spread_label}: {compare_spread_pct:.4f}%({threshold_label}: {threshold_pct:.4f}%)"
             )
             
             # ✅ 检查是否为监控模式
@@ -1380,7 +1464,7 @@ class HedgeStrategy(BaseStrategy):
                             # ✅ 节流日志：每5秒最多输出一次
                             logger.info(
                                 f"📊 当前价差: {spread_pct:.4f}% "
-                                f"(反向开仓阈值: {self.close_threshold_pct}%) - 监控反向开仓中..."
+                                f"({spread_label}: {compare_spread_pct:.4f}%, {threshold_label}: {threshold_pct:.4f}%) - 监控反向开仓中..."
                             )
                             self.last_log_time = current_time
                 finally:
@@ -1393,7 +1477,7 @@ class HedgeStrategy(BaseStrategy):
         config_path = self.config_yaml_path
         if not os.path.exists(config_path):
             return
-        logger.debug(f"🔍 检查 YAML 配置文件更新: {config_path}")
+        # logger.debug(f"🔍 检查 YAML 配置文件更新: {config_path}")
          # 检查间隔
         if self._last_yaml_check_time is None:
             self._last_yaml_check_time = time.time()
@@ -1625,7 +1709,19 @@ class HedgeStrategy(BaseStrategy):
         
         if current_time - self._last_stats_log_time >= self._stats_log_interval:
             threshold_info = ""
-            if self.threshold_manager:
+            sample_time_length = 0.0
+            if self.quantile_manager:
+                stats = self.quantile_manager.get_stats()
+                threshold_info = (
+                    f"\n"
+                    f"📊 分位数阈值:\n"
+                    f"   模式: P{stats['quantile_pct']} | 样本{stats['sample_size']} | 最小样本{stats['min_samples']}\n"
+                    f"   当前: 开仓{(stats.get('current_open') or 0):.4f}% "
+                    f"        平仓{(stats.get('current_close') or 0):.4f}%\n"
+                    f"   样本: 开仓{stats['open_samples']} 平仓{stats['close_samples']} | 就绪: {'是' if stats.get('ready') else '否'}\n"
+                )
+                sample_time_length = self.quantile_manager.get_time_length()
+            elif self.threshold_manager:
                 stats = self.threshold_manager.get_stats()
                 threshold_info = (
                     f"\n"

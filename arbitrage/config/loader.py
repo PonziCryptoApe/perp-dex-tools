@@ -25,6 +25,7 @@ class PairConfig:
     dynamic_threshold: Dict[str, Any] = None  # ✅ 新增：动态阈值配置
     edge_filter: Dict[str, Any] = None  # ✅ 新增：边际二次过滤配置
     risk_control: Dict[str, Any] = None  # ✅ 新增：账户风险控制配置
+    signal_logic: Dict[str, Any] = None  # ✅ 新增：信号逻辑配置
 
 
 def load_pair_config(pair_id: str) -> PairConfig:
@@ -89,6 +90,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
     dynamic_threshold = pair_data.get('dynamic_threshold', {})
     edge_filter = pair_data.get('edge_filter', {})
     risk_control = pair_data.get('risk_control', {})
+    signal_logic = pair_data.get('signal_logic', {})
 
     return PairConfig(
         pair_id=pair_id,
@@ -107,6 +109,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
         dynamic_threshold=dynamic_threshold,
         edge_filter=edge_filter,
         risk_control=risk_control,
+        signal_logic=signal_logic,
     )
 
 def list_all_pairs() -> list:

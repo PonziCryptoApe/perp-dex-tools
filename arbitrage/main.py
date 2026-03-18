@@ -279,6 +279,9 @@ async def main():
                        help='平仓阈值（可选，覆盖配置）')
     parser.add_argument('--min-total-threshold', '-mtt', type=float, default=None, help='最小的阈值和')
     parser.add_argument('--sample-size', type=int, help='价差样本数最终的值')
+    parser.add_argument('--signal-mode', choices=['legacy', 'quantile'], default=None, help='信号逻辑模式（默认读取配置）')
+    parser.add_argument('--signal-quantile', type=float, default=None, help='分位数门槛（如 0.6 表示 P60）')
+    parser.add_argument('--signal-sample-size', type=int, default=None, help='分位数样本数（冷启动阈值）')
     parser.add_argument('--env-file', type=str, default=None,
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
@@ -420,6 +423,9 @@ async def main():
     max_position = Decimal(str(args.max_position)) if args.max_position is not None else Decimal(str(config.max_position))
     direction_reverse = args.direction_reverse
     dynamic_threshold = config.dynamic_threshold if hasattr(config, 'dynamic_threshold') else False
+    signal_logic = config.signal_logic if hasattr(config, 'signal_logic') else {}
+    if not isinstance(signal_logic, dict):
+        signal_logic = {}
     edge_filter_config = config.edge_filter if hasattr(config, 'edge_filter') and isinstance(config.edge_filter, dict) else {}
     risk_control_config = dict(config.risk_control) if hasattr(config, 'risk_control') and isinstance(config.risk_control, dict) else {}
 
@@ -440,6 +446,15 @@ async def main():
         if args.edge_latency_free_ms is not None
         else float(edge_filter_config.get('latency_free_ms', 120.0))
     )
+
+    if args.signal_mode is not None:
+        signal_logic['mode'] = args.signal_mode
+    if args.signal_quantile is not None:
+        signal_logic['quantile'] = float(args.signal_quantile)
+    if args.signal_sample_size is not None:
+        signal_logic['sample_size'] = int(args.signal_sample_size)
+        # 冷启动最小样本默认与样本数一致
+        signal_logic['min_samples'] = int(args.signal_sample_size)
 
     if dynamic_threshold:
         if args.min_total_threshold is not None:
@@ -464,6 +479,10 @@ async def main():
     dt_max_std_multiplier = dynamic_threshold.get('max_std_multiplier', '--') if isinstance(dynamic_threshold, dict) else '--'
     dt_min_std_multiplier = dynamic_threshold.get('min_std_multiplier', '--') if isinstance(dynamic_threshold, dict) else '--'
     dt_enabled_text = '启用' if isinstance(dynamic_threshold, dict) and dynamic_threshold.get('enabled', False) else '禁用'
+    signal_mode = str(signal_logic.get('mode', 'legacy')).lower()
+    signal_quantile = float(signal_logic.get('quantile', 0.6))
+    signal_sample_size = int(signal_logic.get('sample_size', 2000))
+    signal_min_samples = int(signal_logic.get('min_samples', signal_sample_size))
     risk_control_enabled = bool(risk_control_config.get('enabled', False))  # 风控模块总开关
     risk_poll_interval = float(args.risk_poll_interval_seconds) if args.risk_poll_interval_seconds is not None else float(risk_control_config.get('poll_interval_seconds', 1.0))  # 风控后台轮询间隔（秒）
     risk_stale_after = float(args.risk_stale_after_seconds) if args.risk_stale_after_seconds is not None else float(risk_control_config.get('stale_after_seconds', 3.0))  # 风控快照过期判定阈值（秒）
@@ -503,6 +522,8 @@ async def main():
         f"  样本数:       {dt_sample_size}\n"
         f"  最大标准差系数: {dt_max_std_multiplier}\n"
         f"  最小标准差系数: {dt_min_std_multiplier}\n"
+        f"  信号逻辑:     {'分位数' if signal_mode == 'quantile' else '标准差'}\n"
+        f"  分位数配置:   P{int(signal_quantile * 100)} | 样本{signal_sample_size} | 最小样本{signal_min_samples}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"
@@ -610,6 +631,7 @@ async def main():
         max_position=max_position,
         direction_reverse=direction_reverse,
         dynamic_threshold=dynamic_threshold,  # ✅ 传递动态阈值配置
+        signal_logic=signal_logic,  # ✅ 传递信号逻辑配置
         cooldown_seconds=cooldown_seconds,
         end_time=args.end_time,
         edge_filter_enabled=edge_filter_enabled,

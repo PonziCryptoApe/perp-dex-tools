@@ -5,6 +5,7 @@ from .order_executor import OrderExecutor
 from .order_executor_parallel import OrderExecutor
 from .position_manager import PositionManagerService
 from .dynamic_threshold import DynamicThresholdManager
+from .quantile_signal_manager import QuantileSignalManager
 
 __all__ = [
     'PriceMonitorService',
@@ -12,4 +13,5 @@ __all__ = [
     'OrderExecutor',
     'PositionManagerService',
     'DynamicThresholdManager',
+    'QuantileSignalManager',
 ]
