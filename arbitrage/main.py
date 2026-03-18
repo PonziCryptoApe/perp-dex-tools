@@ -282,6 +282,7 @@ async def main():
     parser.add_argument('--signal-mode', choices=['legacy', 'quantile'], default=None, help='信号逻辑模式（默认读取配置）')
     parser.add_argument('--signal-quantile', type=float, default=None, help='分位数门槛（如 0.6 表示 P60）')
     parser.add_argument('--signal-sample-size', type=int, default=None, help='分位数样本数（冷启动阈值）')
+    parser.add_argument('--signal-min-edge-pct', type=float, default=None, help='分位数模式最小安全边际（%）')
     parser.add_argument('--env-file', type=str, default=None,
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
@@ -455,6 +456,8 @@ async def main():
         signal_logic['sample_size'] = int(args.signal_sample_size)
         # 冷启动最小样本默认与样本数一致
         signal_logic['min_samples'] = int(args.signal_sample_size)
+    if args.signal_min_edge_pct is not None:
+        signal_logic['min_edge_pct'] = float(args.signal_min_edge_pct)
 
     if dynamic_threshold:
         if args.min_total_threshold is not None:

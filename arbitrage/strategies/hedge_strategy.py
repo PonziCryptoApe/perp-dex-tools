@@ -211,6 +211,7 @@ class HedgeStrategy(BaseStrategy):
         self.signal_quantile = float(self.signal_logic.get('quantile', 0.6))
         self.signal_sample_size = int(self.signal_logic.get('sample_size', 2000))
         self.signal_min_samples = int(self.signal_logic.get('min_samples', self.signal_sample_size))
+        self.signal_min_edge_pct = Decimal(str(self.signal_logic.get('min_edge_pct', 0.01)))
         self.quantile_log_enabled = bool(self.signal_logic.get('log_samples', True))
         self.quantile_event_log_enabled = bool(self.signal_logic.get('log_events', True))
         self.quantile_log_every_n = int(self.signal_logic.get('log_every_n', 1))
@@ -259,6 +260,7 @@ class HedgeStrategy(BaseStrategy):
             f"   风控模块: {'✅ 启用' if self.risk_control_enabled else '❌ 禁用'}\n"
             f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else '标准差'}\n"
             f"   分位数配置: P{int(self.signal_quantile * 100)} | 样本{self.signal_sample_size} | 最小样本{self.signal_min_samples}\n"
+            f"   分位数最小边际: {self.signal_min_edge_pct:.4f}%\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
@@ -506,12 +508,13 @@ class HedgeStrategy(BaseStrategy):
                         logger.info(f"⏰ 5分钟等待结束，开始获取B所交易量和权益")
 
                         volume_a, equity_a, volume_b, equity_b = await self.get_equity_and_volume()
+                        volume_delta = volume_b - self.start_vol_b
                         logger.info(
                             self._build_equity_loss_summary(
                                 equity_a=equity_a,
                                 equity_b=equity_b,
-                                volume_delta=volume_b,
-                                volume_label="B所交易量",
+                                volume_delta=volume_delta,
+                                volume_label="B所交易增量",
                             )
                         )
                         
@@ -1064,13 +1067,19 @@ class HedgeStrategy(BaseStrategy):
                 return
             avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
             compare_spread_pct = spread_pct - avg_local_spread_pct
-            threshold_pct = open_q
+            threshold_pct = max(open_q, Decimal('0'))
             threshold_label = f"P{int(self.signal_quantile * 100)}"
             spread_label = "修正价差"
             extra_spread_info = (
                 f"   平均点差: {avg_local_spread_pct:.4f}%\n"
                 f"   原始价差: {spread_pct:.4f}%\n"
             )
+
+        if self.signal_mode == 'quantile' and self.quantile_manager:
+            if compare_spread_pct <= 0:
+                return
+            if compare_spread_pct < threshold_pct + self.signal_min_edge_pct:
+                return
 
         if compare_spread_pct >= threshold_pct:
             self.signal_stats['open']['total'] += 1
@@ -1353,13 +1362,19 @@ class HedgeStrategy(BaseStrategy):
                 return
             avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
             compare_spread_pct = spread_pct - avg_local_spread_pct
-            threshold_pct = close_q
+            threshold_pct = max(close_q, Decimal('0'))
             threshold_label = f"P{int(self.signal_quantile * 100)}"
             spread_label = "修正价差"
             extra_spread_info = (
                 f"   平均点差: {avg_local_spread_pct:.4f}%\n"
                 f"   原始价差: {spread_pct:.4f}%\n"
             )
+
+        if self.signal_mode == 'quantile' and self.quantile_manager:
+            if compare_spread_pct <= 0:
+                return
+            if compare_spread_pct < threshold_pct + self.signal_min_edge_pct:
+                return
 
         if compare_spread_pct >= threshold_pct:
             self.signal_stats['close']['total'] += 1
