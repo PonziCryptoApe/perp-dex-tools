@@ -8,6 +8,8 @@ import random
 import time
 import yaml
 import os
+import csv
+from pathlib import Path
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
@@ -209,6 +211,13 @@ class HedgeStrategy(BaseStrategy):
         self.signal_quantile = float(self.signal_logic.get('quantile', 0.6))
         self.signal_sample_size = int(self.signal_logic.get('sample_size', 2000))
         self.signal_min_samples = int(self.signal_logic.get('min_samples', self.signal_sample_size))
+        self.quantile_log_enabled = bool(self.signal_logic.get('log_samples', True))
+        self.quantile_event_log_enabled = bool(self.signal_logic.get('log_events', True))
+        self.quantile_log_every_n = int(self.signal_logic.get('log_every_n', 1))
+        self._quantile_log_counter = 0
+        self.quantile_log_dir = Path(self.signal_logic.get('log_dir', 'logs/arbitrage/quantile_signal'))
+        self._quantile_samples_path: Optional[Path] = None
+        self._quantile_events_path: Optional[Path] = None
 
         # 分位数信号管理器（新逻辑）
         self.quantile_manager = None
@@ -218,6 +227,8 @@ class HedgeStrategy(BaseStrategy):
                 min_samples=self.signal_min_samples,
                 quantile=self.signal_quantile,
             )
+            if self.quantile_log_enabled or self.quantile_event_log_enabled:
+                self._init_quantile_logs()
 
         # 动态阈值管理器（旧逻辑）
         self.threshold_manager = None
@@ -397,6 +408,12 @@ class HedgeStrategy(BaseStrategy):
             # ✅ 新增：记录价差并尝试调整阈值
             if self.quantile_manager and signal_flag:
                 self.quantile_manager.add_spreads(spread_pct, reverse_spread_pct)
+                avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
+                self._log_quantile_sample(
+                    spread_pct=spread_pct,
+                    reverse_spread_pct=reverse_spread_pct,
+                    avg_local_spread_pct=avg_local_spread_pct,
+                )
 
             if self.threshold_manager and signal_flag:
                 # 添加数据
@@ -518,6 +535,133 @@ class HedgeStrategy(BaseStrategy):
         if ts_val > 1e10:
             ts_val = ts_val / 1000.0
         return ts_val
+
+    def _init_quantile_logs(self) -> None:
+        """初始化分位数日志文件。"""
+        self.quantile_log_dir.mkdir(parents=True, exist_ok=True)
+        date_tag = datetime.now().strftime('%Y%m%d')
+        self._quantile_samples_path = self.quantile_log_dir / f"quantile_samples_{self.symbol}_{date_tag}.csv"
+        self._quantile_events_path = self.quantile_log_dir / f"quantile_events_{self.symbol}_{date_tag}.csv"
+
+        if self.quantile_log_enabled and self._quantile_samples_path and not self._quantile_samples_path.exists():
+            with self._quantile_samples_path.open('w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp',
+                    'datetime',
+                    'symbol',
+                    'open_spread_pct',
+                    'close_spread_pct',
+                    'avg_local_spread_pct',
+                    'open_adjusted_pct',
+                    'close_adjusted_pct',
+                    'open_threshold_pct',
+                    'close_threshold_pct',
+                    'quantile',
+                    'sample_size',
+                    'ready',
+                    'open_condition',
+                    'close_condition',
+                ])
+
+        if self.quantile_event_log_enabled and self._quantile_events_path and not self._quantile_events_path.exists():
+            with self._quantile_events_path.open('w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp',
+                    'datetime',
+                    'symbol',
+                    'signal_type',
+                    'stage',
+                    'open_spread_pct',
+                    'close_spread_pct',
+                    'avg_local_spread_pct',
+                    'adjusted_spread_pct',
+                    'threshold_pct',
+                    'quantile',
+                    'note',
+                ])
+
+    def _log_quantile_sample(
+        self,
+        spread_pct: Decimal,
+        reverse_spread_pct: Decimal,
+        avg_local_spread_pct: Decimal,
+    ) -> None:
+        """记录分位数样本快照。"""
+        if not (self.quantile_manager and self.quantile_log_enabled and self._quantile_samples_path):
+            return
+        self._quantile_log_counter += 1
+        if self.quantile_log_every_n > 1 and self._quantile_log_counter % self.quantile_log_every_n != 0:
+            return
+
+        stats = self.quantile_manager.get_stats()
+        open_threshold = stats.get('current_open')
+        close_threshold = stats.get('current_close')
+        ready = stats.get('ready')
+
+        open_adjusted = spread_pct - avg_local_spread_pct
+        close_adjusted = reverse_spread_pct - avg_local_spread_pct
+
+        open_condition = ""
+        close_condition = ""
+        if open_threshold is not None:
+            open_condition = int(open_adjusted >= Decimal(str(open_threshold)))
+        if close_threshold is not None:
+            close_condition = int(close_adjusted >= Decimal(str(close_threshold)))
+
+        now = time.time()
+        with self._quantile_samples_path.open('a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                f"{now:.6f}",
+                datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                self.symbol,
+                f"{spread_pct:.6f}",
+                f"{reverse_spread_pct:.6f}",
+                f"{avg_local_spread_pct:.6f}",
+                f"{open_adjusted:.6f}",
+                f"{close_adjusted:.6f}",
+                f"{open_threshold:.6f}" if open_threshold is not None else "",
+                f"{close_threshold:.6f}" if close_threshold is not None else "",
+                f"{stats.get('quantile', 0):.4f}",
+                stats.get('open_samples', 0),
+                "1" if ready else "0",
+                open_condition,
+                close_condition,
+            ])
+
+    def _log_quantile_event(
+        self,
+        signal_type: str,
+        stage: str,
+        spread_pct: Decimal,
+        reverse_spread_pct: Decimal,
+        avg_local_spread_pct: Decimal,
+        adjusted_spread_pct: Decimal,
+        threshold_pct: Decimal,
+        note: str = "",
+    ) -> None:
+        """记录分位数触发事件。"""
+        if not (self.quantile_manager and self.quantile_event_log_enabled and self._quantile_events_path):
+            return
+        now = time.time()
+        with self._quantile_events_path.open('a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                f"{now:.6f}",
+                datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                self.symbol,
+                signal_type,
+                stage,
+                f"{spread_pct:.6f}",
+                f"{reverse_spread_pct:.6f}",
+                f"{avg_local_spread_pct:.6f}",
+                f"{adjusted_spread_pct:.6f}",
+                f"{threshold_pct:.6f}",
+                f"{self.signal_quantile:.4f}",
+                note,
+            ])
 
     def _calculate_avg_local_spread_pct(self, prices: PriceSnapshot) -> Decimal:
         """计算两所平均点差（百分比）。"""
@@ -932,6 +1076,17 @@ class HedgeStrategy(BaseStrategy):
             self.signal_stats['open']['total'] += 1
             # 记录信号触发时间
             signal_trigger_time = time.time()
+            if self.signal_mode == 'quantile' and self.quantile_manager:
+                self._log_quantile_event(
+                    signal_type='open',
+                    stage='condition_met',
+                    spread_pct=spread_pct,
+                    reverse_spread_pct=prices.calculate_reverse_spread_pct(),
+                    avg_local_spread_pct=avg_local_spread_pct if self.signal_mode == 'quantile' else Decimal('0'),
+                    adjusted_spread_pct=compare_spread_pct,
+                    threshold_pct=threshold_pct,
+                    note='',
+                )
 
             blocked_by_threshold, threshold_ctx = self._should_block_due_to_threshold_quality('open')
             if blocked_by_threshold:
@@ -1211,6 +1366,17 @@ class HedgeStrategy(BaseStrategy):
 
             # 记录信号触发时间
             signal_trigger_time = time.time()
+            if self.signal_mode == 'quantile' and self.quantile_manager:
+                self._log_quantile_event(
+                    signal_type='close',
+                    stage='condition_met',
+                    spread_pct=prices.calculate_spread_pct(),
+                    reverse_spread_pct=spread_pct,
+                    avg_local_spread_pct=avg_local_spread_pct if self.signal_mode == 'quantile' else Decimal('0'),
+                    adjusted_spread_pct=compare_spread_pct,
+                    threshold_pct=threshold_pct,
+                    note='',
+                )
 
             blocked_by_threshold, threshold_ctx = self._should_block_due_to_threshold_quality('close')
             if blocked_by_threshold:
