@@ -409,8 +409,10 @@ class HedgeStrategy(BaseStrategy):
             # now = time.time()
             # ✅ 新增：记录价差并尝试调整阈值
             if self.quantile_manager and signal_flag:
-                self.quantile_manager.add_spreads(spread_pct, reverse_spread_pct)
                 avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
+                adjusted_open_spread = spread_pct - avg_local_spread_pct
+                adjusted_close_spread = reverse_spread_pct - avg_local_spread_pct
+                self.quantile_manager.add_spreads(adjusted_open_spread, adjusted_close_spread)
                 self._log_quantile_sample(
                     spread_pct=spread_pct,
                     reverse_spread_pct=reverse_spread_pct,
