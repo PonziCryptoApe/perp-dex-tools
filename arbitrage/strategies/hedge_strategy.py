@@ -204,6 +204,7 @@ class HedgeStrategy(BaseStrategy):
         self._is_executed = False
         self._last_effective_max_position: Optional[Decimal] = None
         self._last_non_zero_strategy_qty = Decimal('0')
+        self._end_time_triggered = False
         # self._last_threshold_check_time = None
         # 信号逻辑配置（默认沿用旧逻辑）
         self.signal_logic = signal_logic if isinstance(signal_logic, dict) else {}
@@ -212,6 +213,7 @@ class HedgeStrategy(BaseStrategy):
         self.signal_sample_size = int(self.signal_logic.get('sample_size', 2000))
         self.signal_min_samples = int(self.signal_logic.get('min_samples', self.signal_sample_size))
         self.signal_min_edge_pct = Decimal(str(self.signal_logic.get('min_edge_pct', 0.01)))
+        self.signal_min_abs_spread_pct = Decimal(str(self.signal_logic.get('min_abs_spread_pct', 0.03)))
         self.quantile_log_enabled = bool(self.signal_logic.get('log_samples', True))
         self.quantile_event_log_enabled = bool(self.signal_logic.get('log_events', True))
         self.quantile_log_every_n = int(self.signal_logic.get('log_every_n', 1))
@@ -261,6 +263,7 @@ class HedgeStrategy(BaseStrategy):
             f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else '标准差'}\n"
             f"   分位数配置: P{int(self.signal_quantile * 100)} | 样本{self.signal_sample_size} | 最小样本{self.signal_min_samples}\n"
             f"   分位数最小边际: {self.signal_min_edge_pct:.4f}%\n"
+            f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
@@ -491,7 +494,9 @@ class HedgeStrategy(BaseStrategy):
             if self.end_time_stamp:
                 current_timestamp = time.time()
                 if current_timestamp >= self.end_time_stamp:
-                    logger.info(f"⏰ 达到策略结束时间，开始减仓到0")
+                    if not self._end_time_triggered:
+                        logger.info("⏰ 达到策略结束时间，开始减仓到0")
+                        self._end_time_triggered = True
                     # 如果仓位不为0，设置最大仓位为0
                     if self.position_manager.get_current_position_qty() != 0:
                         self.position_manager.max_position = 0
@@ -1080,6 +1085,8 @@ class HedgeStrategy(BaseStrategy):
         if self.signal_mode == 'quantile' and self.quantile_manager:
             if compare_spread_pct <= 0:
                 return
+            if compare_spread_pct < self.signal_min_abs_spread_pct:
+                return
             if compare_spread_pct < threshold_pct + self.signal_min_edge_pct:
                 return
 
@@ -1374,6 +1381,8 @@ class HedgeStrategy(BaseStrategy):
 
         if self.signal_mode == 'quantile' and self.quantile_manager:
             if compare_spread_pct <= 0:
+                return
+            if compare_spread_pct < self.signal_min_abs_spread_pct:
                 return
             if compare_spread_pct < threshold_pct + self.signal_min_edge_pct:
                 return
