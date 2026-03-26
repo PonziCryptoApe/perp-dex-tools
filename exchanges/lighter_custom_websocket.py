@@ -174,15 +174,28 @@ class LighterCustomWebSocketManager:
             raise
 
     def get_best_levels(self) -> Tuple[Tuple[Optional[float], Optional[float]], Tuple[Optional[float], Optional[float]]]:
-        """Get the best bid and ask levels with sufficient size for our order (~$5000)."""
+        """Get the best bid and ask levels with sufficient size for our order."""
         try:
+            # Dynamic notional threshold: align with target order quantity
+            base_qty = 0.0
+            try:
+                base_qty = float(getattr(self.config, "quantity", 0) or 0)
+            except (TypeError, ValueError):
+                base_qty = 0.0
+
+            best_bid_raw = max(self.order_book["bids"].keys()) if self.order_book["bids"] else None
+            best_ask_raw = min(self.order_book["asks"].keys()) if self.order_book["asks"] else None
+            ref_price = best_ask_raw or best_bid_raw or 0.0
+
+            min_notional = base_qty * float(ref_price) if base_qty > 0 and ref_price > 0 else 0.0
+
             # Get all bid levels with sufficient size
             bid_levels = [(price, size) for price, size in self.order_book["bids"].items()
-                          if size * price >= 40000]
+                          if size * price >= min_notional]
 
             # Get all ask levels with sufficient size
             ask_levels = [(price, size) for price, size in self.order_book["asks"].items()
-                          if size * price >= 40000]
+                          if size * price >= min_notional]
 
             # Get best bid (highest price) and best ask (lowest price)
             best_bid = max(bid_levels) if bid_levels else (None, None)

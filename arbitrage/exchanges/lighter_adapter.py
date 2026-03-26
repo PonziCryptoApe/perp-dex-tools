@@ -93,6 +93,11 @@ class LighterAdapter(ExchangeAdapter):
         self._client_order_seq_bits = 8              # 每毫秒最多 256 个序号
         self._client_order_seq_max = (1 << self._client_order_seq_bits) - 1
         self._client_order_max_delta_ms = (1 << (48 - self._client_order_seq_bits)) - 1
+        # ✅ 盘口定价：最多吃到第 N 档（1=只吃买一/卖一，2=最多吃到买二/卖二）
+        try:
+            self.depth_price_max_levels = int(self.config.get('depth_price_max_levels', 2))
+        except (TypeError, ValueError):
+            self.depth_price_max_levels = 2
     
     async def connect(self):
         """连接 Lighter"""
@@ -696,6 +701,43 @@ class LighterAdapter(ExchangeAdapter):
         asks_tuple = tuple(sorted((str(p), str(s)) for p, s in self.lighter_order_book["asks"].items()))
         return hash((bids_tuple, asks_tuple))
 
+    async def _get_depth_price(self, side: str, quantity: Decimal) -> Optional[Decimal]:
+        """
+        根据目标数量选择“最多吃到第 N 档”的价格。
+        - side=BUY：从卖盘向上累计
+        - side=SELL：从买盘向下累计
+        """
+        try:
+            async with self.lighter_order_book_lock:
+                if side == 'BUY':
+                    levels = list(self.lighter_order_book["asks"].items())
+                    levels.sort(key=lambda x: x[0])  # 低价优先
+                else:
+                    levels = list(self.lighter_order_book["bids"].items())
+                    levels.sort(key=lambda x: x[0], reverse=True)  # 高价优先
+
+            if not levels:
+                return None
+
+            max_levels = self.depth_price_max_levels
+            if max_levels is not None and max_levels > 0:
+                levels = levels[:max_levels]
+
+            cumulative = Decimal('0')
+            for price, size in levels:
+                size_val = Decimal(str(size))
+                if size_val <= 0:
+                    continue
+                cumulative += size_val
+                if cumulative >= quantity:
+                    return Decimal(str(price))
+
+            # 若前 N 档不足，返回第 N 档价格（最多吃到该档位）
+            return Decimal(str(levels[-1][0]))
+        except Exception as e:
+            logger.warning(f"⚠️ 获取盘口定价失败: {e}")
+            return None
+
     def _next_client_order_index(self) -> int:
         """
         生成 48 位范围内的高唯一 client_order_index。
@@ -965,14 +1007,54 @@ class LighterAdapter(ExchangeAdapter):
             slippage = slippage if slippage is not None else self.slippage
             logger.info(f"Placing market order with slippage: {slippage}")
 
-            if retry_mode == 'aggressive':
-                # ✅ 计算订单价格（和 hedge_monitor 一致）
+            depth_price = await self._get_depth_price(side_upper, quantity)
+
+            # 计算最大滑点价格上限/下限
+            max_slip = slippage or Decimal('0')
+            base_price = Decimal(str(price)) if price is not None else None
+            if base_price is None:
+                base_price = self.lighter_best_ask if side_upper == 'BUY' else self.lighter_best_bid
+
+            if base_price is not None:
                 if side_upper == 'BUY':
-                    order_price = Decimal(str(price)) * Decimal(str(1 + (slippage or Decimal('0')))) if price else self.lighter_best_ask
+                    cap_price = base_price * (Decimal('1') + Decimal(str(max_slip)))
                 else:
-                    order_price = Decimal(str(price)) * Decimal(str(1 - (slippage or Decimal('0')))) if price else self.lighter_best_bid
+                    cap_price = base_price * (Decimal('1') - Decimal(str(max_slip)))
             else:
-                order_price = Decimal(str(price))
+                cap_price = None
+
+            # 定价规则：
+            # 1) 首次下单：用“盘口档位价”和“最大滑点价”做夹逼，尽量贴近盘口
+            # 2) 重试下单：直接放宽到最大滑点价
+            if retry_mode == 'aggressive':
+                order_price = cap_price
+                logger.info(
+                    f"💡 最大滑点定价: side={side_upper}, qty={quantity}, "
+                    f"slip={max_slip}, price={order_price}"
+                )
+            else:
+                if depth_price is not None and cap_price is not None:
+                    if side_upper == 'BUY':
+                        order_price = min(depth_price, cap_price)
+                    else:
+                        order_price = max(depth_price, cap_price)
+                    logger.info(
+                        f"💡 盘口/滑点夹逼定价: side={side_upper}, qty={quantity}, "
+                        f"max_levels={self.depth_price_max_levels}, depth_price={depth_price}, "
+                        f"cap_price={cap_price}, price={order_price}"
+                    )
+                elif depth_price is not None:
+                    order_price = depth_price
+                else:
+                    order_price = cap_price
+
+            if order_price is None:
+                logger.error(f"❌ 无法获取有效下单价格: side={side_upper}, qty={quantity}")
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'error': 'Order price unavailable'
+                }
             logger.info(f"📤 {self.exchange_name} 下市价单: {side_upper} {quantity} @ {order_price}")
             # logger.info(
             #     f"📤 {self.exchange_name} 下单:\n"
