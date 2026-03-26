@@ -11,6 +11,7 @@ import websockets
 from decimal import Decimal
 from typing import Optional, Callable, Dict, Any
 from .base import ExchangeAdapter
+from helpers.lighter_ws import build_lighter_ws_url, lighter_ws_connect_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ class LighterAdapter(ExchangeAdapter):
     
     async def _handle_lighter_ws(self):
         """处理 Lighter WebSocket"""
-        url = "wss://mainnet.zklighter.elliot.ai/stream"
+        url = build_lighter_ws_url()
         reconnect_count = 0
         
         while self._is_running:
@@ -179,10 +180,11 @@ class LighterAdapter(ExchangeAdapter):
                 # 调整心跳/超时参数，降低误判断开
                 async with websockets.connect(
                     url,
-                    ping_interval=20,   # 显式设置心跳间隔
-                    ping_timeout=40,    # 放宽 pong 超时
-                    close_timeout=5,    # 关闭握手超时
-                    max_queue=None      # 避免队列背压导致 ping 超时
+                    **lighter_ws_connect_kwargs()
+                    # ping_interval=20,   # 显式设置心跳间隔
+                    # ping_timeout=40,    # 放宽 pong 超时
+                    # close_timeout=5,    # 关闭握手超时
+                    # max_queue=None      # 避免队列背压导致 ping 超时
                 ) as ws:
                     self.ws = ws
                     reconnect_count = 0
@@ -202,11 +204,9 @@ class LighterAdapter(ExchangeAdapter):
                     logger.info(f"📡 已订阅 Lighter 市场统计: {self.symbol} market {self.market_index}")
                     try:
 
-                        # ✅ 新增：订阅订单更新流
-                        ten_minutes_deadline = int(time.time() + 10 * 60)
+                        auth_token, err = self.client.lighter_client.create_auth_token_with_expiry(api_key_index=int(os.getenv('LIGHTER_API_KEY_INDEX', '4')))
 
-                        auth_token, err = self.client.lighter_client.create_auth_token_with_expiry(ten_minutes_deadline)
-
+                        logger.info(f"🔑 创建 auth token for account orders subscription: {self.symbol} token={auth_token} err={err}")
                         if err is not None:
                             logger.warning(f"⚠️ Failed to create auth token for account orders subscription: {self.symbol} {err}")
                         else: 
@@ -1060,21 +1060,21 @@ class LighterAdapter(ExchangeAdapter):
             # )
             
             # ✅ 签名订单
-            tx_info, error = self.client.lighter_client.sign_create_order(**order_params)
+            tx_info, tx_hash, error = await self.client.lighter_client.create_order(**order_params)
             
             if error is not None:
-                logger.error(f"❌ 签名失败: {error}")
+                logger.exception(f"❌ 创建订单失败: {error}")
                 return {
                     'success': False,
                     'order_id': None,
-                    'error': f'Sign error: {error}'
+                    'error': f'Create order error: {error}'
                 }
             
             # ✅ 发送交易
-            tx_hash = await self.client.lighter_client.send_tx(
-                tx_type=self.client.lighter_client.TX_TYPE_CREATE_ORDER,
-                tx_info=tx_info
-            )
+            # tx_hash = await self.client.lighter_client.send_tx(
+            #     tx_type=self.client.lighter_client.TX_TYPE_CREATE_ORDER,
+            #     tx_info=tx_info
+            # )
             
             if tx_hash is None:
                 logger.error("❌ send_tx 返回 None")

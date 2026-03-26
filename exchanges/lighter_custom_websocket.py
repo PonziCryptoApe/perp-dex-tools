@@ -8,6 +8,9 @@ import json
 import time
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import websockets
+import os
+
+from helpers.lighter_ws import build_lighter_ws_url, lighter_ws_connect_kwargs
 
 
 class LighterCustomWebSocketManager:
@@ -19,7 +22,7 @@ class LighterCustomWebSocketManager:
         self.logger = None
         self.running = False
         self.ws = None
-
+        self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX', '4'))
         # Order book state
         self.order_book = {"bids": {}, "asks": {}}
         self.best_bid = None
@@ -30,7 +33,7 @@ class LighterCustomWebSocketManager:
         self.order_book_lock = asyncio.Lock()
 
         # WebSocket URL
-        self.ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
+        self.ws_url = build_lighter_ws_url()
         self.market_index = config.contract_id
         self.account_index = config.account_index
         self.lighter_client = config.lighter_client
@@ -246,7 +249,7 @@ class LighterCustomWebSocketManager:
                 # Reset order book state before connecting
                 await self.reset_order_book()
 
-                async with websockets.connect(self.ws_url) as self.ws:
+                async with websockets.connect(self.ws_url, **lighter_ws_connect_kwargs()) as self.ws:
                     # Subscribe to order book updates
                     await self.ws.send(json.dumps({
                         "type": "subscribe",
@@ -259,9 +262,7 @@ class LighterCustomWebSocketManager:
                     # Get auth token for the subscription
                     try:
                         if self.lighter_client:
-                            # Set auth token to expire in 10 minutes
-                            ten_minutes_deadline = int(time.time() + 10 * 60)
-                            auth_token, err = self.lighter_client.create_auth_token_with_expiry(ten_minutes_deadline)
+                            auth_token, err = self.lighter_client.create_auth_token_with_expiry(api_key_index=self.api_key_index)
                             if err is not None:
                                 self._log(f"Failed to create auth token for account orders subscription: {err}", "WARNING")
                             else:
@@ -390,9 +391,9 @@ class LighterCustomWebSocketManager:
 
                         except asyncio.TimeoutError:
                             timeout_count += 1
-                            if timeout_count % 30 == 0:
+                            if timeout_count % 120 == 0:
                                 self._log(f"No message from Lighter websocket for {timeout_count} seconds "
-                                          f"(abnormal behavior)", "WARNING")
+                                          f"(can be normal on quiet markets)", "WARNING")
                             continue
                         except websockets.exceptions.ConnectionClosed as e:
                             self._log(f"Lighter websocket connection closed: {e}", "WARNING")

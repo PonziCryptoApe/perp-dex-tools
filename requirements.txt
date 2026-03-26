@@ -3,7 +3,7 @@ pytz>=2025.2
 asyncio==4.0.0
 aiohttp>=3.8.0
 websocket-client>=1.6.0
-pydantic>=1.8.0
+pydantic==2.12.4
 pycryptodome>=3.15.0
 ecdsa>=0.17.0
 requests==2.32.5
@@ -19,7 +19,7 @@ bpx-py==2.0.11
 git+https://github.com/your-quantguy/edgex-python-sdk.git@07425f7522be5845399264682580c88019ab9e52#egg=edgex-python-sdk
 
 # Lighter exchange SDK
-git+https://github.com/elliottech/lighter-python.git@d0009799970aad54ebb940aa3dc90cbc00028c54
+lighter-sdk==1.0.4
 
 # Extended exchange SDK
 x10-python-trading-starknet
