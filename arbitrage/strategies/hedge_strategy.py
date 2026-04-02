@@ -16,6 +16,7 @@ from typing import Optional
 from helpers.util import beijing_to_timestamp
 from .base_strategy import BaseStrategy
 from ..models.prices import PriceSnapshot
+from ..models.signal import SignalType, TradingSignal
 from ..services.price_monitor import PriceMonitorService
 from ..services.position_manager import PositionManagerService
 from ..services.order_executor_parallel import OrderExecutor
@@ -60,7 +61,7 @@ class HedgeStrategy(BaseStrategy):
         edge_fee_bps: float = 0.0,
         edge_latency_bps_per_100ms: float = 0.0,
         edge_latency_free_ms: float = 120.0,
-        risk_control: Optional[dict] = None
+        risk_control: Optional[dict] = None,
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -76,6 +77,8 @@ class HedgeStrategy(BaseStrategy):
         self.exchange_b = exchange_b
         self.lark_bot = lark_bot
         self.monitor_only = monitor_only
+        self.signal_submitter = None
+        self.signal_clearer = None
         self.max_signal_delay_ms_a = max_signal_delay_ms_a
         self.max_signal_delay_ms_b = max_signal_delay_ms_b
         self.min_depth_quantity = min_depth_quantity
@@ -205,6 +208,7 @@ class HedgeStrategy(BaseStrategy):
         self._last_effective_max_position: Optional[Decimal] = None
         self._last_non_zero_strategy_qty = Decimal('0')
         self._end_time_triggered = False
+        self._signal_sequence = 0
         # self._last_threshold_check_time = None
         # 信号逻辑配置（默认沿用旧逻辑）
         self.signal_logic = signal_logic if isinstance(signal_logic, dict) else {}
@@ -357,7 +361,7 @@ class HedgeStrategy(BaseStrategy):
             max_age_b=self.max_signal_delay_ms_b / 1000,
         )
         if is_stale:
-            # logger.warning(f"⚠️ 订单簿过时，丢弃信号: {stale_msg}")
+            await self._clear_all_signal_states(f"订单簿过时: {stale_msg}")
             return
         try:
             # ✅ 记录价格更新的时间
@@ -381,6 +385,7 @@ class HedgeStrategy(BaseStrategy):
                     f"A {signal_delay_ms_a:.2f} ms（A阈值: {self.max_signal_delay_ms_a} ms），"
                     f" B {signal_delay_ms_b:.2f} ms（B阈值: {self.max_signal_delay_ms_b} ms）"
                 )
+                await self._clear_all_signal_states("信号延迟超过阈值")
                 return  # 丢弃该信号
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
@@ -398,6 +403,7 @@ class HedgeStrategy(BaseStrategy):
                     effective_max_position,
                 )
                 if reduced:
+                    await self._clear_all_signal_states("风控已执行动态减仓")
                     return
                 if risk_decision.need_reduce:
                     reduced = await self._try_apply_risk_reduction(
@@ -406,6 +412,7 @@ class HedgeStrategy(BaseStrategy):
                         target_abs_override=reduced_target_abs,
                     )
                     if reduced:
+                        await self._clear_all_signal_states("风控主动减仓进行中")
                         return
             # if self._last_threshold_check_time is None:
                 # self._last_threshold_check_time = time.time()
@@ -438,6 +445,7 @@ class HedgeStrategy(BaseStrategy):
                     self.open_threshold_pct = new_open
                     self.close_threshold_pct = new_close
                 else:
+                    await self._clear_all_signal_states("动态阈值尚未就绪")
                     return
 
             if self.position_manager.accumulate_mode:
@@ -446,49 +454,118 @@ class HedgeStrategy(BaseStrategy):
                 # logger.debug(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
                 self._is_executed = False
                 if current_qty < 0:
-                    # ✅ 优先检查平仓信号（如果可以平仓）
-                    await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    close_signal = await self._check_close_signal(
+                        prices,
+                        reverse_spread_pct,
+                        signal_delay_ms_a,
+                        signal_delay_ms_b,
+                    )
+                    await self._sync_signal_state(
+                        SignalType.CLOSE,
+                        close_signal,
+                        "当前价格下 CLOSE 条件不成立",
+                    )
 
-                    # ✅ 如果正在执行，跳过开仓检查
                     if self._executing_lock.locked():
+                        await self._clear_signal(SignalType.OPEN, "执行锁占用，暂不评估 OPEN")
                         return
                     if self._is_executed is True:
                         logger.info('开仓信号已经执行过了，直接返回')
+                        await self._clear_signal(SignalType.OPEN, "本轮已执行完成，等待下一次价格更新")
                         return
                     if risk_block_open:
+                        await self._clear_signal(SignalType.OPEN, "风控阻断新增风险开仓")
                         return
-                    # ✅ 检查开仓信号（如果可以开仓）
-                    await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    open_signal = await self._check_open_signal(
+                        prices,
+                        spread_pct,
+                        signal_delay_ms_a,
+                        signal_delay_ms_b,
+                    )
+                    await self._sync_signal_state(
+                        SignalType.OPEN,
+                        open_signal,
+                        "当前价格下 OPEN 条件不成立",
+                    )
                 else:
-                    # ✅ 正仓位时，open 方向是减风险；0 仓位时 open 属于增风险
+                    open_signal = None
                     if current_qty > 0:
-                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                        open_signal = await self._check_open_signal(
+                            prices,
+                            spread_pct,
+                            signal_delay_ms_a,
+                            signal_delay_ms_b,
+                        )
                     elif not risk_block_open:
-                        await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                        open_signal = await self._check_open_signal(
+                            prices,
+                            spread_pct,
+                            signal_delay_ms_a,
+                            signal_delay_ms_b,
+                        )
                     else:
+                        await self._clear_signal(SignalType.OPEN, "风控阻断新增风险开仓")
+                        await self._clear_signal(SignalType.CLOSE, "风控阻断当前方向的反向开仓")
                         return
 
-                        # ✅ 如果正在执行，跳过开仓检查
+                    await self._sync_signal_state(
+                        SignalType.OPEN,
+                        open_signal,
+                        "当前价格下 OPEN 条件不成立",
+                    )
+
                     if self._executing_lock.locked():
+                        await self._clear_signal(SignalType.CLOSE, "执行锁占用，暂不评估 CLOSE")
                         return
                     if self._is_executed is True:
                         logger.info('平仓已经执行过了，直接返回')
+                        await self._clear_signal(SignalType.CLOSE, "本轮已执行完成，等待下一次价格更新")
                         return 
                     if risk_block_open:
+                        await self._clear_signal(SignalType.CLOSE, "风控阻断新增风险反向开仓")
                         return
-                    # ✅ 检查开仓信号（如果可以开仓）
-                    await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    close_signal = await self._check_close_signal(
+                        prices,
+                        reverse_spread_pct,
+                        signal_delay_ms_a,
+                        signal_delay_ms_b,
+                    )
+                    await self._sync_signal_state(
+                        SignalType.CLOSE,
+                        close_signal,
+                        "当前价格下 CLOSE 条件不成立",
+                    )
                 
             else:
-                # ✅ 根据持仓状态决定检查哪种信号
                 if not self.position_manager.has_position():
-                    # 无持仓，检查开仓信号
+                    await self._clear_signal(SignalType.CLOSE, "当前无持仓，不保留 CLOSE 信号")
                     if risk_block_open:
+                        await self._clear_signal(SignalType.OPEN, "风控阻断新增风险开仓")
                         return
-                    await self._check_open_signal(prices, spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    open_signal = await self._check_open_signal(
+                        prices,
+                        spread_pct,
+                        signal_delay_ms_a,
+                        signal_delay_ms_b,
+                    )
+                    await self._sync_signal_state(
+                        SignalType.OPEN,
+                        open_signal,
+                        "当前价格下 OPEN 条件不成立",
+                    )
                 else:
-                    # 有持仓，检查平仓信号
-                    await self._check_close_signal(prices, reverse_spread_pct, signal_delay_ms_a, signal_delay_ms_b)
+                    await self._clear_signal(SignalType.OPEN, "当前已有持仓，不保留 OPEN 信号")
+                    close_signal = await self._check_close_signal(
+                        prices,
+                        reverse_spread_pct,
+                        signal_delay_ms_a,
+                        signal_delay_ms_b,
+                    )
+                    await self._sync_signal_state(
+                        SignalType.CLOSE,
+                        close_signal,
+                        "当前价格下 CLOSE 条件不成立",
+                    )
             
             self.check_yaml_config_updates()
             if self.end_time_stamp:
@@ -1036,7 +1113,111 @@ class HedgeStrategy(BaseStrategy):
         ctx['block_reason'] = self.threshold_manager.get_trade_block_reason()
         return True, ctx
 
-    async def _check_open_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
+    def _next_signal_id(self, signal_type: SignalType, signal_trigger_time: float) -> str:
+        """生成单进程内唯一信号 ID。"""
+        self._signal_sequence += 1
+        return f"{self.symbol}:{signal_type.value}:{int(signal_trigger_time * 1000)}:{self._signal_sequence}"
+
+    def _signal_mailbox_key(self, signal_type: SignalType) -> str:
+        """返回某类信号在 mailbox 中的槽位 key。"""
+        return f"{self.symbol}:{signal_type.value}"
+
+    def _build_trading_signal(
+        self,
+        signal_type: SignalType,
+        prices: PriceSnapshot,
+        spread_pct: Decimal,
+        signal_trigger_time: float,
+        signal_delay_ms_a: float,
+        signal_delay_ms_b: float,
+        quantity: Decimal,
+        metadata: Optional[dict] = None,
+    ) -> TradingSignal:
+        """根据当前价格快照构建交易信号。"""
+        if signal_type == SignalType.OPEN:
+            exchange_a_price = prices.exchange_a_bid
+            exchange_b_price = prices.exchange_b_ask
+            exchange_a_depth = getattr(prices, 'exchange_a_bid_size', None)
+            exchange_b_depth = getattr(prices, 'exchange_b_ask_size', None)
+        else:
+            exchange_a_price = prices.exchange_a_ask
+            exchange_b_price = prices.exchange_b_bid
+            exchange_a_depth = getattr(prices, 'exchange_a_ask_size', None)
+            exchange_b_depth = getattr(prices, 'exchange_b_bid_size', None)
+
+        return TradingSignal(
+            signal_id=self._next_signal_id(signal_type, signal_trigger_time),
+            signal_type=signal_type,
+            symbol=self.symbol,
+            spread_pct=spread_pct,
+            exchange_a_price=exchange_a_price,
+            exchange_b_price=exchange_b_price,
+            quantity=quantity,
+            created_at=signal_trigger_time,
+            exchange_a_quote_id=prices.exchange_a_quote_id,
+            exchange_b_quote_id=prices.exchange_b_quote_id,
+            exchange_a_depth=exchange_a_depth,
+            exchange_b_depth=exchange_b_depth,
+            signal_delay_ms_a=signal_delay_ms_a,
+            signal_delay_ms_b=signal_delay_ms_b,
+            prices=prices,
+            reason='threshold_met',
+            metadata=metadata or {},
+        )
+
+    async def _publish_signal(self, signal: TradingSignal) -> None:
+        """发布信号；执行链路由外部注入。"""
+        if self.signal_submitter is None:
+            logger.warning(f"⚠️ [{self.symbol}] 未配置 signal_submitter，跳过信号: {signal.signal_id}")
+            return
+
+        await self.signal_submitter(signal)
+        logger.info(
+            f"📨 [{self.symbol}] 发布信号: id={signal.signal_id}, "
+            f"type={signal.signal_type.value}, key={signal.mailbox_key}"
+        )
+
+    async def _clear_signal(self, signal_type: SignalType, reason: str = "") -> None:
+        """显式清空某个方向的最新信号。"""
+        if self.signal_clearer is None:
+            return
+
+        mailbox_key = self._signal_mailbox_key(signal_type)
+        removed = await self.signal_clearer(mailbox_key)
+        if removed and reason:
+            logger.debug(
+                f"🧹 [{self.symbol}] 清空信号槽位: key={mailbox_key}, reason={reason}"
+            )
+
+    async def _sync_signal_state(
+        self,
+        signal_type: SignalType,
+        signal: Optional[TradingSignal],
+        clear_reason: str,
+    ) -> None:
+        """同步某个方向的最新信号状态。"""
+        if signal is None:
+            await self._clear_signal(signal_type, clear_reason)
+            return
+        await self._publish_signal(signal)
+
+    async def _clear_all_signal_states(self, reason: str) -> None:
+        """一次性清空当前 symbol 的交易信号槽位。"""
+        await self._clear_signal(SignalType.OPEN, reason)
+        await self._clear_signal(SignalType.CLOSE, reason)
+
+    def set_signal_submitter(self, submitter, clearer=None) -> None:
+        """注入信号刷新/清空函数。"""
+        self.signal_submitter = submitter
+        self.signal_clearer = clearer
+
+    async def _check_open_signal(
+        self,
+        prices: PriceSnapshot,
+        spread_pct: Decimal,
+        signal_delay_ms_a: float,
+        signal_delay_ms_b: float,
+    ) -> Optional[TradingSignal]:
         """
         检查开仓信号
         
@@ -1194,142 +1375,32 @@ class HedgeStrategy(BaseStrategy):
                 f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
             )
 
-            # ✅ 检查是否为监控模式
-            if self.monitor_only:
-                # logger.info("📊 监控模式：不执行开仓，创建虚拟持仓以监控平仓信号")
-                self.signal_stats['open']['executed'] += 1
+            signal = self._build_trading_signal(
+                signal_type=SignalType.OPEN,
+                prices=prices,
+                spread_pct=spread_pct,
+                signal_trigger_time=signal_trigger_time,
+                signal_delay_ms_a=signal_delay_ms_a,
+                signal_delay_ms_b=signal_delay_ms_b,
+                quantity=self.position_manager.position_step,
+                metadata={
+                    'compare_spread_pct': str(compare_spread_pct),
+                    'threshold_pct': str(threshold_pct),
+                    'threshold_label': threshold_label,
+                    'spread_label': spread_label,
+                },
+            )
+            return signal
 
-                # ✅ 创建虚拟持仓（用于模拟）
-                virtual_position = Position(
-                    symbol=self.symbol,
-                    quantity=self.position_manager.position_step,
-                    exchange_a_name=self.exchange_a.exchange_name,
-                    exchange_b_name=self.exchange_b.exchange_name,
-                    exchange_a_signal_entry_price=prices.exchange_a_bid,
-                    exchange_b_signal_entry_price=prices.exchange_b_ask,
-                    exchange_a_entry_price=prices.exchange_a_bid,
-                    exchange_b_entry_price=prices.exchange_b_ask,
-                    exchange_a_order_id='MONITOR_A',
-                    exchange_b_order_id='MONITOR_B',
-                    spread_pct=spread_pct,
-                    signal_entry_time=signal_trigger_time
-                )
+        return None
 
-                self.position_manager.set_position(virtual_position)
-                self._last_execution_time = time.time()
-                await asyncio.sleep(0.06)  # 模拟异步行为
-                
-                # 发送飞书通知（可选）
-                if self.lark_bot:
-                    if self.position_manager.accumulate_mode:
-                        await self._send_multi_notification('short', position, spread_pct)
-                    else:
-                        await self._send_open_notification(position, prices)
-
-                return
-            
-            async with self._executing_lock:
-                if self.position_manager.accumulate_mode:
-                    if not self.position_manager.can_open('short'):
-                        logger.warning("⏳ 开仓操作期间仓位已达阈值，跳过本次开仓")
-                        # 统计次数
-                        self.signal_stats['open']['skipped'] += 1
-                        return
-                else:
-                    if self.position_manager.has_position():
-                        logger.warning("⏳ 开仓操作期间已有持仓，跳过本次开仓")
-                        return
-                    
-                if self.order_limiter_a:
-                    if self.order_limiter_a.has_capacity():
-                        await self.order_limiter_a.acquire()
-                    else:
-                        logger.info(f"⏳ 开仓操作限流器限流中，直接返回（Exchange A）")
-                        self.signal_stats['open']['limited_a'] += 1
-                        return
-                if self.order_limiter_b:
-                    if self.order_limiter_b.has_capacity():
-                        await self.order_limiter_b.acquire()
-                    else:
-                        logger.info(f"⏳ 开仓操作限流器限流中，直接返回（Exchange B）")
-                        self.signal_stats['open']['limited_b'] += 1
-                        return
-                    
-                self._is_executing = True
-
-                try:
-                    # 实际交易模式：执行开仓
-                    success, position = await self.executor.execute_open(
-                        exchange_a_price=prices.exchange_a_bid,
-                        exchange_b_price=prices.exchange_b_ask,
-                        spread_pct=spread_pct,
-                        exchange_a_quote_id=prices.exchange_a_quote_id,
-                        exchange_b_quote_id=prices.exchange_b_quote_id,
-                        signal_trigger_time=signal_trigger_time,
-                        actual_quantity=self.position_manager.position_step
-                    )
-                    
-                    if success:
-                        self.signal_stats['open']['executed'] += 1
-                        self._is_executed = True
-
-                        self._last_execution_time = time.time()
-
-                        # ✅ 累计模式：添加仓位
-                        if self.position_manager.accumulate_mode:
-                            self.position_manager.add_position(position, 'short', signal_delay_ms_a, signal_delay_ms_b)
-                        else:
-                            self.position_manager.set_position(position)
-
-                        # summary = self.position_manager.get_position_summary()
-                        # logger.info(
-                        #     f"✅ 开仓成功: {position}\n"
-                        #     f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
-                        #     f"📊 统计: {self._format_open_stats()}"
-                        # )
-
-                        await asyncio.sleep(2)
-                        logger.info(f"🔍 开仓后校验仓位...")
-                        expected_qty = self.position_manager.get_current_position_qty()
-
-                        is_consistent = await self.position_manager.verify_and_sync(
-                            exchange_a=self.exchange_a,
-                            exchange_b=self.exchange_b,
-                            symbol_a=self.symbol_a,
-                            symbol_b=self.symbol_b,
-                            expected_qty=expected_qty,
-                            tolerance=self.quantity_precision * 10
-                        )
-                        
-                        if not is_consistent:
-                            logger.warning(f"⚠️ 开仓后仓位校验不一致，已自动修正")           
-                        logger.info("🔍 开仓后检查仓位平衡...")
-                        await self.executor.check_position_balance()
-
-                        # 发送飞书通知
-                        if self.lark_bot:
-                            if self.position_manager.accumulate_mode:
-                                await self._send_multi_notification('short', position, spread_pct)
-                            else:
-                                await self._send_open_notification(position, prices)
-
-                    else:
-                        await asyncio.sleep(2)
-                        await self.executor.check_position_balance()
-
-                        # ✅ 节流日志：每5秒最多输出一次
-                        if current_time - self.last_log_time >= self.log_interval:
-                            logger.debug(
-                                f"📊 当前价差: {spread_pct:.4f}% "
-                                f"({spread_label}: {compare_spread_pct:.4f}%, {threshold_label}: {threshold_pct:.4f}%) - 监控开仓中..."
-                            )
-                            self.last_log_time = current_time
-
-                finally:
-                    self._is_executing = False
-            self._log_stats_if_needed()
-
-    async def _check_close_signal(self, prices: PriceSnapshot, spread_pct: Decimal, signal_delay_ms_a: float, signal_delay_ms_b: float):
+    async def _check_close_signal(
+        self,
+        prices: PriceSnapshot,
+        spread_pct: Decimal,
+        signal_delay_ms_a: float,
+        signal_delay_ms_b: float,
+    ) -> Optional[TradingSignal]:
         """
         检查平仓信号
         
@@ -1492,176 +1563,28 @@ class HedgeStrategy(BaseStrategy):
                 f"   {spread_label}: {compare_spread_pct:.4f}%({threshold_label}: {threshold_pct:.4f}%)"
             )
             
-            # ✅ 检查是否为监控模式
-            if self.monitor_only:
-                self.signal_stats['close']['executed'] += 1
+            close_quantity = self.position_manager.position_step
+            if not self.position_manager.accumulate_mode and current_position is not None:
+                close_quantity = current_position.quantity
 
-                # ✅ 累计模式：减少仓位
-                if self.position_manager.accumulate_mode:
-                    # ✅ 创建临时 Position 用于记录
-                    temp_position = Position(
-                        symbol=self.symbol,
-                        quantity=self.position_manager.position_step,
-                        exchange_a_name=self.exchange_a.exchange_name,
-                        exchange_b_name=self.exchange_b.exchange_name,
-                        exchange_a_signal_entry_price=current_position.exchange_a_entry_price if current_position else Decimal('0'),
-                        exchange_b_signal_entry_price=current_position.exchange_b_entry_price if current_position else Decimal('0'),
-                        exchange_a_entry_price=current_position.exchange_a_entry_price if current_position else Decimal('0'),
-                        exchange_b_entry_price=current_position.exchange_b_entry_price if current_position else Decimal('0'),
-                        exchange_a_order_id='MONITOR_CLOSE_A',
-                        exchange_b_order_id='MONITOR_CLOSE_B',
-                        spread_pct=spread_pct,
-                        signal_entry_time=signal_trigger_time
-                    )
-                    
-                    # 设置平仓价格
-                    temp_position.exchange_a_signal_exit_price = prices.exchange_a_ask
-                    temp_position.exchange_b_signal_exit_price = prices.exchange_b_bid
-                    temp_position.exchange_a_exit_price = prices.exchange_a_ask
-                    temp_position.exchange_b_exit_price = prices.exchange_b_bid
-                    temp_position.exit_time = datetime.now()
-                    
-                    pnl_pct = self.position_manager.reduce_position(
-                        temp_position,
-                        'long',
-                        signal_delay_ms_a,
-                        signal_delay_ms_b
-                    )
-                    if self.position_manager.accumulate_mode:
-                       await self._send_multi_notification('long', temp_position, spread_pct)
-                else:
-                    # ✅ 传统模式：先设置平仓价格，再平仓
-                    current_position.exchange_a_signal_exit_price = prices.exchange_a_ask
-                    current_position.exchange_b_signal_exit_price = prices.exchange_b_bid
-                    current_position.exchange_a_exit_price = prices.exchange_a_ask
-                    current_position.exchange_b_exit_price = prices.exchange_b_bid
-                    current_position.exit_time = datetime.now()
-                    
-                    pnl_pct = self.position_manager.close_position(signal_delay_ms_a, signal_delay_ms_b)
+            signal = self._build_trading_signal(
+                signal_type=SignalType.CLOSE,
+                prices=prices,
+                spread_pct=spread_pct,
+                signal_trigger_time=signal_trigger_time,
+                signal_delay_ms_a=signal_delay_ms_a,
+                signal_delay_ms_b=signal_delay_ms_b,
+                quantity=close_quantity,
+                metadata={
+                    'compare_spread_pct': str(compare_spread_pct),
+                    'threshold_pct': str(threshold_pct),
+                    'threshold_label': threshold_label,
+                    'spread_label': spread_label,
+                },
+            )
+            return signal
 
-                self._last_execution_time = time.time()
-                
-                # 发送飞书通知（可选）
-                if self.lark_bot:
-                    if self.position_manager.accumulate_mode:
-                        await self._send_multi_notification('long', current_position, spread_pct)
-                    else:
-                        await self._send_close_notification(current_position, pnl_pct, prices)
-                return
-            
-            async with self._executing_lock:
-                if self.position_manager.accumulate_mode:
-                    if not self.position_manager.can_open('long'):
-                        logger.warning("⏳ 反向开仓操作期间仓位已达阈值，跳过本次反向开仓")
-                        # 统计次数
-                        self.signal_stats['close']['skipped'] += 1
-                        return
-                else:
-                    if not self.position_manager.has_position():
-                        logger.warning("⏳ 获取锁后发现持仓已清空，取消平仓")
-                        return
-                    
-                if self.order_limiter_a:
-                    if self.order_limiter_a.has_capacity():
-                        await self.order_limiter_a.acquire()
-                    else:
-                        logger.info(f"⏳ 反向开仓操作限流器限流中，直接返回（Exchange A）")
-                        self.signal_stats['close']['limited_a'] += 1
-                        return
-                if self.order_limiter_b:
-                    if self.order_limiter_b.has_capacity():
-                        await self.order_limiter_b.acquire()
-                    else:
-                        logger.info(f"⏳ 反向开仓操作限流器限流中，直接返回（Exchange B）")
-                        self.signal_stats['close']['limited_b'] += 1
-                        return
-                
-                self._is_executing = True
-
-                try:
-                    # 实际交易模式：执行平仓
-                    if self.position_manager.accumulate_mode:
-                        close_quantity = self.position_manager.position_step
-                    else:
-                        close_quantity = current_position.quantity if current_position else self.quantity
-                    
-                    success, position = await self.executor.execute_close(
-                        position=current_position or self._create_dummy_position(),
-                        exchange_a_price=prices.exchange_a_ask,
-                        exchange_b_price=prices.exchange_b_bid,
-                        exchange_a_quote_id=prices.exchange_a_quote_id,
-                        exchange_b_quote_id=prices.exchange_b_quote_id,
-                        signal_trigger_time=signal_trigger_time,
-                        close_quantity=close_quantity,
-                        execution_context='reverse_open' if self.position_manager.accumulate_mode else 'strategy',
-                    )
-                    
-                    if success:
-                        self.signal_stats['close']['executed'] += 1
-                        self._is_executed = True
-
-                        self._last_execution_time = time.time()
-
-                        # ✅ 累计模式：减少仓位
-                        if self.position_manager.accumulate_mode:
-                            pnl_pct = self.position_manager.reduce_position(
-                                position,
-                                'long',
-                                signal_delay_ms_a,
-                                signal_delay_ms_b
-                            )
-                        else:
-                            self.position_manager.position = position
-                            pnl_pct = self.position_manager.close_position(
-                                signal_delay_ms_a,
-                                signal_delay_ms_b
-                            )
-                        
-                        summary = self.position_manager.get_position_summary()
-                        # logger.info(
-                        #     f"✅ 反向开仓成功: {position}\n"
-                        #     f"📊 仓位状态: {summary['direction']} {summary['current_qty']:+} / ±{summary['max_position']} ({summary['utilization']}%)\n"
-                        #     f"📊 统计: {self._format_close_stats()}"
-                        # )
-                        await asyncio.sleep(2)
-
-                        logger.info(f"🔍 反向开仓后校验仓位...")
-                        expected_qty = self.position_manager.get_current_position_qty()
-                        is_consistent = await self.position_manager.verify_and_sync(
-                            exchange_a=self.exchange_a,
-                            exchange_b=self.exchange_b,
-                            symbol_a=self.symbol_a,
-                            symbol_b=self.symbol_b,
-                            expected_qty=expected_qty,
-                            tolerance=self.quantity_precision * 10
-                        )
-                        
-                        if not is_consistent:
-                            logger.warning("⚠️ 反向开仓后仓位不一致，已自动修正") 
-                        logger.info("🔍 反向开仓后检查仓位平衡...")
-                        await self.executor.check_position_balance()
-                        
-                        # 发送飞书通知
-                        if self.lark_bot:
-                            if self.position_manager.accumulate_mode:
-                                await self._send_multi_notification('long', position, spread_pct)
-                            else:
-                                await self._send_close_notification(position, pnl_pct, prices)
-
-                    else:
-                        await asyncio.sleep(2)
-                        await self.executor.check_position_balance()
-
-                        if current_time - self.last_log_time >= self.log_interval:
-                            # ✅ 节流日志：每5秒最多输出一次
-                            logger.info(
-                                f"📊 当前价差: {spread_pct:.4f}% "
-                                f"({spread_label}: {compare_spread_pct:.4f}%, {threshold_label}: {threshold_pct:.4f}%) - 监控反向开仓中..."
-                            )
-                            self.last_log_time = current_time
-                finally:
-                    self._is_executing = False
-            self._log_stats_if_needed()
+        return None
 
     def check_yaml_config_updates(self):
         """检查 YAML 配置文件更新"""

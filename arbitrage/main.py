@@ -21,6 +21,8 @@ from arbitrage.exchanges.extended_adapter import ExtendedAdapter
 from arbitrage.exchanges.lighter_adapter import LighterAdapter
 from arbitrage.exchanges.variational_adapter import VariationalAdapter  # ✅ 新增
 from arbitrage.exchanges.nado_adapter import NadoAdapter  # ✅ 新增
+from arbitrage.services.signal_execution_service import SignalExecutionService
+from arbitrage.services.signal_mailbox import SignalMailbox
 from arbitrage.utils.logger import setup_logging
 from arbitrage.utils.trade_logger import TradeLogger
 from exchanges.extended import ExtendedClient
@@ -648,6 +650,13 @@ async def main():
         edge_latency_free_ms=edge_latency_free_ms,
         risk_control=risk_control_config,
     )
+    signal_mailbox = SignalMailbox()
+    signal_execution_service = SignalExecutionService(
+        strategy=strategy,
+        mailbox=signal_mailbox,
+        execution_max_signal_age_ms=50.0,
+    )
+    strategy.set_signal_submitter(signal_execution_service.submit, signal_execution_service.clear)
     logger.info("✅ 策略创建成功\n")
     # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========
     if accumulate_mode:
@@ -676,6 +685,7 @@ async def main():
     # ========== 新增部分结束 ==========
     # Step 5: 启动策略
     try:
+        await signal_execution_service.start()
         await strategy.start()
         
         mode_text = "监控模式" if monitor_only else "交易模式"
@@ -716,6 +726,7 @@ async def main():
     
     finally:
         logger.info("🧹 清理资源...")
+        await signal_execution_service.stop()
         await strategy.stop()
         if lark_bot is not None:
             await lark_bot.close()
