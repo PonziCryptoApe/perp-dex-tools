@@ -678,8 +678,8 @@ class LighterAdapter(ExchangeAdapter):
             self.lighter_last_update_ts = float(msg_ts)
 
             if fingerprint == self._order_book_fingerprint:
-                # 内容未变化，作为心跳处理：按间隔刷新，避免 stale 误判
-                heartbeat_gap = 5.0  # 秒
+                # 内容未变化时也要把最新事件时间往上游传，避免被 200ms 级别的 stale 阈值误判
+                heartbeat_gap = 0.1  # 秒
                 if (
                     self.lighter_last_notify_ts == 0.0
                     or (self.lighter_last_update_ts - self.lighter_last_notify_ts) >= heartbeat_gap
