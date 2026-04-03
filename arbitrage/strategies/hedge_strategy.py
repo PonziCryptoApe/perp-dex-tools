@@ -209,6 +209,8 @@ class HedgeStrategy(BaseStrategy):
         self._last_non_zero_strategy_qty = Decimal('0')
         self._end_time_triggered = False
         self._signal_sequence = 0
+        self._threshold_skip_log_interval = 30.0
+        self._last_threshold_skip_logs = {}
         # self._last_threshold_check_time = None
         # 信号逻辑配置（默认沿用旧逻辑）
         self.signal_logic = signal_logic if isinstance(signal_logic, dict) else {}
@@ -361,6 +363,8 @@ class HedgeStrategy(BaseStrategy):
             max_age_b=self.max_signal_delay_ms_b / 1000,
         )
         if is_stale:
+            if self.threshold_manager:
+                self._log_threshold_skip_reason("订单簿过时", detail=stale_msg)
             await self._clear_all_signal_states(f"订单簿过时: {stale_msg}")
             return
         try:
@@ -380,6 +384,22 @@ class HedgeStrategy(BaseStrategy):
                 signal_flag = True
             else:
                 self.signal_delay += 1
+                if self.threshold_manager:
+                    exceeded_sides = []
+                    if signal_delay_ms_a > self.max_signal_delay_ms_a:
+                        exceeded_sides.append("A")
+                    if signal_delay_ms_b > self.max_signal_delay_ms_b:
+                        exceeded_sides.append("B")
+                    exceeded_label = ",".join(exceeded_sides) if exceeded_sides else "unknown"
+                    self._log_threshold_skip_reason(
+                        "信号延迟超过阈值",
+                        detail=(
+                            f"超阈值侧={exceeded_label}, "
+                            f"A={signal_delay_ms_a:.2f}/{self.max_signal_delay_ms_a}ms, "
+                            f"B={signal_delay_ms_b:.2f}/{self.max_signal_delay_ms_b}ms"
+                        ),
+                        level=logging.WARNING,
+                    )
                 logger.warning(
                     f"⚠️ [{self.symbol}] 信号延迟过大: "
                     f"A {signal_delay_ms_a:.2f} ms（A阈值: {self.max_signal_delay_ms_a} ms），"
@@ -403,6 +423,8 @@ class HedgeStrategy(BaseStrategy):
                     effective_max_position,
                 )
                 if reduced:
+                    if self.threshold_manager:
+                        self._log_threshold_skip_reason("风控已执行动态减仓")
                     await self._clear_all_signal_states("风控已执行动态减仓")
                     return
                 if risk_decision.need_reduce:
@@ -412,6 +434,8 @@ class HedgeStrategy(BaseStrategy):
                         target_abs_override=reduced_target_abs,
                     )
                     if reduced:
+                        if self.threshold_manager:
+                            self._log_threshold_skip_reason("风控主动减仓进行中")
                         await self._clear_all_signal_states("风控主动减仓进行中")
                         return
             # if self._last_threshold_check_time is None:
@@ -445,8 +469,28 @@ class HedgeStrategy(BaseStrategy):
                     self.open_threshold_pct = new_open
                     self.close_threshold_pct = new_close
                 else:
+                    stats = self.threshold_manager.get_stats()
+                    self._log_threshold_skip_reason(
+                        "动态阈值尚未就绪",
+                        detail=(
+                            f"状态={stats.get('status')}, "
+                            f"开仓样本={stats.get('open_samples', 0)}, "
+                            f"平仓样本={stats.get('close_samples', 0)}"
+                        ),
+                    )
                     await self._clear_all_signal_states("动态阈值尚未就绪")
                     return
+            elif signal_flag and not self.threshold_manager:
+                if self.signal_mode == 'quantile':
+                    self._log_threshold_skip_reason(
+                        "当前使用分位数模式",
+                        detail="signal_mode=quantile，动态阈值管理器未启用",
+                    )
+                else:
+                    self._log_threshold_skip_reason(
+                        "动态阈值未启用",
+                        detail=f"signal_mode={self.signal_mode}",
+                    )
 
             if self.position_manager.accumulate_mode:
                 current_qty = self.position_manager.get_current_position_qty()
@@ -622,6 +666,24 @@ class HedgeStrategy(BaseStrategy):
         if ts_val > 1e10:
             ts_val = ts_val / 1000.0
         return ts_val
+
+    def _log_threshold_skip_reason(
+        self,
+        reason: str,
+        *,
+        detail: str = "",
+        level: int = logging.INFO,
+    ) -> None:
+        """节流输出动态阈值未触发的原因。"""
+        now = time.time()
+        last_time = self._last_threshold_skip_logs.get(reason, 0.0)
+        if now - last_time < self._threshold_skip_log_interval:
+            return
+        self._last_threshold_skip_logs[reason] = now
+        message = f"🧭 [{self.symbol}] 未触发动态阈值调整: {reason}"
+        if detail:
+            message = f"{message} | {detail}"
+        logger.log(level, message)
 
     def _init_quantile_logs(self) -> None:
         """初始化分位数日志文件。"""
