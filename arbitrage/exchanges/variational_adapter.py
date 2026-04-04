@@ -65,12 +65,43 @@ class VariationalAdapter(ExchangeAdapter):
         self._orderbook_fetch_time = None  # 订单簿获取时间
         self._order_place_time = None      # 下单时间
         self._time_diffs = []              # 时间差列表（毫秒）
+        self._last_failure_diagnostic_ts = 0.0
+        self._failure_diagnostic_interval = 10.0
         
         logger.info(
             f"🔧 VariationalAdapter 初始化:\n"
             f"   Symbol: {symbol}\n"
             f"   Polling Interval: {self.polling_interval}s\n"
             f"   Query Quantity: {self.query_quantity}"
+        )
+
+    def _log_cached_orderbook_on_failure(self, reason: str) -> None:
+        """在报价拉取失败时，输出当前缓存订单簿摘要，便于判断是否在沿用旧数据。"""
+        now = time.time()
+        if now - self._last_failure_diagnostic_ts < self._failure_diagnostic_interval:
+            return
+        self._last_failure_diagnostic_ts = now
+
+        if not self._orderbook:
+            logger.warning(f"🧪 Variational 拉取失败时无缓存订单簿 ({self.symbol}) | reason={reason}")
+            return
+
+        bids = self._orderbook.get('bids', [])
+        asks = self._orderbook.get('asks', [])
+        bid = bids[0][0] if bids else None
+        ask = asks[0][0] if asks else None
+        timestamp = self._orderbook.get('timestamp')
+        fetch_duration = self._orderbook.get('fetch_duration')
+        age_ms = (now - float(timestamp)) * 1000 if timestamp else None
+        quote_id = self._orderbook.get('quote_id')
+        age_text = f"{age_ms:.0f}" if age_ms is not None else "--"
+        fetch_duration_text = f"{float(fetch_duration):.2f}" if fetch_duration is not None else "--"
+        logger.warning(
+            f"🧪 Variational 拉取失败，沿用缓存订单簿 ({self.symbol}) | "
+            f"reason={reason}, bid={bid}, ask={ask}, "
+            f"age_ms={age_text}, "
+            f"fetch_duration_ms={fetch_duration_text}, "
+            f"quote_id={quote_id}"
         )
 
     @staticmethod
@@ -230,6 +261,7 @@ class VariationalAdapter(ExchangeAdapter):
 
             if not quote_data or 'bid' not in quote_data or 'ask' not in quote_data:
                 logger.debug(f"Variational quote 数据不完整 ({self.symbol})")
+                self._log_cached_orderbook_on_failure("quote_data_incomplete")
                 return None
             
             bid_price = Decimal(str(quote_data['bid']))
@@ -252,9 +284,11 @@ class VariationalAdapter(ExchangeAdapter):
             return orderbook
         except asyncio.TimeoutError:
             logger.warning(f"⚠️ Variational API 超时 ({self.symbol})")
+            self._log_cached_orderbook_on_failure("timeout")
             return None
         except Exception as e:
             logger.exception(f"获取 Variational 订单簿失败 ({self.symbol}): {e}")
+            self._log_cached_orderbook_on_failure(type(e).__name__)
             return None
     
     async def get_latest_orderbook(self, quantity: Optional[Decimal]) -> Optional[Dict]:

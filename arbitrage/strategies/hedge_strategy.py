@@ -211,6 +211,8 @@ class HedgeStrategy(BaseStrategy):
         self._signal_sequence = 0
         self._threshold_skip_log_interval = 30.0
         self._last_threshold_skip_logs = {}
+        self._sample_snapshot_log_interval = 10.0
+        self._last_sample_snapshot_log_time = 0.0
         # self._last_threshold_check_time = None
         # 信号逻辑配置（默认沿用旧逻辑）
         self.signal_logic = signal_logic if isinstance(signal_logic, dict) else {}
@@ -454,6 +456,7 @@ class HedgeStrategy(BaseStrategy):
                 )
 
             if self.threshold_manager and signal_flag:
+                self._log_sample_snapshot(prices, signal_delay_ms_a, signal_delay_ms_b)
                 # 添加数据
                 self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
                 
@@ -684,6 +687,37 @@ class HedgeStrategy(BaseStrategy):
         if detail:
             message = f"{message} | {detail}"
         logger.log(level, message)
+
+    def _log_sample_snapshot(
+        self,
+        prices: PriceSnapshot,
+        signal_delay_ms_a: float,
+        signal_delay_ms_b: float,
+    ) -> None:
+        """节流输出当前参与采样的双边订单簿摘要。"""
+        now = time.time()
+        if now - self._last_sample_snapshot_log_time < self._sample_snapshot_log_interval:
+            return
+        self._last_sample_snapshot_log_time = now
+
+        update_count_a = getattr(self.monitor, 'orderbook_a_updates', 0)
+        update_count_b = getattr(self.monitor, 'orderbook_b_updates', 0)
+        orderbook_b = getattr(self.monitor, 'orderbook_b', None) or {}
+        fetch_duration = orderbook_b.get('fetch_duration')
+        quote_id = orderbook_b.get('quote_id')
+        fetch_duration_text = f"{float(fetch_duration):.2f}" if fetch_duration is not None else "--"
+        quote_id_text = quote_id[:8] if isinstance(quote_id, str) and quote_id else "--"
+
+        logger.info(
+            f"🧪 [{self.symbol}] 当前采样快照:\n"
+            f"   A {self.exchange_a.exchange_name}: "
+            f"bid={prices.exchange_a_bid}, ask={prices.exchange_a_ask}, "
+            f"delay_ms={signal_delay_ms_a:.2f}, updates={update_count_a}\n"
+            f"   B {self.exchange_b.exchange_name}: "
+            f"bid={prices.exchange_b_bid}, ask={prices.exchange_b_ask}, "
+            f"delay_ms={signal_delay_ms_b:.2f}, updates={update_count_b}, "
+            f"fetch_duration_ms={fetch_duration_text}, quote_id={quote_id_text}"
+        )
 
     def _init_quantile_logs(self) -> None:
         """初始化分位数日志文件。"""
