@@ -60,6 +60,10 @@ class LighterAdapter(ExchangeAdapter):
         self.lighter_last_update_ts = 0.0  # 最近一次收到有效订单簿消息的时间戳
         self._order_book_fingerprint = None  # 订单簿内容指纹，用于检测“内容未变”场景
         self.lighter_last_notify_ts = 0.0  # 最近一次向上游回调的时间戳
+        self._last_orderbook_message_ts = 0.0  # 最近一次收到 order_book 消息的时间
+        self._consecutive_ws_timeouts = 0
+        self.order_book_offset = None
+        self.order_book_sequence_gap = False
         self._is_running = False
         
         # 消息计数器
@@ -98,6 +102,12 @@ class LighterAdapter(ExchangeAdapter):
             self.depth_price_max_levels = int(self.config.get('depth_price_max_levels', 2))
         except (TypeError, ValueError):
             self.depth_price_max_levels = 2
+        try:
+            self.orderbook_silence_reconnect_seconds = float(
+                self.config.get('orderbook_silence_reconnect_seconds', 8.0)
+            )
+        except (TypeError, ValueError):
+            self.orderbook_silence_reconnect_seconds = 8.0
     
     async def connect(self):
         """连接 Lighter"""
@@ -193,6 +203,7 @@ class LighterAdapter(ExchangeAdapter):
                 ) as ws:
                     self.ws = ws
                     reconnect_count = 0
+                    self._consecutive_ws_timeouts = 0
                     
                     # ✅ 订阅订单簿
                     subscribe_msg = {
@@ -230,6 +241,7 @@ class LighterAdapter(ExchangeAdapter):
                     while True:
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=1.0)  # 1s 超时
+                            self._consecutive_ws_timeouts = 0
                             data = json.loads(msg)
                             
                             if data.get("type") == "ping":
@@ -239,7 +251,17 @@ class LighterAdapter(ExchangeAdapter):
                             await self._process_lighter_message(data)  # 处理消息
                             
                         except asyncio.TimeoutError:
+                            self._consecutive_ws_timeouts += 1
                             logger.info(f"⚠️ Lighter WS 1s 无消息，继续监听... ({self.symbol})")  # 心跳检查
+                            silent_anchor = self._last_orderbook_message_ts or self.lighter_last_update_ts
+                            if silent_anchor > 0:
+                                silent_for = time.time() - silent_anchor
+                                if silent_for >= self.orderbook_silence_reconnect_seconds:
+                                    logger.warning(
+                                        f"⚠️ Lighter order_book 静默 {silent_for:.1f}s，"
+                                        f"主动重连 WebSocket ({self.symbol})"
+                                    )
+                                    break
                             continue
                         except websockets.exceptions.ConnectionClosedError as e:
                             logger.warning(f"❌ Lighter WS 连接关闭 ({self.symbol})，code={e.code}, reason={e.reason}")
@@ -279,6 +301,10 @@ class LighterAdapter(ExchangeAdapter):
         self.lighter_last_update_ts = 0.0
         self._order_book_fingerprint = None
         self.lighter_last_notify_ts = 0.0
+        self._last_orderbook_message_ts = 0.0
+        self._consecutive_ws_timeouts = 0
+        self.order_book_offset = None
+        self.order_book_sequence_gap = False
         self._lighter_user_stats_raw = {}
         self._lighter_user_stats_ts = 0.0
         self._lighter_user_stats_seen = False
@@ -294,6 +320,75 @@ class LighterAdapter(ExchangeAdapter):
             'mark_price': None,
             'index_price': None,
         }
+
+    def _extract_order_book_offset(self, order_book: dict) -> Optional[int]:
+        """提取订单簿 offset。"""
+        if not isinstance(order_book, dict):
+            return None
+        offset = order_book.get("offset")
+        if offset is None:
+            return None
+        try:
+            return int(offset)
+        except (TypeError, ValueError):
+            return None
+
+    def _validate_order_book_offset(self, new_offset: int) -> bool:
+        """校验订单簿 offset 连续性。"""
+        if self.order_book_offset is None:
+            self.order_book_offset = new_offset
+            self.order_book_sequence_gap = False
+            return True
+
+        expected_offset = self.order_book_offset + 1
+        if new_offset >= expected_offset:
+            self.order_book_offset = new_offset
+            self.order_book_sequence_gap = False
+            return True
+
+        logger.warning(
+            f"⚠️ [{self.symbol}] Lighter 订单簿 offset 断档: "
+            f"expected={expected_offset}, got={new_offset}"
+        )
+        self.order_book_sequence_gap = True
+        return False
+
+    async def _request_fresh_snapshot(self):
+        """在订单簿断档或完整性异常后，请求新的快照。"""
+        if not self.ws or self.market_index is None:
+            return
+        try:
+            unsubscribe_msg = {
+                "type": "unsubscribe",
+                "channel": f"order_book/{self.market_index}"
+            }
+            subscribe_msg = {
+                "type": "subscribe",
+                "channel": f"order_book/{self.market_index}"
+            }
+            await self.ws.send(json.dumps(unsubscribe_msg))
+            await asyncio.sleep(0.2)
+            await self.ws.send(json.dumps(subscribe_msg))
+            logger.warning(f"⚠️ [{self.symbol}] 已请求新的 Lighter 订单簿快照")
+        except Exception as e:
+            logger.exception(f"❌ 请求新的 Lighter 快照失败 ({self.symbol}): {e}")
+
+    def _validate_order_book_integrity(self) -> bool:
+        """校验订单簿内部一致性。"""
+        try:
+            if not self.lighter_order_book["bids"] or not self.lighter_order_book["asks"]:
+                return True
+            best_bid = max(self.lighter_order_book["bids"].keys())
+            best_ask = min(self.lighter_order_book["asks"].keys())
+            if best_bid >= best_ask:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] Lighter 订单簿异常: best_bid={best_bid}, best_ask={best_ask}"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.exception(f"❌ 校验 Lighter 订单簿一致性失败 ({self.symbol}): {e}")
+            return False
     
     async def _process_lighter_message(self, data: dict):
         """
@@ -312,7 +407,15 @@ class LighterAdapter(ExchangeAdapter):
         msg_type = data.get("type")
         channel = data.get("channel", "")        
         # ✅ Lighter 使用 "update/order_book" 类型
-        if msg_type == "update/order_book":
+        if msg_type in ["subscribed/order_book", "snapshot"]:
+            self._last_orderbook_message_ts = time.time()
+            logger.info(f"📸 收到 Lighter 快照消息: {self.symbol}")
+            await self._handle_lighter_snapshot(data)
+
+        elif msg_type == "update/order_book":
+            order_book = data.get("order_book", {})
+            if isinstance(order_book, dict):
+                self._last_orderbook_message_ts = time.time()
             # ✅ 如果是第一次收到，当作快照处理
             if not self.lighter_snapshot_loaded:
                 logger.info(f"📸 收到 Lighter 初始订单簿（当作快照）: {self.symbol}")
@@ -320,11 +423,6 @@ class LighterAdapter(ExchangeAdapter):
             else:
                 # ✅ 后续消息当作增量更新
                 await self._handle_lighter_update(data)
-        
-        elif msg_type == "snapshot":
-            # ✅ 如果有专门的 snapshot 类型
-            logger.info(f"📸 收到 Lighter 快照消息: {self.symbol}")
-            await self._handle_lighter_snapshot(data)
 
         elif msg_type in ["update/account_orders"]:
             logger.debug(f"📨 收到订单更新消息: {data}")
@@ -526,6 +624,7 @@ class LighterAdapter(ExchangeAdapter):
                 
                 # ✅ 数据在 order_book 字段内
                 order_book = data.get("order_book", {})
+                offset = self._extract_order_book_offset(order_book)
                 
                 bids = order_book.get("bids", [])
                 asks = order_book.get("asks", [])
@@ -557,6 +656,8 @@ class LighterAdapter(ExchangeAdapter):
                 self._update_lighter_best_prices()
                 
                 self.lighter_snapshot_loaded = True
+                self.order_book_offset = offset
+                self.order_book_sequence_gap = False
                 
                 logger.info(
                     f"✅ Lighter 快照加载完成: {self.symbol}\n"
@@ -565,6 +666,8 @@ class LighterAdapter(ExchangeAdapter):
                     f"   Best Bid: ${self.lighter_best_bid}\n"
                     f"   Best Ask: ${self.lighter_best_ask}"
                 )
+                if offset is not None:
+                    logger.info(f"📌 Lighter 初始订单簿 offset: {offset}")
                 
                 # 通知回调
                 await self._notify_orderbook_update_if_changed()
@@ -578,37 +681,51 @@ class LighterAdapter(ExchangeAdapter):
             return
         
         try:
+            request_snapshot = False
             async with self.lighter_order_book_lock:
                 # ✅ 数据在 order_book 字段内
                 order_book = data.get("order_book", {})
-                
-                # ✅ 处理 bids 更新
-                for bid in order_book.get("bids", []):
-                    price = Decimal(str(bid["price"]))
-                    size = Decimal(str(bid["size"]))
+                offset = self._extract_order_book_offset(order_book)
+
+                if offset is None:
+                    logger.warning(f"⚠️ Lighter 订单簿更新缺少 offset，准备重新请求快照 ({self.symbol})")
+                    request_snapshot = True
+                elif not self._validate_order_book_offset(offset):
+                    request_snapshot = self.order_book_sequence_gap
+
+                if not request_snapshot:
+                    # ✅ 处理 bids 更新
+                    for bid in order_book.get("bids", []):
+                        price = Decimal(str(bid["price"]))
+                        size = Decimal(str(bid["size"]))
+                        
+                        if size == 0:
+                            # 删除该价格档位
+                            self.lighter_order_book["bids"].pop(price, None)
+                        else:
+                            # 更新该价格档位
+                            self.lighter_order_book["bids"][price] = size
                     
-                    if size == 0:
-                        # 删除该价格档位
-                        self.lighter_order_book["bids"].pop(price, None)
-                    else:
-                        # 更新该价格档位
-                        self.lighter_order_book["bids"][price] = size
-                
-                # ✅ 处理 asks 更新
-                for ask in order_book.get("asks", []):
-                    price = Decimal(str(ask["price"]))
-                    size = Decimal(str(ask["size"]))
+                    # ✅ 处理 asks 更新
+                    for ask in order_book.get("asks", []):
+                        price = Decimal(str(ask["price"]))
+                        size = Decimal(str(ask["size"]))
+                        
+                        if size == 0:
+                            self.lighter_order_book["asks"].pop(price, None)
+                        else:
+                            self.lighter_order_book["asks"][price] = size
                     
-                    if size == 0:
-                        self.lighter_order_book["asks"].pop(price, None)
+                    # 更新最佳价格
+                    self._update_lighter_best_prices()
+                    if not self._validate_order_book_integrity():
+                        request_snapshot = True
                     else:
-                        self.lighter_order_book["asks"][price] = size
-                
-                # 更新最佳价格
-                self._update_lighter_best_prices()
-                
-                # 通知回调（仅在订单簿有变化时）
-                await self._notify_orderbook_update_if_changed()
+                        # 通知回调（仅在订单簿有变化时）
+                        await self._notify_orderbook_update_if_changed()
+
+            if request_snapshot:
+                await self._request_fresh_snapshot()
         
         except Exception as e:
             logger.exception(f"❌ 处理 Lighter 更新失败: {e}")
