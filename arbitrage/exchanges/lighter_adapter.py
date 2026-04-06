@@ -64,6 +64,7 @@ class LighterAdapter(ExchangeAdapter):
         self._consecutive_ws_timeouts = 0
         self.order_book_offset = None
         self.order_book_sequence_gap = False
+        self._orderbook_cleanup_counter = 0
         self._is_running = False
         
         # 消息计数器
@@ -108,6 +109,30 @@ class LighterAdapter(ExchangeAdapter):
             )
         except (TypeError, ValueError):
             self.orderbook_silence_reconnect_seconds = 8.0
+        try:
+            self.orderbook_fingerprint_levels = int(
+                self.config.get('orderbook_fingerprint_levels', 3)
+            )
+        except (TypeError, ValueError):
+            self.orderbook_fingerprint_levels = 3
+        if self.orderbook_fingerprint_levels <= 0:
+            self.orderbook_fingerprint_levels = 3
+        try:
+            self.orderbook_cleanup_levels = int(
+                self.config.get('orderbook_cleanup_levels', 100)
+            )
+        except (TypeError, ValueError):
+            self.orderbook_cleanup_levels = 100
+        if self.orderbook_cleanup_levels <= 0:
+            self.orderbook_cleanup_levels = 100
+        try:
+            self.orderbook_cleanup_interval = int(
+                self.config.get('orderbook_cleanup_interval', 1000)
+            )
+        except (TypeError, ValueError):
+            self.orderbook_cleanup_interval = 1000
+        if self.orderbook_cleanup_interval <= 0:
+            self.orderbook_cleanup_interval = 1000
     
     async def connect(self):
         """连接 Lighter"""
@@ -305,6 +330,7 @@ class LighterAdapter(ExchangeAdapter):
         self._consecutive_ws_timeouts = 0
         self.order_book_offset = None
         self.order_book_sequence_gap = False
+        self._orderbook_cleanup_counter = 0
         self._lighter_user_stats_raw = {}
         self._lighter_user_stats_ts = 0.0
         self._lighter_user_stats_seen = False
@@ -389,6 +415,25 @@ class LighterAdapter(ExchangeAdapter):
         except Exception as e:
             logger.exception(f"❌ 校验 Lighter 订单簿一致性失败 ({self.symbol}): {e}")
             return False
+
+    def _cleanup_order_book_levels(self):
+        """裁剪订单簿深度，避免长期运行后本地订单簿持续膨胀。"""
+        max_levels = self.orderbook_cleanup_levels
+        if max_levels <= 0:
+            return
+
+        bids = self.lighter_order_book["bids"]
+        asks = self.lighter_order_book["asks"]
+
+        if len(bids) > max_levels:
+            top_bids = sorted(bids.items(), key=lambda item: item[0], reverse=True)[:max_levels]
+            bids.clear()
+            bids.update(top_bids)
+
+        if len(asks) > max_levels:
+            top_asks = sorted(asks.items(), key=lambda item: item[0])[:max_levels]
+            asks.clear()
+            asks.update(top_asks)
     
     async def _process_lighter_message(self, data: dict):
         """
@@ -653,6 +698,10 @@ class LighterAdapter(ExchangeAdapter):
                         self.lighter_order_book["asks"][price] = size
                 
                 # 更新最佳价格
+                self._orderbook_cleanup_counter += 1
+                if self._orderbook_cleanup_counter >= self.orderbook_cleanup_interval:
+                    self._cleanup_order_book_levels()
+                    self._orderbook_cleanup_counter = 0
                 self._update_lighter_best_prices()
                 
                 self.lighter_snapshot_loaded = True
@@ -717,6 +766,10 @@ class LighterAdapter(ExchangeAdapter):
                             self.lighter_order_book["asks"][price] = size
                     
                     # 更新最佳价格
+                    self._orderbook_cleanup_counter += 1
+                    if self._orderbook_cleanup_counter >= self.orderbook_cleanup_interval:
+                        self._cleanup_order_book_levels()
+                        self._orderbook_cleanup_counter = 0
                     self._update_lighter_best_prices()
                     if not self._validate_order_book_integrity():
                         request_snapshot = True
@@ -812,10 +865,24 @@ class LighterAdapter(ExchangeAdapter):
     def _make_orderbook_fingerprint(self) -> int:
         """
         生成订单簿内容指纹，用于检测内容是否变化。
-        Decimal 转字符串保证可哈希。
+        仅比较前 N 档摘要，降低整本订单簿排序带来的长期运行开销。
         """
-        bids_tuple = tuple(sorted((str(p), str(s)) for p, s in self.lighter_order_book["bids"].items()))
-        asks_tuple = tuple(sorted((str(p), str(s)) for p, s in self.lighter_order_book["asks"].items()))
+        top_levels = self.orderbook_fingerprint_levels
+        bids_tuple = tuple(
+            (str(price), str(size))
+            for price, size in sorted(
+                self.lighter_order_book["bids"].items(),
+                key=lambda item: item[0],
+                reverse=True
+            )[:top_levels]
+        )
+        asks_tuple = tuple(
+            (str(price), str(size))
+            for price, size in sorted(
+                self.lighter_order_book["asks"].items(),
+                key=lambda item: item[0]
+            )[:top_levels]
+        )
         return hash((bids_tuple, asks_tuple))
 
     async def _get_depth_price(self, side: str, quantity: Decimal) -> Optional[Decimal]:
