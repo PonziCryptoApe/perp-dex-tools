@@ -31,6 +31,7 @@ class LighterAdapter(ExchangeAdapter):
         self.market_index = None
         self.ws_task = None
         self.ws = None
+        self._orderbook_watchdog_task = None
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX'))
         self.reconnect_base_delay = float(self.config.get('reconnect_base_delay', 0.3))
         self.reconnect_max_delay = float(self.config.get('reconnect_max_delay', 10.0))
@@ -105,10 +106,10 @@ class LighterAdapter(ExchangeAdapter):
             self.depth_price_max_levels = 2
         try:
             self.orderbook_silence_reconnect_seconds = float(
-                self.config.get('orderbook_silence_reconnect_seconds', 8.0)
+                self.config.get('orderbook_silence_reconnect_seconds', 3.0)
             )
         except (TypeError, ValueError):
-            self.orderbook_silence_reconnect_seconds = 8.0
+            self.orderbook_silence_reconnect_seconds = 3.0
         try:
             self.orderbook_fingerprint_levels = int(
                 self.config.get('orderbook_fingerprint_levels', 3)
@@ -186,6 +187,13 @@ class LighterAdapter(ExchangeAdapter):
                 await self.ws_task
             except asyncio.CancelledError:
                 pass
+        if self._orderbook_watchdog_task:
+            self._orderbook_watchdog_task.cancel()
+            try:
+                await self._orderbook_watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._orderbook_watchdog_task = None
         
         if self.ws:
             await self.ws.close()
@@ -262,10 +270,14 @@ class LighterAdapter(ExchangeAdapter):
                     except Exception as e:
                         logger.exception(f"❌ Error creating auth token for account orders subscription: {self.symbol} {e}")
 
+                    self._orderbook_watchdog_task = asyncio.create_task(
+                        self._watch_orderbook_silence(ws)
+                    )
+
                     # 接收消息
                     while True:
                         try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=1.0)  # 1s 超时
+                            msg = await asyncio.wait_for(ws.recv(), timeout=1.0)  # 整条 WS 活性检查
                             self._consecutive_ws_timeouts = 0
                             data = json.loads(msg)
                             
@@ -278,15 +290,6 @@ class LighterAdapter(ExchangeAdapter):
                         except asyncio.TimeoutError:
                             self._consecutive_ws_timeouts += 1
                             logger.info(f"⚠️ Lighter WS 1s 无消息，继续监听... ({self.symbol})")  # 心跳检查
-                            silent_anchor = self._last_orderbook_message_ts or self.lighter_last_update_ts
-                            if silent_anchor > 0:
-                                silent_for = time.time() - silent_anchor
-                                if silent_for >= self.orderbook_silence_reconnect_seconds:
-                                    logger.warning(
-                                        f"⚠️ Lighter order_book 静默 {silent_for:.1f}s，"
-                                        f"主动重连 WebSocket ({self.symbol})"
-                                    )
-                                    break
                             continue
                         except websockets.exceptions.ConnectionClosedError as e:
                             logger.warning(f"❌ Lighter WS 连接关闭 ({self.symbol})，code={e.code}, reason={e.reason}")
@@ -298,6 +301,13 @@ class LighterAdapter(ExchangeAdapter):
                             logger.info(f"🔚 Lighter WS 任务被取消，退出循环 ({self.symbol})")
                             self._is_running = False
                             break  # 跳出内循环，重连外层
+                    if self._orderbook_watchdog_task:
+                        self._orderbook_watchdog_task.cancel()
+                        try:
+                            await self._orderbook_watchdog_task
+                        except asyncio.CancelledError:
+                            pass
+                        self._orderbook_watchdog_task = None
             
             except websockets.exceptions.ConnectionClosed as e:
                 logger.exception(f"❌ Lighter WebSocket 连接关闭 ({self.symbol}): {e}")
@@ -316,6 +326,34 @@ class LighterAdapter(ExchangeAdapter):
                 except asyncio.CancelledError:
                     logger.info(f"🔚 Lighter WS 外层任务被取消，退出重连 ({self.symbol})")
                     break
+
+    async def _watch_orderbook_silence(self, ws):
+        """单独监控 order_book 频道静默，不依赖整条 WS 是否超时。"""
+        try:
+            while self._is_running and self.ws is ws:
+                await asyncio.sleep(0.5)
+
+                if not self.lighter_snapshot_loaded:
+                    continue
+
+                silent_anchor = self._last_orderbook_message_ts or self.lighter_last_update_ts
+                if silent_anchor <= 0:
+                    continue
+
+                silent_for = time.time() - silent_anchor
+                if silent_for < self.orderbook_silence_reconnect_seconds:
+                    continue
+
+                logger.warning(
+                    f"⚠️ Lighter order_book 静默 {silent_for:.1f}s，"
+                    f"主动重连 WebSocket（其他频道可能仍有消息）({self.symbol})"
+                )
+                await ws.close()
+                break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception(f"❌ order_book 静默监控失败 ({self.symbol}): {e}")
 
     def _reset_lighter_orderbook_state(self):
         """重置本地订单簿缓存，确保重连后不会使用旧数据"""
