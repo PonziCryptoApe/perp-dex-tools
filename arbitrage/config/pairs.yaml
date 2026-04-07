@@ -1,5 +1,43 @@
 # 交易对配置文件
 
+common:
+  # 公共信号逻辑配置。所有交易对默认继承这里的配置，
+  # 若某个交易对显式声明同名字段，则以交易对自己的配置为准。
+  signal_logic:
+    # 可选值：
+    # - legacy: 现有标准差/动态阈值逻辑
+    # - quantile: 现有分位数逻辑
+    # - stat_arb: 预留给统计套利逻辑
+    mode: legacy
+
+    # ========== quantile 模式公共默认值 ==========
+    quantile: 0.6              # 分位数门槛，例如 0.6 表示 P60
+    sample_size: 2000          # 分位数样本数
+    min_samples: 2000          # 分位数冷启动最小样本数
+    min_edge_pct: 0.01         # 分位数模式最小安全边际（%）
+    min_abs_spread_pct: 0.03   # 分位数模式绝对净价差底线（%）
+
+    # ========== stat_arb 模式公共默认值 ==========
+    stat_arb:
+      enabled: false           # 统计套利总开关。仅当 mode=stat_arb 且 enabled=true 时才允许启用
+      baseline_adjustment: true  # 是否先减去两边盘口点差和的一半
+      baseline_ratio: 0.5        # 基线修正比例，0.5 表示减去两边点差和的一半
+
+      medium_window_seconds: 1800  # 中期窗口，默认 30 分钟
+      long_window_seconds: 3600    # 长期窗口，默认 60 分钟
+
+      medium_min_samples: 120    # 中期窗口最小样本数，未达到则不产出统计套利信号
+      long_min_samples: 240      # 长期窗口最小样本数，未达到则不产出统计套利信号
+
+      medium_weight: 0.4         # 30 分钟标准化偏离分数权重
+      long_weight: 0.6           # 60 分钟标准化偏离分数权重
+      entry_threshold: 2.8       # 最终开仓分数阈值，建议先从 2.5~3.0 开始试
+      min_score_gap: 0.5         # 两个方向分数最小差值，避免方向不明确时开仓
+      min_mad_pct: 0.003         # MAD 下限，防止波动尺度过小导致分数异常放大
+
+      require_same_sign_for_medium_long: true  # 是否要求 30m/60m 中枢方向一致
+      block_when_regime_suspected: true        # 是否在怀疑 regime 变化时阻断开仓
+
 pairs:
   # ========== Extended vs Lighter ==========
   

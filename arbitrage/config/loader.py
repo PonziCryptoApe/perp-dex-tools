@@ -6,6 +6,17 @@ from decimal import Decimal
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+
+def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """递归合并字典，pair 级配置覆盖公共配置。"""
+    result: Dict[str, Any] = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
+
 @dataclass
 class PairConfig:
     """交易对配置"""
@@ -60,6 +71,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
             f"可用的交易对: {available_pairs}"
         )
     
+    common_config = config.get('common', {})
     pair_data = config['pairs'][pair_id]
     
     if not pair_data.get('enabled', False):
@@ -75,7 +87,7 @@ def load_pair_config(pair_id: str) -> PairConfig:
         # 默认为交易量的 10%，但最小为 0.001
         min_depth_quantity = None
 
-    variational_config = pair_data.get('variational_config', {})
+    variational_config = _deep_merge_dict(common_config.get('variational_config', {}), pair_data.get('variational_config', {}))
 
     # ✅ 解析累计模式配置
     accumulate_mode = pair_data.get('accumulate_mode', False)
@@ -87,10 +99,10 @@ def load_pair_config(pair_id: str) -> PairConfig:
         # 默认值：与 quantity 相同
         max_position = quantity
     
-    dynamic_threshold = pair_data.get('dynamic_threshold', {})
-    edge_filter = pair_data.get('edge_filter', {})
-    risk_control = pair_data.get('risk_control', {})
-    signal_logic = pair_data.get('signal_logic', {})
+    dynamic_threshold = _deep_merge_dict(common_config.get('dynamic_threshold', {}), pair_data.get('dynamic_threshold', {}))
+    edge_filter = _deep_merge_dict(common_config.get('edge_filter', {}), pair_data.get('edge_filter', {}))
+    risk_control = _deep_merge_dict(common_config.get('risk_control', {}), pair_data.get('risk_control', {}))
+    signal_logic = _deep_merge_dict(common_config.get('signal_logic', {}), pair_data.get('signal_logic', {}))
 
     return PairConfig(
         pair_id=pair_id,

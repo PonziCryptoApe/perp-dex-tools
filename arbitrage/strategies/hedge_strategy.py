@@ -22,6 +22,7 @@ from ..services.position_manager import PositionManagerService
 from ..services.order_executor_parallel import OrderExecutor
 from ..services.dynamic_threshold import DynamicThresholdManager
 from ..services.quantile_signal_manager import QuantileSignalManager
+from ..services.stat_arb_signal_manager import StatArbSignalManager
 from ..services.risk_control_service import RiskControlService, RiskLevel
 from ..models.position import Position
 
@@ -229,6 +230,29 @@ class HedgeStrategy(BaseStrategy):
         self.quantile_log_dir = Path(self.signal_logic.get('log_dir', 'logs/arbitrage/quantile_signal'))
         self._quantile_samples_path: Optional[Path] = None
         self._quantile_events_path: Optional[Path] = None
+        self.stat_arb_logic = self.signal_logic.get('stat_arb', {})
+        if not isinstance(self.stat_arb_logic, dict):
+            self.stat_arb_logic = {}
+        self.stat_arb_enabled = bool(self.stat_arb_logic.get('enabled', False))
+        self.stat_arb_baseline_adjustment = bool(self.stat_arb_logic.get('baseline_adjustment', True))
+        self.stat_arb_baseline_ratio = float(self.stat_arb_logic.get('baseline_ratio', 0.5))
+        self.stat_arb_medium_window_seconds = int(self.stat_arb_logic.get('medium_window_seconds', 1800))
+        self.stat_arb_long_window_seconds = int(self.stat_arb_logic.get('long_window_seconds', 3600))
+        self.stat_arb_medium_min_samples = int(self.stat_arb_logic.get('medium_min_samples', 120))
+        self.stat_arb_long_min_samples = int(self.stat_arb_logic.get('long_min_samples', 240))
+        self.stat_arb_medium_weight = float(self.stat_arb_logic.get('medium_weight', 0.4))
+        self.stat_arb_long_weight = float(self.stat_arb_logic.get('long_weight', 0.6))
+        self.stat_arb_entry_threshold = float(self.stat_arb_logic.get('entry_threshold', 2.8))
+        self.stat_arb_min_score_gap = float(self.stat_arb_logic.get('min_score_gap', 0.5))
+        self.stat_arb_min_mad_pct = float(self.stat_arb_logic.get('min_mad_pct', 0.003))
+        self.stat_arb_require_same_sign = bool(
+            self.stat_arb_logic.get('require_same_sign_for_medium_long', True)
+        )
+        self.stat_arb_block_regime = bool(
+            self.stat_arb_logic.get('block_when_regime_suspected', True)
+        )
+        self.stat_arb_manager = None
+        self._stat_arb_context = None
 
         # 分位数信号管理器（新逻辑）
         self.quantile_manager = None
@@ -241,9 +265,26 @@ class HedgeStrategy(BaseStrategy):
             if self.quantile_log_enabled or self.quantile_event_log_enabled:
                 self._init_quantile_logs()
 
+        if self.signal_mode == 'stat_arb' and self.stat_arb_enabled:
+            self.stat_arb_manager = StatArbSignalManager(
+                baseline_adjustment=self.stat_arb_baseline_adjustment,
+                baseline_ratio=self.stat_arb_baseline_ratio,
+                medium_window_seconds=self.stat_arb_medium_window_seconds,
+                long_window_seconds=self.stat_arb_long_window_seconds,
+                medium_min_samples=self.stat_arb_medium_min_samples,
+                long_min_samples=self.stat_arb_long_min_samples,
+                medium_weight=self.stat_arb_medium_weight,
+                long_weight=self.stat_arb_long_weight,
+                entry_threshold=self.stat_arb_entry_threshold,
+                min_score_gap=self.stat_arb_min_score_gap,
+                min_mad_pct=self.stat_arb_min_mad_pct,
+                require_same_sign_for_medium_long=self.stat_arb_require_same_sign,
+                block_when_regime_suspected=self.stat_arb_block_regime,
+            )
+
         # 动态阈值管理器（旧逻辑）
         self.threshold_manager = None
-        if self.signal_mode != 'quantile':
+        if self.signal_mode == 'legacy':
             dt_config = dynamic_threshold if isinstance(dynamic_threshold, dict) else {}
             if dt_config.get('enabled', False):
                 self.threshold_manager = DynamicThresholdManager(
@@ -268,10 +309,13 @@ class HedgeStrategy(BaseStrategy):
             f"   Monitor Only: {monitor_only}\n"
             f"   累计模式: {'✅ 启用' if accumulate_mode else '❌ 禁用'}\n"
             f"   风控模块: {'✅ 启用' if self.risk_control_enabled else '❌ 禁用'}\n"
-            f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else '标准差'}\n"
+            f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else ('统计套利' if self.signal_mode == 'stat_arb' else '标准差')}\n"
             f"   分位数配置: P{int(self.signal_quantile * 100)} | 样本{self.signal_sample_size} | 最小样本{self.signal_min_samples}\n"
             f"   分位数最小边际: {self.signal_min_edge_pct:.4f}%\n"
             f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
+            f"   统计套利开关: {'✅ 启用' if self.stat_arb_enabled else '❌ 禁用'}\n"
+            f"   统计套利窗口: 30m={self.stat_arb_medium_window_seconds}s | 60m={self.stat_arb_long_window_seconds}s\n"
+            f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
@@ -279,6 +323,11 @@ class HedgeStrategy(BaseStrategy):
             f"   延迟风险系数: {self.edge_latency_bps_per_100ms:.2f} bps/100ms\n"
             f"   延迟免惩罚阈值: {self.edge_latency_free_ms:.0f} ms"
         )
+        if self.signal_mode == 'stat_arb' and not accumulate_mode:
+            logger.warning(
+                "⚠️ 当前使用 stat_arb 且未开启累计模式：第一版仅在累计模式下完整支持双方向建仓，"
+                "传统模式下 CLOSE 方向仍沿用“有持仓才评估”的旧语义"
+            )
     
     async def start(self):
         """启动策略"""
@@ -443,56 +492,72 @@ class HedgeStrategy(BaseStrategy):
             # if self._last_threshold_check_time is None:
                 # self._last_threshold_check_time = time.time()
             # now = time.time()
-            # ✅ 新增：记录价差并尝试调整阈值
-            if self.quantile_manager and signal_flag:
-                avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
-                adjusted_open_spread = spread_pct - avg_local_spread_pct
-                adjusted_close_spread = reverse_spread_pct - avg_local_spread_pct
-                self.quantile_manager.add_spreads(adjusted_open_spread, adjusted_close_spread)
-                self._log_quantile_sample(
-                    spread_pct=spread_pct,
-                    reverse_spread_pct=reverse_spread_pct,
-                    avg_local_spread_pct=avg_local_spread_pct,
-                )
+            # ✅ 不同信号模式分别维护自己的统计上下文
+            if signal_flag:
+                if self.signal_mode == 'quantile' and self.quantile_manager:
+                    avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
+                    adjusted_open_spread = spread_pct - avg_local_spread_pct
+                    adjusted_close_spread = reverse_spread_pct - avg_local_spread_pct
+                    self.quantile_manager.add_spreads(adjusted_open_spread, adjusted_close_spread)
+                    self._log_quantile_sample(
+                        spread_pct=spread_pct,
+                        reverse_spread_pct=reverse_spread_pct,
+                        avg_local_spread_pct=avg_local_spread_pct,
+                    )
+                elif self.signal_mode == 'stat_arb' and self.stat_arb_manager:
+                    self._update_stat_arb_context(
+                        spread_pct=spread_pct,
+                        reverse_spread_pct=reverse_spread_pct,
+                        prices=prices,
+                    )
+                    stat_arb_ready = bool(self._stat_arb_context and self._stat_arb_context.get('ready'))
+                    if not stat_arb_ready:
+                        total_samples = self._stat_arb_context.get('total_samples', 0) if self._stat_arb_context else 0
+                        open_stats = self._stat_arb_context.get('open') if self._stat_arb_context else None
+                        close_stats = self._stat_arb_context.get('close') if self._stat_arb_context else None
+                        open_medium_samples = open_stats.medium_samples if open_stats else 0
+                        open_long_samples = open_stats.long_samples if open_stats else 0
+                        close_medium_samples = close_stats.medium_samples if close_stats else 0
+                        close_long_samples = close_stats.long_samples if close_stats else 0
+                        self._log_threshold_skip_reason(
+                            "统计套利窗口尚未就绪",
+                            detail=(
+                                f"总样本={total_samples}, "
+                                f"OPEN(30m/60m)={open_medium_samples}/{open_long_samples}, "
+                                f"CLOSE(30m/60m)={close_medium_samples}/{close_long_samples}"
+                            ),
+                        )
+                        await self._clear_all_signal_states("统计套利窗口样本尚未就绪")
+                        return
+                elif self.threshold_manager:
+                    self._log_sample_snapshot(prices, signal_delay_ms_a, signal_delay_ms_b)
+                    self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
 
-            if self.threshold_manager and signal_flag:
-                self._log_sample_snapshot(prices, signal_delay_ms_a, signal_delay_ms_b)
-                # 添加数据
-                self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
-                
-                # 尝试调整
-                current_qty = self.position_manager.get_current_position_qty()
-                new_open, new_close = self.threshold_manager.try_adjust(
-                    current_qty, 
-                    self.position_manager.max_position
-                )
-                
-                # 更新阈值
-                if new_open is not None:
-                    self.open_threshold_pct = new_open
-                    self.close_threshold_pct = new_close
-                else:
-                    stats = self.threshold_manager.get_stats()
-                    self._log_threshold_skip_reason(
-                        "动态阈值尚未就绪",
-                        detail=(
-                            f"状态={stats.get('status')}, "
-                            f"开仓样本={stats.get('open_samples', 0)}, "
-                            f"平仓样本={stats.get('close_samples', 0)}"
-                        ),
+                    current_qty = self.position_manager.get_current_position_qty()
+                    new_open, new_close = self.threshold_manager.try_adjust(
+                        current_qty,
+                        self.position_manager.max_position
                     )
-                    await self._clear_all_signal_states("动态阈值尚未就绪")
-                    return
-            elif signal_flag and not self.threshold_manager:
-                if self.signal_mode == 'quantile':
-                    self._log_threshold_skip_reason(
-                        "当前使用分位数模式",
-                        detail="signal_mode=quantile，动态阈值管理器未启用",
-                    )
-                else:
+
+                    if new_open is not None:
+                        self.open_threshold_pct = new_open
+                        self.close_threshold_pct = new_close
+                    else:
+                        stats = self.threshold_manager.get_stats()
+                        self._log_threshold_skip_reason(
+                            "动态阈值尚未就绪",
+                            detail=(
+                                f"状态={stats.get('status')}, "
+                                f"开仓样本={stats.get('open_samples', 0)}, "
+                                f"平仓样本={stats.get('close_samples', 0)}"
+                            ),
+                        )
+                        await self._clear_all_signal_states("动态阈值尚未就绪")
+                        return
+                elif self.signal_mode == 'legacy':
                     self._log_threshold_skip_reason(
                         "动态阈值未启用",
-                        detail=f"signal_mode={self.signal_mode}",
+                        detail="signal_mode=legacy 且 dynamic_threshold.enabled=false",
                     )
 
             if self.position_manager.accumulate_mode:
@@ -864,6 +929,55 @@ class HedgeStrategy(BaseStrategy):
         if open_q is None or close_q is None:
             return None, None
         return Decimal(str(open_q)), Decimal(str(close_q))
+
+    def _update_stat_arb_context(
+        self,
+        spread_pct: Decimal,
+        reverse_spread_pct: Decimal,
+        prices: PriceSnapshot,
+    ) -> None:
+        """刷新统计套利上下文。"""
+        if not self.stat_arb_manager:
+            self._stat_arb_context = None
+            return
+
+        total_local_spread_pct = self._calculate_avg_local_spread_pct(prices) * Decimal('2')
+        self.stat_arb_manager.add_spreads(
+            open_spread=spread_pct,
+            close_spread=reverse_spread_pct,
+            baseline_pct=total_local_spread_pct,
+        )
+        self._stat_arb_context = self.stat_arb_manager.get_signal_context()
+
+    def _get_stat_arb_direction_stats(self, signal_type: SignalType):
+        """获取某个方向的统计套利快照。"""
+        if not self._stat_arb_context:
+            return None
+        if signal_type == SignalType.OPEN:
+            return self._stat_arb_context.get('open')
+        return self._stat_arb_context.get('close')
+
+    def _is_stat_arb_selected(self, signal_type: SignalType) -> bool:
+        """当前统计套利上下文是否选择了该方向。"""
+        if not self._stat_arb_context:
+            return False
+        return self._stat_arb_context.get('selected_signal_type') == signal_type
+
+    def _format_stat_arb_extra_info(self, signal_type: SignalType) -> str:
+        """构建统计套利信号的附加日志。"""
+        direction_stats = self._get_stat_arb_direction_stats(signal_type)
+        if direction_stats is None:
+            return ""
+
+        return (
+            f"   基线修正后价差: {direction_stats.current_adjusted_pct:.4f}%\n"
+            f"   基线修正值: {direction_stats.baseline_pct:.4f}%\n"
+            f"   30m 中位数/MAD: {direction_stats.medium_median_pct:.4f}% / {direction_stats.medium_mad_pct:.4f}%\n"
+            f"   60m 中位数/MAD: {direction_stats.long_median_pct:.4f}% / {direction_stats.long_mad_pct:.4f}%\n"
+            f"   30m/60m 分数: {direction_stats.medium_score:.3f} / {direction_stats.long_score:.3f}\n"
+            f"   最终分数: {direction_stats.final_score:.3f}\n"
+            f"   选择原因: {self._stat_arb_context.get('selection_reason', '--')}\n"
+        )
 
     def _apply_risk_position_cap(self, risk_decision) -> Decimal:
         """根据风控决策刷新当前有效最大仓位。"""
@@ -1345,7 +1459,19 @@ class HedgeStrategy(BaseStrategy):
         threshold_label = "阈值"
         spread_label = "价差"
         extra_spread_info = ""
-        if self.signal_mode == 'quantile' and self.quantile_manager:
+        stat_arb_stats = None
+        if self.signal_mode == 'stat_arb' and self.stat_arb_manager:
+            if not self._is_stat_arb_selected(SignalType.OPEN):
+                return None
+            stat_arb_stats = self._get_stat_arb_direction_stats(SignalType.OPEN)
+            if stat_arb_stats is None or stat_arb_stats.final_score is None:
+                return None
+            compare_spread_pct = Decimal(str(stat_arb_stats.final_score))
+            threshold_pct = Decimal(str(self.stat_arb_entry_threshold))
+            threshold_label = "score阈值"
+            spread_label = "统计分数"
+            extra_spread_info = self._format_stat_arb_extra_info(SignalType.OPEN)
+        elif self.signal_mode == 'quantile' and self.quantile_manager:
             open_q, _ = self._get_quantile_thresholds()
             if open_q is None:
                 return
@@ -1421,7 +1547,7 @@ class HedgeStrategy(BaseStrategy):
 
             edge_estimate = None
             edge_apply, edge_ctx = self._should_apply_edge_filter('open')
-            if self.edge_filter_enabled:
+            if self.edge_filter_enabled and self.signal_mode != 'stat_arb':
                 if edge_apply:
                     passed_edge, edge_estimate = self._passes_edge_filter(
                         spread_pct=spread_pct,
@@ -1484,6 +1610,8 @@ class HedgeStrategy(BaseStrategy):
                     'threshold_pct': str(threshold_pct),
                     'threshold_label': threshold_label,
                     'spread_label': spread_label,
+                    'signal_mode': self.signal_mode,
+                    'stat_arb': stat_arb_stats.to_dict() if stat_arb_stats else {},
                 },
             )
             return signal
@@ -1532,7 +1660,19 @@ class HedgeStrategy(BaseStrategy):
         threshold_label = "阈值"
         spread_label = "价差"
         extra_spread_info = ""
-        if self.signal_mode == 'quantile' and self.quantile_manager:
+        stat_arb_stats = None
+        if self.signal_mode == 'stat_arb' and self.stat_arb_manager:
+            if not self._is_stat_arb_selected(SignalType.CLOSE):
+                return None
+            stat_arb_stats = self._get_stat_arb_direction_stats(SignalType.CLOSE)
+            if stat_arb_stats is None or stat_arb_stats.final_score is None:
+                return None
+            compare_spread_pct = Decimal(str(stat_arb_stats.final_score))
+            threshold_pct = Decimal(str(self.stat_arb_entry_threshold))
+            threshold_label = "score阈值"
+            spread_label = "统计分数"
+            extra_spread_info = self._format_stat_arb_extra_info(SignalType.CLOSE)
+        elif self.signal_mode == 'quantile' and self.quantile_manager:
             _, close_q = self._get_quantile_thresholds()
             if close_q is None:
                 return
@@ -1609,7 +1749,7 @@ class HedgeStrategy(BaseStrategy):
 
             edge_estimate = None
             edge_apply, edge_ctx = self._should_apply_edge_filter('close')
-            if self.edge_filter_enabled:
+            if self.edge_filter_enabled and self.signal_mode != 'stat_arb':
                 if edge_apply:
                     passed_edge, edge_estimate = self._passes_edge_filter(
                         spread_pct=spread_pct,
@@ -1676,6 +1816,8 @@ class HedgeStrategy(BaseStrategy):
                     'threshold_pct': str(threshold_pct),
                     'threshold_label': threshold_label,
                     'spread_label': spread_label,
+                    'signal_mode': self.signal_mode,
+                    'stat_arb': stat_arb_stats.to_dict() if stat_arb_stats else {},
                 },
             )
             return signal

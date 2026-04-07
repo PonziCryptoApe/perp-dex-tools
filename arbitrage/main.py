@@ -281,11 +281,25 @@ async def main():
                        help='平仓阈值（可选，覆盖配置）')
     parser.add_argument('--min-total-threshold', '-mtt', type=float, default=None, help='最小的阈值和')
     parser.add_argument('--sample-size', type=int, help='价差样本数最终的值')
-    parser.add_argument('--signal-mode', choices=['legacy', 'quantile'], default=None, help='信号逻辑模式（默认读取配置）')
+    parser.add_argument('--signal-mode', choices=['legacy', 'quantile', 'stat_arb'], default=None, help='信号逻辑模式（默认读取配置）')
     parser.add_argument('--signal-quantile', type=float, default=None, help='分位数门槛（如 0.6 表示 P60）')
     parser.add_argument('--signal-sample-size', type=int, default=None, help='分位数样本数（冷启动阈值）')
     parser.add_argument('--signal-min-edge-pct', type=float, default=None, help='分位数模式最小安全边际（%）')
     parser.add_argument('--signal-min-abs-spread-pct', type=float, default=None, help='分位数模式绝对净价差底线（%）')
+    parser.add_argument('--signal-stat-arb-enabled', choices=['on', 'off'], default=None, help='统计套利模式总开关（默认读取配置）')
+    parser.add_argument('--signal-stat-arb-baseline-adjustment', choices=['on', 'off'], default=None, help='统计套利是否启用盘口点差基线修正（默认读取配置）')
+    parser.add_argument('--signal-stat-arb-baseline-ratio', type=float, default=None, help='统计套利盘口基线修正比例（默认 0.5）')
+    parser.add_argument('--signal-stat-arb-medium-window-seconds', type=int, default=None, help='统计套利中期窗口秒数（默认 1800）')
+    parser.add_argument('--signal-stat-arb-long-window-seconds', type=int, default=None, help='统计套利长期窗口秒数（默认 3600）')
+    parser.add_argument('--signal-stat-arb-medium-min-samples', type=int, default=None, help='统计套利中期窗口最小样本数（默认 120）')
+    parser.add_argument('--signal-stat-arb-long-min-samples', type=int, default=None, help='统计套利长期窗口最小样本数（默认 240）')
+    parser.add_argument('--signal-stat-arb-medium-weight', type=float, default=None, help='统计套利 30 分钟分数权重（默认 0.4）')
+    parser.add_argument('--signal-stat-arb-long-weight', type=float, default=None, help='统计套利 60 分钟分数权重（默认 0.6）')
+    parser.add_argument('--signal-stat-arb-entry-threshold', type=float, default=None, help='统计套利最终开仓分数阈值（默认 2.8）')
+    parser.add_argument('--signal-stat-arb-min-score-gap', type=float, default=None, help='统计套利两个方向最小分数差（默认 0.5）')
+    parser.add_argument('--signal-stat-arb-min-mad-pct', type=float, default=None, help='统计套利 MAD 下限（默认 0.003）')
+    parser.add_argument('--signal-stat-arb-require-same-sign', choices=['on', 'off'], default=None, help='统计套利是否要求 30m/60m 中枢方向一致（默认读取配置）')
+    parser.add_argument('--signal-stat-arb-block-regime', choices=['on', 'off'], default=None, help='统计套利是否在怀疑 regime 变化时阻断开仓（默认读取配置）')
     parser.add_argument('--env-file', type=str, default=None,
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
@@ -333,6 +347,22 @@ async def main():
         parser.error("--max-signal-delay-ms-a 必须大于 0")
     if args.max_signal_delay_ms_b is not None and args.max_signal_delay_ms_b <= 0:
         parser.error("--max-signal-delay-ms-b 必须大于 0")
+    if args.signal_stat_arb_baseline_ratio is not None and args.signal_stat_arb_baseline_ratio < 0:
+        parser.error("--signal-stat-arb-baseline-ratio 不能小于 0")
+    if args.signal_stat_arb_medium_window_seconds is not None and args.signal_stat_arb_medium_window_seconds <= 0:
+        parser.error("--signal-stat-arb-medium-window-seconds 必须大于 0")
+    if args.signal_stat_arb_long_window_seconds is not None and args.signal_stat_arb_long_window_seconds <= 0:
+        parser.error("--signal-stat-arb-long-window-seconds 必须大于 0")
+    if args.signal_stat_arb_medium_min_samples is not None and args.signal_stat_arb_medium_min_samples <= 0:
+        parser.error("--signal-stat-arb-medium-min-samples 必须大于 0")
+    if args.signal_stat_arb_long_min_samples is not None and args.signal_stat_arb_long_min_samples <= 0:
+        parser.error("--signal-stat-arb-long-min-samples 必须大于 0")
+    if args.signal_stat_arb_entry_threshold is not None and args.signal_stat_arb_entry_threshold <= 0:
+        parser.error("--signal-stat-arb-entry-threshold 必须大于 0")
+    if args.signal_stat_arb_min_score_gap is not None and args.signal_stat_arb_min_score_gap < 0:
+        parser.error("--signal-stat-arb-min-score-gap 不能小于 0")
+    if args.signal_stat_arb_min_mad_pct is not None and args.signal_stat_arb_min_mad_pct <= 0:
+        parser.error("--signal-stat-arb-min-mad-pct 必须大于 0")
     if args.min_edge_bps is not None and args.min_edge_bps < 0:
         parser.error("--min-edge-bps 不能小于 0")
     if args.edge_base_cost_bps is not None and args.edge_base_cost_bps < 0:
@@ -463,6 +493,38 @@ async def main():
         signal_logic['min_edge_pct'] = float(args.signal_min_edge_pct)
     if args.signal_min_abs_spread_pct is not None:
         signal_logic['min_abs_spread_pct'] = float(args.signal_min_abs_spread_pct)
+    stat_arb_logic = signal_logic.get('stat_arb', {})
+    if not isinstance(stat_arb_logic, dict):
+        stat_arb_logic = {}
+    if args.signal_stat_arb_enabled is not None:
+        stat_arb_logic['enabled'] = (args.signal_stat_arb_enabled == 'on')
+    if args.signal_stat_arb_baseline_adjustment is not None:
+        stat_arb_logic['baseline_adjustment'] = (args.signal_stat_arb_baseline_adjustment == 'on')
+    if args.signal_stat_arb_baseline_ratio is not None:
+        stat_arb_logic['baseline_ratio'] = float(args.signal_stat_arb_baseline_ratio)
+    if args.signal_stat_arb_medium_window_seconds is not None:
+        stat_arb_logic['medium_window_seconds'] = int(args.signal_stat_arb_medium_window_seconds)
+    if args.signal_stat_arb_long_window_seconds is not None:
+        stat_arb_logic['long_window_seconds'] = int(args.signal_stat_arb_long_window_seconds)
+    if args.signal_stat_arb_medium_min_samples is not None:
+        stat_arb_logic['medium_min_samples'] = int(args.signal_stat_arb_medium_min_samples)
+    if args.signal_stat_arb_long_min_samples is not None:
+        stat_arb_logic['long_min_samples'] = int(args.signal_stat_arb_long_min_samples)
+    if args.signal_stat_arb_medium_weight is not None:
+        stat_arb_logic['medium_weight'] = float(args.signal_stat_arb_medium_weight)
+    if args.signal_stat_arb_long_weight is not None:
+        stat_arb_logic['long_weight'] = float(args.signal_stat_arb_long_weight)
+    if args.signal_stat_arb_entry_threshold is not None:
+        stat_arb_logic['entry_threshold'] = float(args.signal_stat_arb_entry_threshold)
+    if args.signal_stat_arb_min_score_gap is not None:
+        stat_arb_logic['min_score_gap'] = float(args.signal_stat_arb_min_score_gap)
+    if args.signal_stat_arb_min_mad_pct is not None:
+        stat_arb_logic['min_mad_pct'] = float(args.signal_stat_arb_min_mad_pct)
+    if args.signal_stat_arb_require_same_sign is not None:
+        stat_arb_logic['require_same_sign_for_medium_long'] = (args.signal_stat_arb_require_same_sign == 'on')
+    if args.signal_stat_arb_block_regime is not None:
+        stat_arb_logic['block_when_regime_suspected'] = (args.signal_stat_arb_block_regime == 'on')
+    signal_logic['stat_arb'] = stat_arb_logic
 
     if dynamic_threshold:
         if args.min_total_threshold is not None:
@@ -491,6 +553,20 @@ async def main():
     signal_quantile = float(signal_logic.get('quantile', 0.6))
     signal_sample_size = int(signal_logic.get('sample_size', 2000))
     signal_min_samples = int(signal_logic.get('min_samples', signal_sample_size))
+    stat_arb_enabled = bool(stat_arb_logic.get('enabled', False))
+    stat_arb_baseline_adjustment = bool(stat_arb_logic.get('baseline_adjustment', True))
+    stat_arb_baseline_ratio = float(stat_arb_logic.get('baseline_ratio', 0.5))
+    stat_arb_medium_window_seconds = int(stat_arb_logic.get('medium_window_seconds', 1800))
+    stat_arb_long_window_seconds = int(stat_arb_logic.get('long_window_seconds', 3600))
+    stat_arb_medium_min_samples = int(stat_arb_logic.get('medium_min_samples', 120))
+    stat_arb_long_min_samples = int(stat_arb_logic.get('long_min_samples', 240))
+    stat_arb_medium_weight = float(stat_arb_logic.get('medium_weight', 0.4))
+    stat_arb_long_weight = float(stat_arb_logic.get('long_weight', 0.6))
+    stat_arb_entry_threshold = float(stat_arb_logic.get('entry_threshold', 2.8))
+    stat_arb_min_score_gap = float(stat_arb_logic.get('min_score_gap', 0.5))
+    stat_arb_min_mad_pct = float(stat_arb_logic.get('min_mad_pct', 0.003))
+    stat_arb_require_same_sign = bool(stat_arb_logic.get('require_same_sign_for_medium_long', True))
+    stat_arb_block_regime = bool(stat_arb_logic.get('block_when_regime_suspected', True))
     risk_control_enabled = bool(risk_control_config.get('enabled', False))  # 风控模块总开关
     risk_poll_interval = float(args.risk_poll_interval_seconds) if args.risk_poll_interval_seconds is not None else float(risk_control_config.get('poll_interval_seconds', 1.0))  # 风控后台轮询间隔（秒）
     risk_stale_after = float(args.risk_stale_after_seconds) if args.risk_stale_after_seconds is not None else float(risk_control_config.get('stale_after_seconds', 3.0))  # 风控快照过期判定阈值（秒）
@@ -530,8 +606,15 @@ async def main():
         f"  样本数:       {dt_sample_size}\n"
         f"  最大标准差系数: {dt_max_std_multiplier}\n"
         f"  最小标准差系数: {dt_min_std_multiplier}\n"
-        f"  信号逻辑:     {'分位数' if signal_mode == 'quantile' else '标准差'}\n"
+        f"  信号逻辑:     {'分位数' if signal_mode == 'quantile' else ('统计套利' if signal_mode == 'stat_arb' else '标准差')}\n"
         f"  分位数配置:   P{int(signal_quantile * 100)} | 样本{signal_sample_size} | 最小样本{signal_min_samples}\n"
+        f"  统计套利开关: {'启用' if stat_arb_enabled else '禁用'}\n"
+        f"  统计套利基线修正: {'启用' if stat_arb_baseline_adjustment else '禁用'} | ratio={stat_arb_baseline_ratio:.3f}\n"
+        f"  统计套利窗口:  30m={stat_arb_medium_window_seconds}s / 60m={stat_arb_long_window_seconds}s\n"
+        f"  统计套利样本:  30m={stat_arb_medium_min_samples} / 60m={stat_arb_long_min_samples}\n"
+        f"  统计套利权重:  30m={stat_arb_medium_weight:.2f} / 60m={stat_arb_long_weight:.2f}\n"
+        f"  统计套利阈值:  entry={stat_arb_entry_threshold:.3f} | gap={stat_arb_min_score_gap:.3f} | MAD下限={stat_arb_min_mad_pct:.6f}\n"
+        f"  统计套利过滤:  同向={ '是' if stat_arb_require_same_sign else '否'} | 阻断regime={ '是' if stat_arb_block_regime else '否'}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"
@@ -559,6 +642,10 @@ async def main():
         f"  清算距离阈值: WARN={risk_liq_distance_warn:.2%} WARN恢复={risk_liq_distance_warn_recover:.2%} REDUCE={risk_liq_distance_reduce:.2%} STOP={risk_liq_distance_stop:.2%}\n"
         f"{'='*60}\n"
     )
+
+    if signal_mode == 'stat_arb' and not stat_arb_enabled:
+        logger.error("❌ 当前 signal_mode=stat_arb，但 signal_logic.stat_arb.enabled=false，请先打开统计套利开关")
+        return
     
     # Step 2: 创建交易所适配器
     logger.info("🔌 初始化交易所适配器...")
