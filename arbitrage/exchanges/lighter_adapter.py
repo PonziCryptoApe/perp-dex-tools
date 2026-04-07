@@ -32,6 +32,9 @@ class LighterAdapter(ExchangeAdapter):
         self.ws_task = None
         self.ws = None
         self._orderbook_watchdog_task = None
+        self._ws_close_reason = None
+        self._watchdog_reconnect_times = []
+        self._watchdog_cooldown_until = 0.0
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX'))
         self.reconnect_base_delay = float(self.config.get('reconnect_base_delay', 0.3))
         self.reconnect_max_delay = float(self.config.get('reconnect_max_delay', 10.0))
@@ -134,6 +137,30 @@ class LighterAdapter(ExchangeAdapter):
             self.orderbook_cleanup_interval = 1000
         if self.orderbook_cleanup_interval <= 0:
             self.orderbook_cleanup_interval = 1000
+        try:
+            self.watchdog_burst_window_seconds = float(
+                self.config.get('watchdog_burst_window_seconds', 600.0)
+            )
+        except (TypeError, ValueError):
+            self.watchdog_burst_window_seconds = 600.0
+        if self.watchdog_burst_window_seconds <= 0:
+            self.watchdog_burst_window_seconds = 600.0
+        try:
+            self.watchdog_burst_threshold = int(
+                self.config.get('watchdog_burst_threshold', 5)
+            )
+        except (TypeError, ValueError):
+            self.watchdog_burst_threshold = 5
+        if self.watchdog_burst_threshold <= 0:
+            self.watchdog_burst_threshold = 5
+        try:
+            self.watchdog_cooldown_seconds = float(
+                self.config.get('watchdog_cooldown_seconds', 30.0)
+            )
+        except (TypeError, ValueError):
+            self.watchdog_cooldown_seconds = 30.0
+        if self.watchdog_cooldown_seconds <= 0:
+            self.watchdog_cooldown_seconds = 30.0
     
     async def connect(self):
         """连接 Lighter"""
@@ -235,6 +262,7 @@ class LighterAdapter(ExchangeAdapter):
                     # max_queue=None      # 避免队列背压导致 ping 超时
                 ) as ws:
                     self.ws = ws
+                    self._ws_close_reason = None
                     reconnect_count = 0
                     self._consecutive_ws_timeouts = 0
                     
@@ -292,10 +320,22 @@ class LighterAdapter(ExchangeAdapter):
                             logger.info(f"⚠️ Lighter WS 1s 无消息，继续监听... ({self.symbol})")  # 心跳检查
                             continue
                         except websockets.exceptions.ConnectionClosedError as e:
-                            logger.warning(f"❌ Lighter WS 连接关闭 ({self.symbol})，code={e.code}, reason={e.reason}")
+                            if self._ws_close_reason == "orderbook_silence_watchdog":
+                                logger.info(
+                                    f"ℹ️ Lighter WS 因 order_book 静默主动关闭，准备重连 ({self.symbol})"
+                                )
+                            else:
+                                logger.warning(
+                                    f"❌ Lighter WS 连接关闭 ({self.symbol})，code={e.code}, reason={e.reason}"
+                                )
                             break  # 跳出内循环，重连外层
                         except websockets.exceptions.ConnectionClosed as e:
-                            logger.exception(f"❌ Lighter WS 连接关闭 ({self.symbol}): {e}")
+                            if self._ws_close_reason == "orderbook_silence_watchdog":
+                                logger.info(
+                                    f"ℹ️ Lighter WS 因 order_book 静默主动关闭，准备重连 ({self.symbol})"
+                                )
+                            else:
+                                logger.exception(f"❌ Lighter WS 连接关闭 ({self.symbol}): {e}")
                             break  # 跳出内循环，重连外层
                         except asyncio.CancelledError:
                             logger.info(f"🔚 Lighter WS 任务被取消，退出循环 ({self.symbol})")
@@ -308,6 +348,7 @@ class LighterAdapter(ExchangeAdapter):
                         except asyncio.CancelledError:
                             pass
                         self._orderbook_watchdog_task = None
+                    self._ws_close_reason = None
             
             except websockets.exceptions.ConnectionClosed as e:
                 logger.exception(f"❌ Lighter WebSocket 连接关闭 ({self.symbol}): {e}")
@@ -320,6 +361,13 @@ class LighterAdapter(ExchangeAdapter):
                     self.reconnect_max_delay,
                     self.reconnect_base_delay * (2 ** (reconnect_count - 1))
                 )
+                cooldown_remain = self._watchdog_cooldown_until - time.time()
+                if cooldown_remain > wait_time:
+                    wait_time = cooldown_remain
+                    logger.warning(
+                        f"⚠️ Lighter order_book 连续静默重连过多，"
+                        f"进入 {wait_time:.1f}s 冷却期后再重连 ({self.symbol})"
+                    )
                 logger.info(f"⏳ {wait_time}秒后重连 Lighter WebSocket... ({self.symbol})")
                 try:
                     await asyncio.sleep(wait_time)
@@ -348,12 +396,29 @@ class LighterAdapter(ExchangeAdapter):
                     f"⚠️ Lighter order_book 静默 {silent_for:.1f}s，"
                     f"主动重连 WebSocket（其他频道可能仍有消息）({self.symbol})"
                 )
+                self._record_watchdog_reconnect()
+                self._ws_close_reason = "orderbook_silence_watchdog"
                 await ws.close()
                 break
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.exception(f"❌ order_book 静默监控失败 ({self.symbol}): {e}")
+
+    def _record_watchdog_reconnect(self):
+        """记录 watchdog 触发的重连，并在短时间内过于频繁时进入冷却。"""
+        now = time.time()
+        window_start = now - self.watchdog_burst_window_seconds
+        self._watchdog_reconnect_times = [
+            ts for ts in self._watchdog_reconnect_times
+            if ts >= window_start
+        ]
+        self._watchdog_reconnect_times.append(now)
+        if len(self._watchdog_reconnect_times) >= self.watchdog_burst_threshold:
+            self._watchdog_cooldown_until = max(
+                self._watchdog_cooldown_until,
+                now + self.watchdog_cooldown_seconds
+            )
 
     def _reset_lighter_orderbook_state(self):
         """重置本地订单簿缓存，确保重连后不会使用旧数据"""

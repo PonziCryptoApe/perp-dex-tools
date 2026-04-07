@@ -454,10 +454,17 @@ class PriceMonitorService:
         # 检查 Exchange A
         if self.last_orderbook_a_time > 0:
             age_a = current_time - self.last_orderbook_a_time
-            if age_a > threshold_a:
-                if age_a >= self.recovery_stale_threshold_seconds:
-                    self._long_stale_a = True
+            if self._long_stale_a and self._recovery_ready_time_a > 0.0:
+                remain = self._recovery_ready_time_a - current_time
+                if remain > 0:
+                    return True, f"{self.exchange_a.exchange_name} 恢复保护期中({remain:.2f}s)"
+                self._long_stale_a = False
                 self._recovery_ready_time_a = 0.0
+            if age_a > threshold_a:
+                if age_a >= self.recovery_stale_threshold_seconds or self._long_stale_a:
+                    self._long_stale_a = True
+                if self._recovery_ready_time_a == 0.0:
+                    self._recovery_ready_time_a = 0.0
                 age_a_ms = age_a * 1000
                 threshold_a_ms = threshold_a * 1000 if threshold_a is not None else 0.0
                 return True, (
@@ -488,10 +495,17 @@ class PriceMonitorService:
         # 检查 Exchange B
         if self.last_orderbook_b_time > 0:
             age_b = current_time - self.last_orderbook_b_time
-            if age_b > threshold_b:
-                if age_b >= self.recovery_stale_threshold_seconds:
-                    self._long_stale_b = True
+            if self._long_stale_b and self._recovery_ready_time_b > 0.0:
+                remain = self._recovery_ready_time_b - current_time
+                if remain > 0:
+                    return True, f"{self.exchange_b.exchange_name} 恢复保护期中({remain:.2f}s)"
+                self._long_stale_b = False
                 self._recovery_ready_time_b = 0.0
+            if age_b > threshold_b:
+                if age_b >= self.recovery_stale_threshold_seconds or self._long_stale_b:
+                    self._long_stale_b = True
+                if self._recovery_ready_time_b == 0.0:
+                    self._recovery_ready_time_b = 0.0
                 age_b_ms = age_b * 1000
                 threshold_b_ms = threshold_b * 1000 if threshold_b is not None else 0.0
                 return True, (
