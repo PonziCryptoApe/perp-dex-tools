@@ -913,10 +913,16 @@ class LighterAdapter(ExchangeAdapter):
         ask_size = float(self.lighter_order_book["asks"].get(self.lighter_best_ask, 0))
 
         ts = self.lighter_last_update_ts or time.time()
+        orderbook_message_ts = self._last_orderbook_message_ts or 0.0
+        processing_delay_ms = 0.0
+        if orderbook_message_ts > 0:
+            processing_delay_ms = max(0.0, (ts - orderbook_message_ts) * 1000)
         self._orderbook = {
             'bids': [[float(self.lighter_best_bid), bid_size]],
             'asks': [[float(self.lighter_best_ask), ask_size]],
             'timestamp': ts,
+            'orderbook_message_ts': orderbook_message_ts,
+            'processing_delay_ms': processing_delay_ms,
             'poll_duration_ms': 0,  # WebSocket 无延迟
             'mark_price': self._lighter_market_stats_parsed.get('mark_price')
         }

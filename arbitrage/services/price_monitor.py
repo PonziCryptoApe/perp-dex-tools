@@ -467,9 +467,10 @@ class PriceMonitorService:
                     self._recovery_ready_time_a = 0.0
                 age_a_ms = age_a * 1000
                 threshold_a_ms = threshold_a * 1000 if threshold_a is not None else 0.0
+                detail_a = self._build_exchange_a_stale_detail(current_time, age_a_ms)
                 return True, (
                     f"{self.exchange_a.exchange_name} 订单簿已 {age_a_ms:.0f}ms 未更新 "
-                    f"(阈值 {threshold_a_ms:.0f}ms)"
+                    f"(阈值 {threshold_a_ms:.0f}ms){detail_a}"
                 )
             if self._long_stale_a:
                 if self._recovery_ready_time_a == 0.0:
@@ -508,9 +509,10 @@ class PriceMonitorService:
                     self._recovery_ready_time_b = 0.0
                 age_b_ms = age_b * 1000
                 threshold_b_ms = threshold_b * 1000 if threshold_b is not None else 0.0
+                detail_b = self._build_exchange_b_stale_detail(current_time, age_b_ms)
                 return True, (
                     f"{self.exchange_b.exchange_name} 订单簿已 {age_b_ms:.0f}ms 未更新 "
-                    f"(阈值 {threshold_b_ms:.0f}ms)"
+                    f"(阈值 {threshold_b_ms:.0f}ms){detail_b}"
                 )
             if self._long_stale_b:
                 if self._recovery_ready_time_b == 0.0:
@@ -532,5 +534,58 @@ class PriceMonitorService:
                 f"{self.exchange_b.exchange_name}"
             )
             return True, f"{self.exchange_b.exchange_name} 订单簿未初始化"
-        
+
         return False, ""
+
+    def _build_exchange_a_stale_detail(self, current_time: float, age_a_ms: float) -> str:
+        """构造 Exchange A stale 诊断信息。"""
+        if not isinstance(self.orderbook_a, dict):
+            return ""
+
+        parts = []
+        orderbook_message_ts = self.orderbook_a.get('orderbook_message_ts')
+        if orderbook_message_ts:
+            try:
+                raw_age_ms = max(0.0, (current_time - float(orderbook_message_ts)) * 1000)
+                parts.append(f"原始消息年龄 {raw_age_ms:.0f}ms")
+            except (TypeError, ValueError):
+                pass
+
+        processing_delay_ms = self.orderbook_a.get('processing_delay_ms')
+        if processing_delay_ms is not None:
+            try:
+                parts.append(f"本地处理 {float(processing_delay_ms):.2f}ms")
+            except (TypeError, ValueError):
+                pass
+
+        if parts:
+            return " | " + ", ".join(parts)
+        return ""
+
+    def _build_exchange_b_stale_detail(self, current_time: float, age_b_ms: float) -> str:
+        """构造 Exchange B stale 诊断信息。"""
+        if not isinstance(self.orderbook_b, dict):
+            return ""
+
+        parts = []
+        fetch_duration = self.orderbook_b.get('fetch_duration')
+        if fetch_duration is not None:
+            try:
+                fetch_duration_ms = max(0.0, float(fetch_duration))
+                parts.append(f"请求耗时 {fetch_duration_ms:.2f}ms")
+                post_fetch_delay_ms = max(0.0, age_b_ms - fetch_duration_ms)
+                parts.append(f"请求完成后 {post_fetch_delay_ms:.2f}ms")
+            except (TypeError, ValueError):
+                pass
+
+        fetch_end_ts = self.orderbook_b.get('fetch_end_ts')
+        if fetch_end_ts:
+            try:
+                fetch_end_age_ms = max(0.0, (current_time - float(fetch_end_ts)) * 1000)
+                parts.append(f"完成时间年龄 {fetch_end_age_ms:.0f}ms")
+            except (TypeError, ValueError):
+                pass
+
+        if parts:
+            return " | " + ", ".join(parts)
+        return ""

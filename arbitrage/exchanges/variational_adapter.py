@@ -276,6 +276,8 @@ class VariationalAdapter(ExchangeAdapter):
                 'bids': [[float(bid_price), float(q)]],  # [price, size]
                 'asks': [[float(ask_price), float(q)]],
                 'timestamp': fetch_start,  # 秒时间戳
+                'fetch_start_ts': fetch_start,
+                'fetch_end_ts': fetch_end,
                 'quote_id': quote_data.get('quote_id', None),
                 'fetch_duration': fetch_duration_ms,
                 'mark_price': mark_price
