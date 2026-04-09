@@ -657,10 +657,20 @@ async def main():
         
         # Variational 特定配置
         if config.exchange_a == 'variational' and hasattr(config, 'variational_config'):
-            config_override_a = config.variational_config
+            config_override_a = dict(config.variational_config)
         
         if config.exchange_b == 'variational' and hasattr(config, 'variational_config'):
-            config_override_b = config.variational_config
+            config_override_b = dict(config.variational_config)
+
+        # Variational 请求诊断日志阈值默认跟随对应侧的信号延迟阈值，除非显式覆盖
+        if config.exchange_a == 'variational' and 'request_timing_log_threshold_ms' not in config_override_a:
+            config_override_a['request_timing_log_threshold_ms'] = float(
+                args.max_signal_delay_ms_a if args.max_signal_delay_ms_a is not None else args.max_signal_delay_ms
+            )
+        if config.exchange_b == 'variational' and 'request_timing_log_threshold_ms' not in config_override_b:
+            config_override_b['request_timing_log_threshold_ms'] = float(
+                args.max_signal_delay_ms_b if args.max_signal_delay_ms_b is not None else args.max_signal_delay_ms
+            )
 
         symbol_a = config.symbol
         symbol_b = config.symbol
