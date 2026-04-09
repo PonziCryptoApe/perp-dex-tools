@@ -31,6 +31,10 @@ class DirectionStats:
     final_score: Optional[float]
     medium_samples: int
     long_samples: int
+    medium_span_seconds: float
+    long_span_seconds: float
+    medium_time_ready: bool
+    long_time_ready: bool
     ready: bool
     same_sign: bool
     regime_suspected: bool
@@ -52,6 +56,10 @@ class DirectionStats:
             "final_score": self.final_score,
             "medium_samples": self.medium_samples,
             "long_samples": self.long_samples,
+            "medium_span_seconds": self.medium_span_seconds,
+            "long_span_seconds": self.long_span_seconds,
+            "medium_time_ready": self.medium_time_ready,
+            "long_time_ready": self.long_time_ready,
             "ready": self.ready,
             "same_sign": self.same_sign,
             "regime_suspected": self.regime_suspected,
@@ -152,6 +160,16 @@ class StatArbSignalManager:
         cutoff_ts = now_ts - window_seconds
         return [value for ts, value in history if ts >= cutoff_ts]
 
+    def _window_entries(
+        self,
+        history: deque[tuple[float, float]],
+        now_ts: float,
+        window_seconds: int,
+    ) -> list[tuple[float, float]]:
+        """获取某个窗口内的样本（含时间戳）。"""
+        cutoff_ts = now_ts - window_seconds
+        return [(ts, value) for ts, value in history if ts >= cutoff_ts]
+
     def _calc_mad(self, values: list[float], center: float) -> Optional[float]:
         """计算 MAD。"""
         if not values:
@@ -173,11 +191,30 @@ class StatArbSignalManager:
         now_ts: float,
     ) -> DirectionStats:
         """构建单方向统计快照。"""
-        medium_values = self._window_values(history, now_ts, self.medium_window_seconds)
-        long_values = self._window_values(history, now_ts, self.long_window_seconds)
+        medium_entries = self._window_entries(history, now_ts, self.medium_window_seconds)
+        long_entries = self._window_entries(history, now_ts, self.long_window_seconds)
+        medium_values = [value for _, value in medium_entries]
+        long_values = [value for _, value in long_entries]
         medium_samples = len(medium_values)
         long_samples = len(long_values)
-        ready = medium_samples >= self.medium_min_samples and long_samples >= self.long_min_samples
+        medium_span_seconds = (
+            float(medium_entries[-1][0] - medium_entries[0][0])
+            if len(medium_entries) >= 2
+            else 0.0
+        )
+        long_span_seconds = (
+            float(long_entries[-1][0] - long_entries[0][0])
+            if len(long_entries) >= 2
+            else 0.0
+        )
+        medium_time_ready = medium_span_seconds >= float(self.medium_window_seconds)
+        long_time_ready = long_span_seconds >= float(self.long_window_seconds)
+        ready = (
+            medium_samples >= self.medium_min_samples
+            and long_samples >= self.long_min_samples
+            and medium_time_ready
+            and long_time_ready
+        )
 
         if current_raw_pct is None or current_adjusted_pct is None:
             return DirectionStats(
@@ -193,6 +230,10 @@ class StatArbSignalManager:
                 final_score=None,
                 medium_samples=medium_samples,
                 long_samples=long_samples,
+                medium_span_seconds=medium_span_seconds,
+                long_span_seconds=long_span_seconds,
+                medium_time_ready=medium_time_ready,
+                long_time_ready=long_time_ready,
                 ready=False,
                 same_sign=False,
                 regime_suspected=False,
@@ -214,11 +255,19 @@ class StatArbSignalManager:
                 final_score=None,
                 medium_samples=medium_samples,
                 long_samples=long_samples,
+                medium_span_seconds=medium_span_seconds,
+                long_span_seconds=long_span_seconds,
+                medium_time_ready=medium_time_ready,
+                long_time_ready=long_time_ready,
                 ready=False,
                 same_sign=False,
                 regime_suspected=False,
                 eligible=False,
-                reject_reason="样本不足",
+                reject_reason=(
+                    "窗口时间跨度不足"
+                    if not (medium_time_ready and long_time_ready)
+                    else "样本不足"
+                ),
             )
 
         medium_median_pct = float(median(medium_values))
@@ -260,6 +309,10 @@ class StatArbSignalManager:
             final_score=final_score,
             medium_samples=medium_samples,
             long_samples=long_samples,
+            medium_span_seconds=medium_span_seconds,
+            long_span_seconds=long_span_seconds,
+            medium_time_ready=medium_time_ready,
+            long_time_ready=long_time_ready,
             ready=True,
             same_sign=same_sign,
             regime_suspected=regime_suspected,

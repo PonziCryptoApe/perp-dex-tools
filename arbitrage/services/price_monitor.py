@@ -74,7 +74,7 @@ class PriceMonitorService:
         # 状态
         self._running = False
         self.suppress_health_logs = False  # 等待结束阶段可关闭健康日志
-        self._health_task: Optional[asyncio.Task] = None
+        # self._health_task: Optional[asyncio.Task] = None
         
         logger.info(
             f"🔧 初始化价格监控:\n"
@@ -130,7 +130,7 @@ class PriceMonitorService:
             self._running = True
             
             # 启动监控任务
-            self._health_task = asyncio.create_task(self._monitor_orderbook_health())
+            # self._health_task = asyncio.create_task(self._monitor_orderbook_health())
         
         except Exception as e:
             logger.error(f"❌ 启动价格监控失败: {e}")
@@ -141,13 +141,13 @@ class PriceMonitorService:
         logger.info(f"⏹️ 停止价格监控: {self.symbol}")
         self._running = False
 
-        if self._health_task:
-            self._health_task.cancel()
-            try:
-                await self._health_task
-            except asyncio.CancelledError:
-                pass
-            self._health_task = None
+        # if self._health_task:
+        #     self._health_task.cancel()
+        #     try:
+        #         await self._health_task
+        #     except asyncio.CancelledError:
+        #         pass
+        #     self._health_task = None
         
         await self.exchange_a.disconnect()
         await self.exchange_b.disconnect()
@@ -299,9 +299,9 @@ class PriceMonitorService:
         self.last_orderbook_b_time = orderbook.get('timestamp', time.time())  # 使用订单簿自带时间，避免旧数据被当作新数据
         
         # 记录详细日志（仅在 DEBUG 模式）
-        if logger.isEnabledFor(logging.DEBUG):
-            bids = orderbook.get('bids', [])
-            asks = orderbook.get('asks', [])
+        # if logger.isEnabledFor(logging.DEBUG):
+            # bids = orderbook.get('bids', [])
+            # asks = orderbook.get('asks', [])
             # if bids and asks:
             #     logger.debug(
             #         f"📗 {self.exchange_b.exchange_name} 订单簿更新 #{self.orderbook_b_updates}:\n"
@@ -463,8 +463,6 @@ class PriceMonitorService:
             if age_a > threshold_a:
                 if age_a >= self.recovery_stale_threshold_seconds or self._long_stale_a:
                     self._long_stale_a = True
-                if self._recovery_ready_time_a == 0.0:
-                    self._recovery_ready_time_a = 0.0
                 age_a_ms = age_a * 1000
                 threshold_a_ms = threshold_a * 1000 if threshold_a is not None else 0.0
                 detail_a = self._build_exchange_a_stale_detail(current_time, age_a_ms)
@@ -505,8 +503,6 @@ class PriceMonitorService:
             if age_b > threshold_b:
                 if age_b >= self.recovery_stale_threshold_seconds or self._long_stale_b:
                     self._long_stale_b = True
-                if self._recovery_ready_time_b == 0.0:
-                    self._recovery_ready_time_b = 0.0
                 age_b_ms = age_b * 1000
                 threshold_b_ms = threshold_b * 1000 if threshold_b is not None else 0.0
                 detail_b = self._build_exchange_b_stale_detail(current_time, age_b_ms)

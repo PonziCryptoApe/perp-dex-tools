@@ -65,6 +65,7 @@ class LighterAdapter(ExchangeAdapter):
         self._order_book_fingerprint = None  # 订单簿内容指纹，用于检测“内容未变”场景
         self.lighter_last_notify_ts = 0.0  # 最近一次向上游回调的时间戳
         self._last_orderbook_message_ts = 0.0  # 最近一次收到 order_book 消息的时间
+        self._last_any_ws_message_ts = 0.0  # 最近一次收到任意 WS 消息的时间
         self._consecutive_ws_timeouts = 0
         self.order_book_offset = None
         self.order_book_sequence_gap = False
@@ -308,6 +309,7 @@ class LighterAdapter(ExchangeAdapter):
                             msg = await asyncio.wait_for(ws.recv(), timeout=1.0)  # 整条 WS 活性检查
                             self._consecutive_ws_timeouts = 0
                             data = json.loads(msg)
+                            self._last_any_ws_message_ts = time.time()
                             
                             if data.get("type") == "ping":
                                 await ws.send(json.dumps({"type": "pong"}))
@@ -430,6 +432,7 @@ class LighterAdapter(ExchangeAdapter):
         self._order_book_fingerprint = None
         self.lighter_last_notify_ts = 0.0
         self._last_orderbook_message_ts = 0.0
+        self._last_any_ws_message_ts = 0.0
         self._consecutive_ws_timeouts = 0
         self.order_book_offset = None
         self.order_book_sequence_gap = False
@@ -537,6 +540,27 @@ class LighterAdapter(ExchangeAdapter):
             top_asks = sorted(asks.items(), key=lambda item: item[0])[:max_levels]
             asks.clear()
             asks.update(top_asks)
+
+    def get_runtime_diagnostics(self) -> Dict[str, Any]:
+        """返回 Lighter WS/订单簿的运行时快照，供进程级诊断汇总。"""
+        now = time.time()
+        return {
+            'timestamp': now,
+            'snapshot_loaded': self.lighter_snapshot_loaded,
+            'any_ws_gap_ms': (now - self._last_any_ws_message_ts) * 1000 if self._last_any_ws_message_ts > 0 else None,
+            'order_book_gap_ms': (now - self._last_orderbook_message_ts) * 1000 if self._last_orderbook_message_ts > 0 else None,
+            'last_update_gap_ms': (now - self.lighter_last_update_ts) * 1000 if self.lighter_last_update_ts > 0 else None,
+            'last_notify_gap_ms': (now - self.lighter_last_notify_ts) * 1000 if self.lighter_last_notify_ts > 0 else None,
+            'processing_delay_ms': max(
+                0.0,
+                (self.lighter_last_update_ts - self._last_orderbook_message_ts) * 1000
+            ) if self.lighter_last_update_ts > 0 and self._last_orderbook_message_ts > 0 else None,
+            'bids_levels': len(self.lighter_order_book["bids"]),
+            'asks_levels': len(self.lighter_order_book["asks"]),
+            'consecutive_ws_timeouts': self._consecutive_ws_timeouts,
+            'watchdog_cooldown_remaining_ms': max(0.0, (self._watchdog_cooldown_until - now) * 1000),
+            'message_count': self.message_count,
+        }
     
     async def _process_lighter_message(self, data: dict):
         """

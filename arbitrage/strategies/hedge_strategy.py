@@ -24,6 +24,7 @@ from ..services.dynamic_threshold import DynamicThresholdManager
 from ..services.quantile_signal_manager import QuantileSignalManager
 from ..services.stat_arb_signal_manager import StatArbSignalManager
 from ..services.risk_control_service import RiskControlService, RiskLevel
+from ..services.process_diagnostics import ProcessDiagnosticsService
 from ..models.position import Position
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,13 @@ class HedgeStrategy(BaseStrategy):
             exchange_a=exchange_a,
             exchange_b=exchange_b,
             trigger_exchange='exchange_b'
+        )
+        self.process_diagnostics = ProcessDiagnosticsService(
+            symbol=symbol,
+            exchange_a=exchange_a,
+            exchange_b=exchange_b,
+            monitor=self.monitor,
+            interval_seconds=60.0,
         )
         
         # 订单执行服务
@@ -335,6 +343,7 @@ class HedgeStrategy(BaseStrategy):
         
         # 启动价格监控
         await self.monitor.start()
+        await self.process_diagnostics.start()
         # 启动后台风控（异步监控，不阻塞信号热路径）
         if self.risk_control_enabled:
             await self.risk_control_service.start()
@@ -377,6 +386,7 @@ class HedgeStrategy(BaseStrategy):
         self.is_running = False
         # 取消订阅价格更新
         self.monitor.unsubscribe(self._on_price_update)
+        await self.process_diagnostics.stop()
         
         # 停止价格监控
         await self.monitor.stop()
@@ -519,12 +529,18 @@ class HedgeStrategy(BaseStrategy):
                         open_long_samples = open_stats.long_samples if open_stats else 0
                         close_medium_samples = close_stats.medium_samples if close_stats else 0
                         close_long_samples = close_stats.long_samples if close_stats else 0
+                        open_medium_span = open_stats.medium_span_seconds if open_stats else 0.0
+                        open_long_span = open_stats.long_span_seconds if open_stats else 0.0
+                        close_medium_span = close_stats.medium_span_seconds if close_stats else 0.0
+                        close_long_span = close_stats.long_span_seconds if close_stats else 0.0
                         self._log_threshold_skip_reason(
                             "统计套利窗口尚未就绪",
                             detail=(
                                 f"总样本={total_samples}, "
                                 f"OPEN(30m/60m)={open_medium_samples}/{open_long_samples}, "
-                                f"CLOSE(30m/60m)={close_medium_samples}/{close_long_samples}"
+                                f"CLOSE(30m/60m)={close_medium_samples}/{close_long_samples}, "
+                                f"OPEN跨度={open_medium_span:.1f}/{open_long_span:.1f}s, "
+                                f"CLOSE跨度={close_medium_span:.1f}/{close_long_span:.1f}s"
                             ),
                         )
                         await self._clear_all_signal_states("统计套利窗口样本尚未就绪")
@@ -742,13 +758,18 @@ class HedgeStrategy(BaseStrategy):
         detail: str = "",
         level: int = logging.INFO,
     ) -> None:
-        """节流输出动态阈值未触发的原因。"""
+        """节流输出当前信号模式未放行的原因。"""
         now = time.time()
         last_time = self._last_threshold_skip_logs.get(reason, 0.0)
         if now - last_time < self._threshold_skip_log_interval:
             return
         self._last_threshold_skip_logs[reason] = now
-        message = f"🧭 [{self.symbol}] 未触发动态阈值调整: {reason}"
+        prefix = "未触发动态阈值调整"
+        if self.signal_mode == 'quantile':
+            prefix = "未触发分位数信号"
+        elif self.signal_mode == 'stat_arb':
+            prefix = "未触发统计套利信号"
+        message = f"🧭 [{self.symbol}] {prefix}: {reason}"
         if detail:
             message = f"{message} | {detail}"
         logger.log(level, message)

@@ -56,6 +56,13 @@ class VariationalClient(BaseExchangeClient):
         # 为 Variational API 使用 cloudscraper
         self.scraper = self._create_scraper()
         self._post_scraper = self._create_scraper()
+        self.request_timing_log_threshold_ms = float(
+            self._get_config_value('request_timing_log_threshold_ms', 40.0)
+        )
+        self.request_timing_always_log = bool(
+            self._get_config_value('request_timing_always_log', False)
+        )
+        self._last_request_timing: Dict[str, Any] = {}
         
         # 初始化日志
         self.logger = TradingLogger(
@@ -85,6 +92,12 @@ class VariationalClient(BaseExchangeClient):
         self._order_update_handler = None
 
         self.logger.log("【VARIATIONAL】VariationalClient initialized", "INFO")
+
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """兼容对象/字典两种配置读取方式。"""
+        if isinstance(self.config, dict):
+            return self.config.get(key, default)
+        return getattr(self.config, key, default)
 
     @staticmethod
     def _create_scraper():
@@ -119,6 +132,71 @@ class VariationalClient(BaseExchangeClient):
         if method.upper() == 'GET':
             return scraper.get(url, **request_kwargs)
         raise ValueError(f"Unsupported HTTP method: {method}")
+
+    @classmethod
+    def _execute_scraper_request_timed(
+        cls,
+        scraper,
+        method: str,
+        url: str,
+        request_kwargs: Dict[str, Any]
+    ):
+        """同步执行单次请求，并返回 requests/cloudscraper 实际执行耗时。"""
+        start = time.perf_counter()
+        response = cls._execute_scraper_request(scraper, method, url, request_kwargs)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        return response, elapsed_ms
+
+    def _log_request_timing(
+        self,
+        method: str,
+        url: str,
+        lock_wait_ms: float,
+        executor_wall_ms: float,
+        scraper_exec_ms: float,
+        json_parse_ms: float,
+        total_ms: float,
+        retried: bool = False,
+    ) -> None:
+        """打印 Variational 请求路径耗时拆解日志。"""
+        endpoint = url.replace(self.api_base, "")
+        executor_overhead_ms = max(0.0, executor_wall_ms - scraper_exec_ms)
+        self._last_request_timing = {
+            'timestamp': time.time(),
+            'method': method.upper(),
+            'endpoint': endpoint,
+            'lock_wait_ms': lock_wait_ms,
+            'executor_wall_ms': executor_wall_ms,
+            'scraper_exec_ms': scraper_exec_ms,
+            'executor_overhead_ms': executor_overhead_ms,
+            'json_parse_ms': json_parse_ms,
+            'total_ms': total_ms,
+            'retried': retried,
+            'cookies_count': len(self.cookies) if self.cookies is not None else 0,
+        }
+        if not self.request_timing_always_log and total_ms < self.request_timing_log_threshold_ms:
+            return
+
+        level = "WARNING" if total_ms >= self.request_timing_log_threshold_ms else "INFO"
+        retry_text = " | 重试请求" if retried else ""
+        self.logger.log(
+            "【VARIATIONAL】请求耗时拆解"
+            f"{retry_text}: {method.upper()} {endpoint} | "
+            f"锁等待 {lock_wait_ms:.2f}ms, "
+            f"executor总耗时 {executor_wall_ms:.2f}ms, "
+            f"scraper执行 {scraper_exec_ms:.2f}ms, "
+            f"executor额外开销 {executor_overhead_ms:.2f}ms, "
+            f"JSON解析 {json_parse_ms:.2f}ms, "
+            f"总耗时 {total_ms:.2f}ms",
+            level,
+        )
+
+    def get_request_diagnostics(self) -> Dict[str, Any]:
+        """返回最近一次请求耗时拆解快照，供进程级诊断汇总。"""
+        snapshot = dict(self._last_request_timing)
+        if 'cookies_count' not in snapshot:
+            snapshot['cookies_count'] = len(self.cookies) if self.cookies is not None else 0
+        return snapshot
     def _load_private_key(self) -> str:
         """✅ 加载并解密私钥"""
         encrypted_key = os.getenv('VAR_PRIVATE_KEY_ENCRYPTED')
@@ -177,19 +255,39 @@ class VariationalClient(BaseExchangeClient):
         """使用 cloudscraper 发起 Variational API 请求"""
         loop = asyncio.get_event_loop()
         request_kwargs = self._clone_request_kwargs(kwargs)
+        total_start = time.perf_counter()
+        lock_wait_start = time.perf_counter()
         
         try:
             async with self._request_lock:
+                lock_wait_ms = (time.perf_counter() - lock_wait_start) * 1000
                 # POST 请求使用独立的专用 scraper，既隔离下单状态，又避免每次请求
                 # 都重建 scraper 触发 cloudscraper 内部初始化噪声日志。
                 request_scraper = self._post_scraper if method.upper() == 'POST' else self.scraper
-                response = await loop.run_in_executor(
+                executor_start = time.perf_counter()
+                response, scraper_exec_ms = await loop.run_in_executor(
                     None,
-                    lambda: self._execute_scraper_request(request_scraper, method, url, request_kwargs)
+                    lambda: self._execute_scraper_request_timed(
+                        request_scraper, method, url, request_kwargs
+                    )
                 )
+                executor_wall_ms = (time.perf_counter() - executor_start) * 1000
             
             response.raise_for_status()
-            return response.json()
+            json_start = time.perf_counter()
+            response_json = response.json()
+            json_parse_ms = (time.perf_counter() - json_start) * 1000
+            total_ms = (time.perf_counter() - total_start) * 1000
+            self._log_request_timing(
+                method=method,
+                url=url,
+                lock_wait_ms=lock_wait_ms,
+                executor_wall_ms=executor_wall_ms,
+                scraper_exec_ms=scraper_exec_ms,
+                json_parse_ms=json_parse_ms,
+                total_ms=total_ms,
+            )
+            return response_json
             
         except Exception as e:
             if "dictionary changed size during iteration" in str(e):
@@ -197,7 +295,10 @@ class VariationalClient(BaseExchangeClient):
                     "【VARIATIONAL】检测到共享字典并发修改异常，重建 scraper 后重试一次",
                     "WARNING"
                 )
+                retry_total_start = time.perf_counter()
+                retry_lock_wait_start = time.perf_counter()
                 async with self._request_lock:
+                    retry_lock_wait_ms = (time.perf_counter() - retry_lock_wait_start) * 1000
                     if method.upper() == 'POST':
                         self._post_scraper = self._create_scraper()
                         retry_scraper = self._post_scraper
@@ -205,12 +306,30 @@ class VariationalClient(BaseExchangeClient):
                         self.scraper = self._create_scraper()
                         retry_scraper = self.scraper
                     retry_kwargs = self._clone_request_kwargs(kwargs)
-                    response = await loop.run_in_executor(
+                    retry_executor_start = time.perf_counter()
+                    response, retry_scraper_exec_ms = await loop.run_in_executor(
                         None,
-                        lambda: self._execute_scraper_request(retry_scraper, method, url, retry_kwargs)
+                        lambda: self._execute_scraper_request_timed(
+                            retry_scraper, method, url, retry_kwargs
+                        )
                     )
+                    retry_executor_wall_ms = (time.perf_counter() - retry_executor_start) * 1000
                 response.raise_for_status()
-                return response.json()
+                retry_json_start = time.perf_counter()
+                response_json = response.json()
+                retry_json_parse_ms = (time.perf_counter() - retry_json_start) * 1000
+                retry_total_ms = (time.perf_counter() - retry_total_start) * 1000
+                self._log_request_timing(
+                    method=method,
+                    url=url,
+                    lock_wait_ms=retry_lock_wait_ms,
+                    executor_wall_ms=retry_executor_wall_ms,
+                    scraper_exec_ms=retry_scraper_exec_ms,
+                    json_parse_ms=retry_json_parse_ms,
+                    total_ms=retry_total_ms,
+                    retried=True,
+                )
+                return response_json
             self.logger.log(f"【VARIATIONAL】Variational API request failed: {e}", "ERROR")
             raise
 
