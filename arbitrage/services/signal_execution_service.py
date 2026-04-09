@@ -244,6 +244,7 @@ class SignalExecutionService:
             else:
                 strategy.position_manager.set_position(virtual_position)
 
+            strategy._set_stat_arb_position_context_from_signal(signal)
             strategy._last_execution_time = time.time()
             await asyncio.sleep(0.06)
 
@@ -308,6 +309,7 @@ class SignalExecutionService:
                     else:
                         strategy.position_manager.set_position(position)
 
+                    strategy._set_stat_arb_position_context_from_signal(signal)
                     await asyncio.sleep(2)
                     logger.info("🔍 开仓后校验仓位...")
                     expected_qty = strategy.position_manager.get_current_position_qty()
@@ -389,6 +391,7 @@ class SignalExecutionService:
                     signal.signal_delay_ms_a,
                     signal.signal_delay_ms_b,
                 )
+                strategy._set_stat_arb_position_context_from_signal(signal)
 
                 if strategy.lark_bot:
                     await strategy._send_multi_notification('long', temp_position, signal.spread_pct)
@@ -405,6 +408,7 @@ class SignalExecutionService:
                     signal.signal_delay_ms_a,
                     signal.signal_delay_ms_b,
                 )
+                strategy._clear_stat_arb_position_context("传统模式统计套利平仓完成")
                 if strategy.lark_bot:
                     await strategy._send_close_notification(current_position, pnl_pct, prices)
 
@@ -469,12 +473,14 @@ class SignalExecutionService:
                             signal.signal_delay_ms_a,
                             signal.signal_delay_ms_b,
                         )
+                        strategy._set_stat_arb_position_context_from_signal(signal)
                     else:
                         strategy.position_manager.position = position
                         pnl_pct = strategy.position_manager.close_position(
                             signal.signal_delay_ms_a,
                             signal.signal_delay_ms_b,
                         )
+                        strategy._clear_stat_arb_position_context("传统模式统计套利平仓完成")
 
                     await asyncio.sleep(2)
                     logger.info("🔍 反向开仓后校验仓位...")

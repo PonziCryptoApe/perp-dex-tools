@@ -251,8 +251,12 @@ class HedgeStrategy(BaseStrategy):
         self.stat_arb_medium_weight = float(self.stat_arb_logic.get('medium_weight', 0.4))
         self.stat_arb_long_weight = float(self.stat_arb_logic.get('long_weight', 0.6))
         self.stat_arb_entry_threshold = float(self.stat_arb_logic.get('entry_threshold', 2.8))
+        self.stat_arb_exit_threshold = float(self.stat_arb_logic.get('exit_threshold', 0.8))
         self.stat_arb_min_score_gap = float(self.stat_arb_logic.get('min_score_gap', 0.5))
         self.stat_arb_min_mad_pct = float(self.stat_arb_logic.get('min_mad_pct', 0.003))
+        self.stat_arb_quality_log_interval_seconds = float(
+            self.stat_arb_logic.get('quality_log_interval_seconds', 15.0)
+        )
         self.stat_arb_require_same_sign = bool(
             self.stat_arb_logic.get('require_same_sign_for_medium_long', True)
         )
@@ -261,6 +265,8 @@ class HedgeStrategy(BaseStrategy):
         )
         self.stat_arb_manager = None
         self._stat_arb_context = None
+        self._stat_arb_position_context = None
+        self._last_stat_arb_quality_log_time = 0.0
 
         # 分位数信号管理器（新逻辑）
         self.quantile_manager = None
@@ -323,7 +329,8 @@ class HedgeStrategy(BaseStrategy):
             f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
             f"   统计套利开关: {'✅ 启用' if self.stat_arb_enabled else '❌ 禁用'}\n"
             f"   统计套利窗口: 30m={self.stat_arb_medium_window_seconds}s | 60m={self.stat_arb_long_window_seconds}s\n"
-            f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
+            f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | exit={self.stat_arb_exit_threshold:.3f} | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
+            f"   统计套利质量日志间隔: {self.stat_arb_quality_log_interval_seconds:.1f}s\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
@@ -545,6 +552,7 @@ class HedgeStrategy(BaseStrategy):
                         )
                         await self._clear_all_signal_states("统计套利窗口样本尚未就绪")
                         return
+                    self._log_stat_arb_quality_if_needed()
                 elif self.threshold_manager:
                     self._log_sample_snapshot(prices, signal_delay_ms_a, signal_delay_ms_b)
                     self.threshold_manager.add_spreads(spread_pct, reverse_spread_pct)
@@ -582,16 +590,30 @@ class HedgeStrategy(BaseStrategy):
                 # logger.debug(f"🔍 当前strategy仓位: {current_qty:+.4f} {self.symbol}")
                 self._is_executed = False
                 if current_qty < 0:
-                    close_signal = await self._check_close_signal(
-                        prices,
-                        reverse_spread_pct,
-                        signal_delay_ms_a,
-                        signal_delay_ms_b,
-                    )
+                    if self.signal_mode == 'stat_arb':
+                        should_exit, exit_reason = self._should_trigger_stat_arb_exit(SignalType.OPEN)
+                        close_signal = None
+                        if should_exit:
+                            close_signal = self._build_stat_arb_exit_signal(
+                                execute_signal_type=SignalType.CLOSE,
+                                reference_direction=SignalType.OPEN,
+                                prices=prices,
+                                spread_pct=reverse_spread_pct,
+                                signal_delay_ms_a=signal_delay_ms_a,
+                                signal_delay_ms_b=signal_delay_ms_b,
+                                reason=exit_reason,
+                            )
+                    else:
+                        close_signal = await self._check_close_signal(
+                            prices,
+                            reverse_spread_pct,
+                            signal_delay_ms_a,
+                            signal_delay_ms_b,
+                        )
                     await self._sync_signal_state(
                         SignalType.CLOSE,
                         close_signal,
-                        "当前价格下 CLOSE 条件不成立",
+                        "当前价格下 CLOSE 条件不成立" if self.signal_mode != 'stat_arb' else "统计套利回归平仓条件未满足",
                     )
 
                     if self._executing_lock.locked():
@@ -618,12 +640,25 @@ class HedgeStrategy(BaseStrategy):
                 else:
                     open_signal = None
                     if current_qty > 0:
-                        open_signal = await self._check_open_signal(
-                            prices,
-                            spread_pct,
-                            signal_delay_ms_a,
-                            signal_delay_ms_b,
-                        )
+                        if self.signal_mode == 'stat_arb':
+                            should_exit, exit_reason = self._should_trigger_stat_arb_exit(SignalType.CLOSE)
+                            if should_exit:
+                                open_signal = self._build_stat_arb_exit_signal(
+                                    execute_signal_type=SignalType.OPEN,
+                                    reference_direction=SignalType.CLOSE,
+                                    prices=prices,
+                                    spread_pct=spread_pct,
+                                    signal_delay_ms_a=signal_delay_ms_a,
+                                    signal_delay_ms_b=signal_delay_ms_b,
+                                    reason=exit_reason,
+                                )
+                        else:
+                            open_signal = await self._check_open_signal(
+                                prices,
+                                spread_pct,
+                                signal_delay_ms_a,
+                                signal_delay_ms_b,
+                            )
                     elif not risk_block_open:
                         open_signal = await self._check_open_signal(
                             prices,
@@ -639,7 +674,7 @@ class HedgeStrategy(BaseStrategy):
                     await self._sync_signal_state(
                         SignalType.OPEN,
                         open_signal,
-                        "当前价格下 OPEN 条件不成立",
+                        "当前价格下 OPEN 条件不成立" if self.signal_mode != 'stat_arb' else "统计套利回归平仓条件未满足",
                     )
 
                     if self._executing_lock.locked():
@@ -683,16 +718,30 @@ class HedgeStrategy(BaseStrategy):
                     )
                 else:
                     await self._clear_signal(SignalType.OPEN, "当前已有持仓，不保留 OPEN 信号")
-                    close_signal = await self._check_close_signal(
-                        prices,
-                        reverse_spread_pct,
-                        signal_delay_ms_a,
-                        signal_delay_ms_b,
-                    )
+                    if self.signal_mode == 'stat_arb':
+                        should_exit, exit_reason = self._should_trigger_stat_arb_exit(SignalType.OPEN)
+                        close_signal = None
+                        if should_exit:
+                            close_signal = self._build_stat_arb_exit_signal(
+                                execute_signal_type=SignalType.CLOSE,
+                                reference_direction=SignalType.OPEN,
+                                prices=prices,
+                                spread_pct=reverse_spread_pct,
+                                signal_delay_ms_a=signal_delay_ms_a,
+                                signal_delay_ms_b=signal_delay_ms_b,
+                                reason=exit_reason,
+                            )
+                    else:
+                        close_signal = await self._check_close_signal(
+                            prices,
+                            reverse_spread_pct,
+                            signal_delay_ms_a,
+                            signal_delay_ms_b,
+                        )
                     await self._sync_signal_state(
                         SignalType.CLOSE,
                         close_signal,
-                        "当前价格下 CLOSE 条件不成立",
+                        "当前价格下 CLOSE 条件不成立" if self.signal_mode != 'stat_arb' else "统计套利回归平仓条件未满足",
                     )
             
             self.check_yaml_config_updates()
@@ -998,6 +1047,139 @@ class HedgeStrategy(BaseStrategy):
             f"   30m/60m 分数: {direction_stats.medium_score:.3f} / {direction_stats.long_score:.3f}\n"
             f"   最终分数: {direction_stats.final_score:.3f}\n"
             f"   选择原因: {self._stat_arb_context.get('selection_reason', '--')}\n"
+        )
+
+    def _set_stat_arb_position_context_from_signal(self, signal: TradingSignal) -> None:
+        """记录统计套利当前持仓的入场上下文。"""
+        if self.signal_mode != 'stat_arb':
+            return
+
+        stat_arb_meta = signal.metadata.get('stat_arb', {}) if isinstance(signal.metadata, dict) else {}
+        current_qty = self.position_manager.get_current_position_qty()
+
+        if not self.position_manager.accumulate_mode:
+            if signal.signal_type == SignalType.OPEN and self.position_manager.has_position():
+                active_direction = SignalType.OPEN
+            else:
+                self._clear_stat_arb_position_context("传统模式平仓完成")
+                return
+        else:
+            if current_qty == 0:
+                self._clear_stat_arb_position_context("累计模式仓位归零")
+                return
+            active_direction = SignalType.OPEN if current_qty < 0 else SignalType.CLOSE
+
+        self._stat_arb_position_context = {
+            "active_direction": active_direction,
+            "entry_signal_id": signal.signal_id,
+            "entry_time": time.time(),
+            "entry_score": float(stat_arb_meta.get("final_score", 0.0) or 0.0),
+            "entry_adjusted_pct": float(stat_arb_meta.get("current_adjusted_pct", 0.0) or 0.0),
+        }
+
+    def _clear_stat_arb_position_context(self, reason: str = "") -> None:
+        """清空统计套利持仓上下文。"""
+        if self._stat_arb_position_context is None:
+            return
+        if reason:
+            logger.info(f"🧹 [{self.symbol}] 清空统计套利持仓上下文: {reason}")
+        self._stat_arb_position_context = None
+
+    def _get_active_stat_arb_direction(self) -> Optional[SignalType]:
+        """返回当前统计套利持仓对应的方向。"""
+        if self.signal_mode != 'stat_arb' or not self._stat_arb_position_context:
+            return None
+        return self._stat_arb_position_context.get("active_direction")
+
+    def _should_trigger_stat_arb_exit(self, reference_direction: SignalType) -> tuple[bool, str]:
+        """判断统计套利当前持仓是否满足回归平仓条件。"""
+        direction_stats = self._get_stat_arb_direction_stats(reference_direction)
+        if direction_stats is None or direction_stats.final_score is None:
+            return False, "缺少当前方向统计快照"
+
+        current_score = float(direction_stats.final_score)
+        if current_score <= self.stat_arb_exit_threshold:
+            return True, f"分数回落至退出阈值以下({current_score:.3f} <= {self.stat_arb_exit_threshold:.3f})"
+        return False, f"分数仍高于退出阈值({current_score:.3f} > {self.stat_arb_exit_threshold:.3f})"
+
+    def _build_stat_arb_exit_signal(
+        self,
+        execute_signal_type: SignalType,
+        reference_direction: SignalType,
+        prices: PriceSnapshot,
+        spread_pct: Decimal,
+        signal_delay_ms_a: float,
+        signal_delay_ms_b: float,
+        reason: str,
+    ) -> Optional[TradingSignal]:
+        """基于统计套利回归条件构建最小平仓信号。"""
+        direction_stats = self._get_stat_arb_direction_stats(reference_direction)
+        if direction_stats is None:
+            return None
+
+        signal_trigger_time = time.time()
+        quantity = min(abs(self.position_manager.get_current_position_qty()), self.position_manager.position_step)
+        if quantity <= 0:
+            return None
+
+        metadata = {
+            "signal_mode": self.signal_mode,
+            "stat_arb": direction_stats.to_dict(),
+            "exit_reason": reason,
+            "exit_threshold": self.stat_arb_exit_threshold,
+            "reference_direction": reference_direction.value,
+        }
+
+        logger.info(
+            f"🔁 [{self.symbol}] 统计套利回归平仓触发: "
+            f"执行方向={execute_signal_type.value}, 参考方向={reference_direction.value}, "
+            f"current_score={direction_stats.final_score:.3f}, exit_threshold={self.stat_arb_exit_threshold:.3f}, "
+            f"reason={reason}"
+        )
+
+        return self._build_trading_signal(
+            signal_type=execute_signal_type,
+            prices=prices,
+            spread_pct=spread_pct,
+            signal_trigger_time=signal_trigger_time,
+            signal_delay_ms_a=signal_delay_ms_a,
+            signal_delay_ms_b=signal_delay_ms_b,
+            quantity=quantity,
+            metadata=metadata,
+        )
+
+    def _log_stat_arb_quality_if_needed(self) -> None:
+        """节流输出统计套利回归质量日志。"""
+        if self.signal_mode != 'stat_arb' or not self._stat_arb_position_context:
+            return
+
+        now = time.time()
+        if now - self._last_stat_arb_quality_log_time < self.stat_arb_quality_log_interval_seconds:
+            return
+
+        active_direction = self._get_active_stat_arb_direction()
+        if active_direction is None:
+            return
+
+        direction_stats = self._get_stat_arb_direction_stats(active_direction)
+        if direction_stats is None or direction_stats.final_score is None:
+            return
+
+        entry_score = float(self._stat_arb_position_context.get("entry_score", 0.0))
+        current_score = float(direction_stats.final_score)
+        score_revert = entry_score - current_score
+        entry_adjusted_pct = float(self._stat_arb_position_context.get("entry_adjusted_pct", 0.0))
+        current_adjusted_pct = float(direction_stats.current_adjusted_pct)
+        adjusted_delta = current_adjusted_pct - entry_adjusted_pct
+        self._last_stat_arb_quality_log_time = now
+
+        logger.info(
+            f"📈 [{self.symbol}] 统计套利回归质量: "
+            f"方向={active_direction.value}, "
+            f"entry_score={entry_score:.3f}, current_score={current_score:.3f}, "
+            f"score回落={score_revert:.3f}, exit_threshold={self.stat_arb_exit_threshold:.3f}, "
+            f"entry_adj={entry_adjusted_pct:.4f}%, current_adj={current_adjusted_pct:.4f}%, "
+            f"净价差变化={adjusted_delta:+.4f}%"
         )
 
     def _apply_risk_position_cap(self, risk_decision) -> Decimal:

@@ -296,8 +296,10 @@ async def main():
     parser.add_argument('--signal-stat-arb-medium-weight', type=float, default=None, help='统计套利 30 分钟分数权重（默认 0.4）')
     parser.add_argument('--signal-stat-arb-long-weight', type=float, default=None, help='统计套利 60 分钟分数权重（默认 0.6）')
     parser.add_argument('--signal-stat-arb-entry-threshold', type=float, default=None, help='统计套利最终开仓分数阈值（默认 2.8）')
+    parser.add_argument('--signal-stat-arb-exit-threshold', type=float, default=None, help='统计套利回归平仓分数阈值（默认 0.8）')
     parser.add_argument('--signal-stat-arb-min-score-gap', type=float, default=None, help='统计套利两个方向最小分数差（默认 0.5）')
     parser.add_argument('--signal-stat-arb-min-mad-pct', type=float, default=None, help='统计套利 MAD 下限（默认 0.003）')
+    parser.add_argument('--signal-stat-arb-quality-log-interval-seconds', type=float, default=None, help='统计套利回归质量日志输出间隔（秒，默认 15）')
     parser.add_argument('--signal-stat-arb-require-same-sign', choices=['on', 'off'], default=None, help='统计套利是否要求 30m/60m 中枢方向一致（默认读取配置）')
     parser.add_argument('--signal-stat-arb-block-regime', choices=['on', 'off'], default=None, help='统计套利是否在怀疑 regime 变化时阻断开仓（默认读取配置）')
     parser.add_argument('--env-file', type=str, default=None,
@@ -359,10 +361,14 @@ async def main():
         parser.error("--signal-stat-arb-long-min-samples 必须大于 0")
     if args.signal_stat_arb_entry_threshold is not None and args.signal_stat_arb_entry_threshold <= 0:
         parser.error("--signal-stat-arb-entry-threshold 必须大于 0")
+    if args.signal_stat_arb_exit_threshold is not None and args.signal_stat_arb_exit_threshold < 0:
+        parser.error("--signal-stat-arb-exit-threshold 不能小于 0")
     if args.signal_stat_arb_min_score_gap is not None and args.signal_stat_arb_min_score_gap < 0:
         parser.error("--signal-stat-arb-min-score-gap 不能小于 0")
     if args.signal_stat_arb_min_mad_pct is not None and args.signal_stat_arb_min_mad_pct <= 0:
         parser.error("--signal-stat-arb-min-mad-pct 必须大于 0")
+    if args.signal_stat_arb_quality_log_interval_seconds is not None and args.signal_stat_arb_quality_log_interval_seconds <= 0:
+        parser.error("--signal-stat-arb-quality-log-interval-seconds 必须大于 0")
     if args.min_edge_bps is not None and args.min_edge_bps < 0:
         parser.error("--min-edge-bps 不能小于 0")
     if args.edge_base_cost_bps is not None and args.edge_base_cost_bps < 0:
@@ -516,10 +522,14 @@ async def main():
         stat_arb_logic['long_weight'] = float(args.signal_stat_arb_long_weight)
     if args.signal_stat_arb_entry_threshold is not None:
         stat_arb_logic['entry_threshold'] = float(args.signal_stat_arb_entry_threshold)
+    if args.signal_stat_arb_exit_threshold is not None:
+        stat_arb_logic['exit_threshold'] = float(args.signal_stat_arb_exit_threshold)
     if args.signal_stat_arb_min_score_gap is not None:
         stat_arb_logic['min_score_gap'] = float(args.signal_stat_arb_min_score_gap)
     if args.signal_stat_arb_min_mad_pct is not None:
         stat_arb_logic['min_mad_pct'] = float(args.signal_stat_arb_min_mad_pct)
+    if args.signal_stat_arb_quality_log_interval_seconds is not None:
+        stat_arb_logic['quality_log_interval_seconds'] = float(args.signal_stat_arb_quality_log_interval_seconds)
     if args.signal_stat_arb_require_same_sign is not None:
         stat_arb_logic['require_same_sign_for_medium_long'] = (args.signal_stat_arb_require_same_sign == 'on')
     if args.signal_stat_arb_block_regime is not None:
@@ -563,8 +573,10 @@ async def main():
     stat_arb_medium_weight = float(stat_arb_logic.get('medium_weight', 0.4))
     stat_arb_long_weight = float(stat_arb_logic.get('long_weight', 0.6))
     stat_arb_entry_threshold = float(stat_arb_logic.get('entry_threshold', 2.8))
+    stat_arb_exit_threshold = float(stat_arb_logic.get('exit_threshold', 0.8))
     stat_arb_min_score_gap = float(stat_arb_logic.get('min_score_gap', 0.5))
     stat_arb_min_mad_pct = float(stat_arb_logic.get('min_mad_pct', 0.003))
+    stat_arb_quality_log_interval = float(stat_arb_logic.get('quality_log_interval_seconds', 15.0))
     stat_arb_require_same_sign = bool(stat_arb_logic.get('require_same_sign_for_medium_long', True))
     stat_arb_block_regime = bool(stat_arb_logic.get('block_when_regime_suspected', True))
     risk_control_enabled = bool(risk_control_config.get('enabled', False))  # 风控模块总开关
@@ -613,7 +625,8 @@ async def main():
         f"  统计套利窗口:  30m={stat_arb_medium_window_seconds}s / 60m={stat_arb_long_window_seconds}s\n"
         f"  统计套利样本:  30m={stat_arb_medium_min_samples} / 60m={stat_arb_long_min_samples}\n"
         f"  统计套利权重:  30m={stat_arb_medium_weight:.2f} / 60m={stat_arb_long_weight:.2f}\n"
-        f"  统计套利阈值:  entry={stat_arb_entry_threshold:.3f} | gap={stat_arb_min_score_gap:.3f} | MAD下限={stat_arb_min_mad_pct:.6f}\n"
+        f"  统计套利阈值:  entry={stat_arb_entry_threshold:.3f} | exit={stat_arb_exit_threshold:.3f} | gap={stat_arb_min_score_gap:.3f} | MAD下限={stat_arb_min_mad_pct:.6f}\n"
+        f"  质量日志间隔: {stat_arb_quality_log_interval:.1f}s\n"
         f"  统计套利过滤:  同向={ '是' if stat_arb_require_same_sign else '否'} | 阻断regime={ '是' if stat_arb_block_regime else '否'}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"

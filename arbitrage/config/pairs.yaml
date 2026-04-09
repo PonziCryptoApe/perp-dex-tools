@@ -32,8 +32,10 @@ common:
       medium_weight: 0.4         # 30 分钟标准化偏离分数权重
       long_weight: 0.6           # 60 分钟标准化偏离分数权重
       entry_threshold: 2.8       # 最终开仓分数阈值，建议先从 2.5~3.0 开始试
+      exit_threshold: 0.8        # 回归平仓分数阈值，分数回落到该值以下时尝试平仓
       min_score_gap: 0.5         # 两个方向分数最小差值，避免方向不明确时开仓
       min_mad_pct: 0.003         # MAD 下限，防止波动尺度过小导致分数异常放大
+      quality_log_interval_seconds: 15  # 回归质量日志输出间隔（秒）
 
       require_same_sign_for_medium_long: true  # 是否要求 30m/60m 中枢方向一致
       block_when_regime_suspected: true        # 是否在怀疑 regime 变化时阻断开仓
