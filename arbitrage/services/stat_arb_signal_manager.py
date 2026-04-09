@@ -98,6 +98,8 @@ class StatArbSignalManager:
         self.entry_threshold = float(entry_threshold)
         self.min_score_gap = float(min_score_gap)
         self.min_mad_pct = float(min_mad_pct)
+        # 给窗口跨度判定预留 1 秒容差，避免 899.3/900 这类边界值长期卡在“未就绪”。
+        self.window_ready_tolerance_seconds = 1.0
         self.require_same_sign_for_medium_long = bool(require_same_sign_for_medium_long)
         self.block_when_regime_suspected = bool(block_when_regime_suspected)
 
@@ -207,8 +209,14 @@ class StatArbSignalManager:
             if len(long_entries) >= 2
             else 0.0
         )
-        medium_time_ready = medium_span_seconds >= float(self.medium_window_seconds)
-        long_time_ready = long_span_seconds >= float(self.long_window_seconds)
+        medium_time_ready = (
+            medium_span_seconds + self.window_ready_tolerance_seconds
+            >= float(self.medium_window_seconds)
+        )
+        long_time_ready = (
+            long_span_seconds + self.window_ready_tolerance_seconds
+            >= float(self.long_window_seconds)
+        )
         ready = (
             medium_samples >= self.medium_min_samples
             and long_samples >= self.long_min_samples
