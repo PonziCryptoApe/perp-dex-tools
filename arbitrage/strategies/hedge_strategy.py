@@ -252,6 +252,9 @@ class HedgeStrategy(BaseStrategy):
         self.stat_arb_long_weight = float(self.stat_arb_logic.get('long_weight', 0.6))
         self.stat_arb_entry_threshold = float(self.stat_arb_logic.get('entry_threshold', 2.8))
         self.stat_arb_exit_threshold = float(self.stat_arb_logic.get('exit_threshold', 0.8))
+        self.stat_arb_exit_spread_floor_pct = Decimal(
+            str(self.stat_arb_logic.get('exit_spread_floor_pct', -0.01))
+        )
         self.stat_arb_min_score_gap = float(self.stat_arb_logic.get('min_score_gap', 0.5))
         self.stat_arb_min_mad_pct = float(self.stat_arb_logic.get('min_mad_pct', 0.003))
         self.stat_arb_quality_log_interval_seconds = float(
@@ -329,7 +332,7 @@ class HedgeStrategy(BaseStrategy):
             f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
             f"   统计套利开关: {'✅ 启用' if self.stat_arb_enabled else '❌ 禁用'}\n"
             f"   统计套利窗口: 30m={self.stat_arb_medium_window_seconds}s | 60m={self.stat_arb_long_window_seconds}s\n"
-            f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | exit={self.stat_arb_exit_threshold:.3f} | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
+            f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | exit={self.stat_arb_exit_threshold:.3f} | exit_floor={self.stat_arb_exit_spread_floor_pct:.4f}% | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
             f"   统计套利质量日志间隔: {self.stat_arb_quality_log_interval_seconds:.1f}s\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
@@ -591,7 +594,11 @@ class HedgeStrategy(BaseStrategy):
                 self._is_executed = False
                 if current_qty < 0:
                     if self.signal_mode == 'stat_arb':
-                        should_exit, exit_reason = self._should_trigger_stat_arb_exit(SignalType.OPEN)
+                        should_exit, exit_reason = self._should_trigger_stat_arb_exit(
+                            execute_signal_type=SignalType.CLOSE,
+                            reference_direction=SignalType.OPEN,
+                            prices=prices,
+                        )
                         close_signal = None
                         if should_exit:
                             close_signal = self._build_stat_arb_exit_signal(
@@ -641,7 +648,11 @@ class HedgeStrategy(BaseStrategy):
                     open_signal = None
                     if current_qty > 0:
                         if self.signal_mode == 'stat_arb':
-                            should_exit, exit_reason = self._should_trigger_stat_arb_exit(SignalType.CLOSE)
+                            should_exit, exit_reason = self._should_trigger_stat_arb_exit(
+                                execute_signal_type=SignalType.OPEN,
+                                reference_direction=SignalType.CLOSE,
+                                prices=prices,
+                            )
                             if should_exit:
                                 open_signal = self._build_stat_arb_exit_signal(
                                     execute_signal_type=SignalType.OPEN,
@@ -719,7 +730,11 @@ class HedgeStrategy(BaseStrategy):
                 else:
                     await self._clear_signal(SignalType.OPEN, "当前已有持仓，不保留 OPEN 信号")
                     if self.signal_mode == 'stat_arb':
-                        should_exit, exit_reason = self._should_trigger_stat_arb_exit(SignalType.OPEN)
+                        should_exit, exit_reason = self._should_trigger_stat_arb_exit(
+                            execute_signal_type=SignalType.CLOSE,
+                            reference_direction=SignalType.OPEN,
+                            prices=prices,
+                        )
                         close_signal = None
                         if should_exit:
                             close_signal = self._build_stat_arb_exit_signal(
@@ -1091,16 +1106,48 @@ class HedgeStrategy(BaseStrategy):
             return None
         return self._stat_arb_position_context.get("active_direction")
 
-    def _should_trigger_stat_arb_exit(self, reference_direction: SignalType) -> tuple[bool, str]:
+    def _get_stat_arb_exit_executable_spread_pct(
+        self,
+        execute_signal_type: SignalType,
+        prices: PriceSnapshot,
+    ) -> Decimal:
+        """返回统计套利退出方向的真实可执行价差。"""
+        if execute_signal_type == SignalType.OPEN:
+            return prices.calculate_spread_pct()
+        return prices.calculate_reverse_spread_pct()
+
+    def _should_trigger_stat_arb_exit(
+        self,
+        execute_signal_type: SignalType,
+        reference_direction: SignalType,
+        prices: PriceSnapshot,
+    ) -> tuple[bool, str]:
         """判断统计套利当前持仓是否满足回归平仓条件。"""
         direction_stats = self._get_stat_arb_direction_stats(reference_direction)
         if direction_stats is None or direction_stats.final_score is None:
             return False, "缺少当前方向统计快照"
 
         current_score = float(direction_stats.final_score)
-        if current_score <= self.stat_arb_exit_threshold:
-            return True, f"分数回落至退出阈值以下({current_score:.3f} <= {self.stat_arb_exit_threshold:.3f})"
-        return False, f"分数仍高于退出阈值({current_score:.3f} > {self.stat_arb_exit_threshold:.3f})"
+        if current_score > self.stat_arb_exit_threshold:
+            return False, f"分数仍高于退出阈值({current_score:.3f} > {self.stat_arb_exit_threshold:.3f})"
+
+        exit_spread_pct = self._get_stat_arb_exit_executable_spread_pct(execute_signal_type, prices)
+        if exit_spread_pct < self.stat_arb_exit_spread_floor_pct:
+            logger.info(
+                f"⏸️ [{self.symbol}] 统计套利退出被抑制: "
+                f"执行方向={execute_signal_type.value}, 参考方向={reference_direction.value}, "
+                f"current_score={current_score:.3f}, exit_threshold={self.stat_arb_exit_threshold:.3f}, "
+                f"exit_spread={exit_spread_pct:.4f}%, floor={self.stat_arb_exit_spread_floor_pct:.4f}%"
+            )
+            return (
+                False,
+                f"退出可执行价差低于底线({exit_spread_pct:.4f}% < {self.stat_arb_exit_spread_floor_pct:.4f}%)",
+            )
+
+        return True, (
+            f"分数回落至退出阈值以下({current_score:.3f} <= {self.stat_arb_exit_threshold:.3f})，"
+            f"且退出可执行价差满足底线({exit_spread_pct:.4f}% >= {self.stat_arb_exit_spread_floor_pct:.4f}%)"
+        )
 
     def _build_stat_arb_exit_signal(
         self,
@@ -1127,6 +1174,10 @@ class HedgeStrategy(BaseStrategy):
             "stat_arb": direction_stats.to_dict(),
             "exit_reason": reason,
             "exit_threshold": self.stat_arb_exit_threshold,
+            "exit_spread_floor_pct": str(self.stat_arb_exit_spread_floor_pct),
+            "exit_executable_spread_pct": str(
+                self._get_stat_arb_exit_executable_spread_pct(execute_signal_type, prices)
+            ),
             "reference_direction": reference_direction.value,
         }
 

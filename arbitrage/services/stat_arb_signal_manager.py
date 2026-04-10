@@ -98,8 +98,8 @@ class StatArbSignalManager:
         self.entry_threshold = float(entry_threshold)
         self.min_score_gap = float(min_score_gap)
         self.min_mad_pct = float(min_mad_pct)
-        # 给窗口跨度判定预留 1 秒容差，避免 899.3/900 这类边界值长期卡在“未就绪”。
-        self.window_ready_tolerance_seconds = 1.0
+        # 给窗口跨度判定预留 2 秒容差，避免 899.3/900 这类边界值长期卡在“未就绪”。
+        self.window_ready_tolerance_seconds = 2.0
         self.require_same_sign_for_medium_long = bool(require_same_sign_for_medium_long)
         self.block_when_regime_suspected = bool(block_when_regime_suspected)
 
