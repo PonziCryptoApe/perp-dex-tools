@@ -1,0 +1,36 @@
+# 本地热加载覆盖配置示例
+#
+# 说明：
+# - 本文件仅作示例，真实本地配置请复制为 overrides.local.yaml
+# - 只覆盖当前文件中显式填写的字段
+# - 未填写的字段保持程序当前值不变
+
+pairs:
+  lighter_varitonal_hype:
+    max_position: 6
+    cooldown_seconds: 3
+    min_depth_quantity: 5
+    max_signal_delay_ms_a: 100
+    max_signal_delay_ms_b: 60
+    open_threshold: 0.10
+    close_threshold: 0.10
+    direction_reverse: false
+
+    edge_filter:
+      enabled: true
+      min_edge_bps: 2.0
+      base_cost_bps: 3.0
+      fee_bps: 0.0
+      latency_bps_per_100ms: 0.0
+      latency_free_ms: 120
+
+    signal_logic:
+      stat_arb:
+        entry_threshold: 4.0
+        exit_threshold: 0.0
+        exit_spread_floor_pct: -0.01
+        min_score_gap: 0.5
+        min_mad_pct: 0.003
+        quality_log_interval_seconds: 15
+        require_same_sign_for_medium_long: true
+        block_when_regime_suspected: true

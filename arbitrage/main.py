@@ -736,6 +736,7 @@ async def main():
     
     # Step 4: 创建策略
     strategy = HedgeStrategy(
+        pair_id=args.pair,
         symbol=config.symbol,
         symbol_a=symbol_a,
         symbol_b=symbol_b,
@@ -765,6 +766,7 @@ async def main():
         edge_latency_bps_per_100ms=edge_latency_bps_per_100ms,
         edge_latency_free_ms=edge_latency_free_ms,
         risk_control=risk_control_config,
+        local_override_path=str(Path(__file__).parent / "config" / "overrides.local.yaml"),
     )
     signal_mailbox = SignalMailbox()
     signal_execution_service = SignalExecutionService(

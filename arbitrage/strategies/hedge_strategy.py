@@ -34,6 +34,7 @@ class HedgeStrategy(BaseStrategy):
     
     def __init__(
         self,
+        pair_id: Optional[str],
         symbol: str,
         symbol_a: str,
         symbol_b: str,
@@ -64,6 +65,7 @@ class HedgeStrategy(BaseStrategy):
         edge_latency_bps_per_100ms: float = 0.0,
         edge_latency_free_ms: float = 120.0,
         risk_control: Optional[dict] = None,
+        local_override_path: Optional[str] = None,
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -71,6 +73,7 @@ class HedgeStrategy(BaseStrategy):
             quantity=quantity,
             quantity_precision=quantity_precision
         )
+        self.pair_id = pair_id
         self.symbol_a = symbol_a
         self.symbol_b = symbol_b
         self.open_threshold_pct = open_threshold_pct
@@ -114,7 +117,7 @@ class HedgeStrategy(BaseStrategy):
         self.start_equity_a = 0
         self.start_vol_b = 0
         self.start_equity_b = 0
-        self.config_yaml_path = "./arbitrage/config/config.yaml"
+        self.local_override_path = Path(local_override_path).expanduser() if local_override_path else None
 
         # ✅ 新增：结束时间
         self.end_time_stamp = None
@@ -212,7 +215,8 @@ class HedgeStrategy(BaseStrategy):
         self._equity_log_interval = 5 * 60  # 每 15 分钟输出一次权益和交易量
         self._last_equity_log_time = None
         self._last_yaml_check_time = None
-        self._yaml_check_interval = 60  # 每 60 秒检查一次 YAML 配置文件
+        self._yaml_check_interval = 5.0  # 每 5 秒检查一次本地热加载配置
+        self._local_override_last_mtime: Optional[float] = None
         self._is_executed = False
         self._last_effective_max_position: Optional[Decimal] = None
         self._last_non_zero_strategy_qty = Decimal('0')
@@ -312,15 +316,17 @@ class HedgeStrategy(BaseStrategy):
                     max_std_multiplier=dt_config.get('max_std_multiplier', 4.0),
                     min_std_multiplier=dt_config.get('min_std_multiplier', 0.0)
                 )
-        
-        
+
+        # 启动时先应用一次本地覆盖配置；未提供的字段保持当前值不变。
+        self.check_yaml_config_updates(force=True, init_load=True)
+
         logger.info(
             f"🎯 策略配置:\n"
             f"   Symbol: {symbol}\n"
             f"   Quantity: {quantity}\n"
             f"   延迟阈值(A/B): {self.max_signal_delay_ms_a}/{self.max_signal_delay_ms_b} ms\n"
-            f"   Open Threshold: {open_threshold_pct}%\n"
-            f"   Close Threshold: {close_threshold_pct}%\n"
+            f"   Open Threshold: {self.open_threshold_pct}%\n"
+            f"   Close Threshold: {self.close_threshold_pct}%\n"
             f"   Exchange A: {exchange_a.exchange_name}\n"
             f"   Exchange B: {exchange_b.exchange_name}\n"
             f"   Monitor Only: {monitor_only}\n"
@@ -339,7 +345,8 @@ class HedgeStrategy(BaseStrategy):
             f"   基础成本估计: {self.edge_base_cost_bps:.2f} bps\n"
             f"   手续费估计: {self.edge_fee_bps:.2f} bps\n"
             f"   延迟风险系数: {self.edge_latency_bps_per_100ms:.2f} bps/100ms\n"
-            f"   延迟免惩罚阈值: {self.edge_latency_free_ms:.0f} ms"
+            f"   延迟免惩罚阈值: {self.edge_latency_free_ms:.0f} ms\n"
+            f"   本地热加载配置: {self.local_override_path or '--'}"
         )
         if self.signal_mode == 'stat_arb' and not accumulate_mode:
             logger.warning(
@@ -2078,32 +2085,195 @@ class HedgeStrategy(BaseStrategy):
 
         return None
 
-    def check_yaml_config_updates(self):
-        """检查 YAML 配置文件更新"""
-        current_path = os.getcwd()
-        config_path = self.config_yaml_path
-        if not os.path.exists(config_path):
-            return
-        # logger.debug(f"🔍 检查 YAML 配置文件更新: {config_path}")
-         # 检查间隔
-        if self._last_yaml_check_time is None:
-            self._last_yaml_check_time = time.time()
-        elif time.time() - self._last_yaml_check_time >= self._yaml_check_interval:
-            self._last_yaml_check_time = time.time()
+    @staticmethod
+    def _deep_merge_dict(base: dict, override: dict) -> dict:
+        """递归合并字典。"""
+        result = dict(base or {})
+        for key, value in (override or {}).items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = HedgeStrategy._deep_merge_dict(result[key], value)
+            else:
+                result[key] = value
+        return result
 
+    def _load_local_override_data(self) -> tuple[Optional[dict], Optional[float]]:
+        """读取当前 pair 对应的本地覆盖配置。"""
+        if not self.local_override_path or not self.pair_id:
+            return None, None
+        if not self.local_override_path.exists():
+            return None, None
+
+        mtime = self.local_override_path.stat().st_mtime
+        with self.local_override_path.open('r', encoding='utf-8') as f:
+            raw = yaml.safe_load(f) or {}
+
+        if not isinstance(raw, dict):
+            raise ValueError("本地覆盖配置格式错误：顶层必须是字典")
+
+        common_override = raw.get('common', {})
+        pair_override = {}
+        if isinstance(raw.get('pairs'), dict):
+            pair_override = raw['pairs'].get(self.pair_id, {}) or {}
+
+        if common_override and not isinstance(common_override, dict):
+            raise ValueError("本地覆盖配置格式错误：common 必须是字典")
+        if pair_override and not isinstance(pair_override, dict):
+            raise ValueError("本地覆盖配置格式错误：pairs.<pair_id> 必须是字典")
+
+        merged = self._deep_merge_dict(common_override or {}, pair_override or {})
+        return merged, mtime
+
+    def _apply_local_override_updates(self, overrides: dict, *, init_load: bool = False) -> None:
+        """按字段应用本地热加载覆盖；缺失字段保持当前值。"""
+        if not overrides:
+            return
+
+        def update_attr(attr_name: str, new_value, cast, *, label: Optional[str] = None) -> None:
+            current_value = getattr(self, attr_name)
             try:
-                with open(config_path, 'r') as f:
-                    new_config = yaml.safe_load(f)
-                enabled = new_config.get('enabled', False)
-                if enabled:
-                    new_max_position = Decimal(str(new_config.get('max_position', self.position_manager.max_position)))
-                    if new_max_position != self.position_manager.max_position:
-                        logger.info(f"🔄 从 YAML 配置更新 max_position: {self.position_manager.max_position} --> {new_max_position}")
-                        self.position_manager.max_position = new_max_position
-                        self.risk_control_service.set_base_max_position(new_max_position)
-                    
-            except Exception as e:
-                logger.exception(f"⚠️ 检查 YAML 配置文件时出错: {e}")
+                converted = cast(new_value)
+            except Exception as exc:
+                logger.warning(f"⚠️ [{self.symbol}] 跳过本地覆盖字段 {label or attr_name}: {exc}")
+                return
+            if converted == current_value:
+                return
+            setattr(self, attr_name, converted)
+            logger.info(
+                f"🔄 [{self.symbol}] 本地覆盖更新 {label or attr_name}: "
+                f"{current_value} -> {converted}"
+            )
+
+        def update_decimal_attr(attr_name: str, new_value, *, label: Optional[str] = None) -> None:
+            update_attr(attr_name, new_value, lambda value: Decimal(str(value)), label=label)
+
+        if 'max_position' in overrides:
+            current_max_position = self.position_manager.max_position
+            new_max_position = Decimal(str(overrides['max_position']))
+            if new_max_position != current_max_position:
+                logger.info(
+                    f"🔄 [{self.symbol}] 本地覆盖更新 max_position: "
+                    f"{current_max_position} -> {new_max_position}"
+                )
+                self.position_manager.max_position = new_max_position
+                self.risk_control_service.set_base_max_position(new_max_position)
+
+        if 'open_threshold' in overrides:
+            update_attr('open_threshold_pct', overrides['open_threshold'], float, label='open_threshold')
+        if 'close_threshold' in overrides:
+            update_attr('close_threshold_pct', overrides['close_threshold'], float, label='close_threshold')
+        if 'cooldown_seconds' in overrides:
+            update_attr('cooldown_seconds', overrides['cooldown_seconds'], float, label='cooldown_seconds')
+        if 'min_depth_quantity' in overrides:
+            update_decimal_attr('min_depth_quantity', overrides['min_depth_quantity'], label='min_depth_quantity')
+        if 'max_signal_delay_ms_a' in overrides:
+            update_attr('max_signal_delay_ms_a', overrides['max_signal_delay_ms_a'], int, label='max_signal_delay_ms_a')
+        if 'max_signal_delay_ms_b' in overrides:
+            update_attr('max_signal_delay_ms_b', overrides['max_signal_delay_ms_b'], int, label='max_signal_delay_ms_b')
+        if 'direction_reverse' in overrides:
+            update_attr('direction_reverse', overrides['direction_reverse'], bool, label='direction_reverse')
+
+        edge_filter = overrides.get('edge_filter', {})
+        if isinstance(edge_filter, dict):
+            if 'enabled' in edge_filter:
+                update_attr('edge_filter_enabled', edge_filter['enabled'], bool, label='edge_filter.enabled')
+            if 'min_edge_bps' in edge_filter:
+                update_attr('min_edge_bps', edge_filter['min_edge_bps'], float, label='edge_filter.min_edge_bps')
+            if 'base_cost_bps' in edge_filter:
+                update_attr('edge_base_cost_bps', edge_filter['base_cost_bps'], float, label='edge_filter.base_cost_bps')
+            if 'fee_bps' in edge_filter:
+                update_attr('edge_fee_bps', edge_filter['fee_bps'], float, label='edge_filter.fee_bps')
+            if 'latency_bps_per_100ms' in edge_filter:
+                update_attr(
+                    'edge_latency_bps_per_100ms',
+                    edge_filter['latency_bps_per_100ms'],
+                    float,
+                    label='edge_filter.latency_bps_per_100ms',
+                )
+            if 'latency_free_ms' in edge_filter:
+                update_attr('edge_latency_free_ms', edge_filter['latency_free_ms'], float, label='edge_filter.latency_free_ms')
+
+        signal_logic = overrides.get('signal_logic', {})
+        if isinstance(signal_logic, dict):
+            stat_arb = signal_logic.get('stat_arb', {})
+            if isinstance(stat_arb, dict):
+                if 'entry_threshold' in stat_arb:
+                    update_attr('stat_arb_entry_threshold', stat_arb['entry_threshold'], float, label='signal_logic.stat_arb.entry_threshold')
+                    if self.stat_arb_manager is not None:
+                        self.stat_arb_manager.entry_threshold = float(self.stat_arb_entry_threshold)
+                if 'exit_threshold' in stat_arb:
+                    update_attr('stat_arb_exit_threshold', stat_arb['exit_threshold'], float, label='signal_logic.stat_arb.exit_threshold')
+                if 'exit_spread_floor_pct' in stat_arb:
+                    update_decimal_attr(
+                        'stat_arb_exit_spread_floor_pct',
+                        stat_arb['exit_spread_floor_pct'],
+                        label='signal_logic.stat_arb.exit_spread_floor_pct',
+                    )
+                if 'min_score_gap' in stat_arb:
+                    update_attr('stat_arb_min_score_gap', stat_arb['min_score_gap'], float, label='signal_logic.stat_arb.min_score_gap')
+                    if self.stat_arb_manager is not None:
+                        self.stat_arb_manager.min_score_gap = float(self.stat_arb_min_score_gap)
+                if 'min_mad_pct' in stat_arb:
+                    update_attr('stat_arb_min_mad_pct', stat_arb['min_mad_pct'], float, label='signal_logic.stat_arb.min_mad_pct')
+                    if self.stat_arb_manager is not None:
+                        self.stat_arb_manager.min_mad_pct = float(self.stat_arb_min_mad_pct)
+                if 'quality_log_interval_seconds' in stat_arb:
+                    update_attr(
+                        'stat_arb_quality_log_interval_seconds',
+                        stat_arb['quality_log_interval_seconds'],
+                        float,
+                        label='signal_logic.stat_arb.quality_log_interval_seconds',
+                    )
+                if 'require_same_sign_for_medium_long' in stat_arb:
+                    update_attr(
+                        'stat_arb_require_same_sign',
+                        stat_arb['require_same_sign_for_medium_long'],
+                        bool,
+                        label='signal_logic.stat_arb.require_same_sign_for_medium_long',
+                    )
+                    if self.stat_arb_manager is not None:
+                        self.stat_arb_manager.require_same_sign_for_medium_long = bool(self.stat_arb_require_same_sign)
+                if 'block_when_regime_suspected' in stat_arb:
+                    update_attr(
+                        'stat_arb_block_regime',
+                        stat_arb['block_when_regime_suspected'],
+                        bool,
+                        label='signal_logic.stat_arb.block_when_regime_suspected',
+                    )
+                    if self.stat_arb_manager is not None:
+                        self.stat_arb_manager.block_when_regime_suspected = bool(self.stat_arb_block_regime)
+
+        if init_load:
+            logger.info(
+                f"📥 [{self.symbol}] 已加载本地热加载配置: "
+                f"{self.local_override_path}"
+            )
+
+    def check_yaml_config_updates(self, *, force: bool = False, init_load: bool = False):
+        """检查并热加载本地覆盖配置。"""
+        if not self.local_override_path or not self.pair_id:
+            return
+
+        now = time.time()
+        if not force:
+            if self._last_yaml_check_time is None:
+                self._last_yaml_check_time = now
+            elif now - self._last_yaml_check_time < self._yaml_check_interval:
+                return
+            else:
+                self._last_yaml_check_time = now
+        else:
+            self._last_yaml_check_time = now
+
+        try:
+            overrides, mtime = self._load_local_override_data()
+            if overrides is None or mtime is None:
+                return
+            if not force and self._local_override_last_mtime is not None and mtime <= self._local_override_last_mtime:
+                return
+            self._apply_local_override_updates(overrides, init_load=init_load or self._local_override_last_mtime is None)
+            self._local_override_last_mtime = mtime
+        except Exception as e:
+            logger.exception(f"⚠️ 检查本地热加载配置时出错: {e}")
 
     def _create_dummy_position(self) -> Position:
         """创建虚拟 Position（累计模式用）"""

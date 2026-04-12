@@ -17,6 +17,7 @@ node_modules
 dist
 dist-ssr
 *.local
+arbitrage/config/overrides.local.yaml
 
 # Editor directories and files
 .vscode/*
