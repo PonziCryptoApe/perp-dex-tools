@@ -265,6 +265,9 @@ async def main():
   
   # 只监控，不下单
   python arbitrage/main.py --pair extended_lighter_btc --monitor-only
+
+  # 只采集订单簿数据，每秒写一条 CSV
+  python arbitrage/main.py --pair extended_lighter_btc --collect-orderbook-data
         """
     )
     
@@ -307,6 +310,12 @@ async def main():
                        help='环境变量文件路径')
     parser.add_argument('--monitor-only', action='store_true',
                        help='只监控，不下单')
+    parser.add_argument('--collect-orderbook-data', action='store_true',
+                       help='只采集订单簿数据并落地 CSV，不进入信号和下单逻辑')
+    parser.add_argument('--orderbook-collection-interval-seconds', type=float, default=1.0,
+                       help='订单簿数据采集写盘间隔（秒，默认 1.0）')
+    parser.add_argument('--orderbook-collection-dir', type=str, default=None,
+                       help='订单簿数据采集目录（默认 logs/arbitrage/orderbook_data）')
     parser.add_argument('--end-time', type=str, default=None,
                        help='指定策略结束时间，格式为 YYYY-MM-DD HH:MM:SS（北京时间）')
     parser.add_argument('--min-depth-quantity', type=float, default=None, help='最小深度值')
@@ -372,6 +381,8 @@ async def main():
         parser.error("--signal-stat-arb-min-mad-pct 必须大于 0")
     if args.signal_stat_arb_quality_log_interval_seconds is not None and args.signal_stat_arb_quality_log_interval_seconds <= 0:
         parser.error("--signal-stat-arb-quality-log-interval-seconds 必须大于 0")
+    if args.orderbook_collection_interval_seconds <= 0:
+        parser.error("--orderbook-collection-interval-seconds 必须大于 0")
     if args.min_edge_bps is not None and args.min_edge_bps < 0:
         parser.error("--min-edge-bps 不能小于 0")
     if args.edge_base_cost_bps is not None and args.edge_base_cost_bps < 0:
@@ -453,7 +464,8 @@ async def main():
     quantity_precision = Decimal(str(args.quantity_precision)) if args.quantity_precision is not None else Decimal(str(config.quantity_precision))
     open_threshold = args.open_threshold if args.open_threshold is not None else config.open_threshold
     close_threshold = args.close_threshold if args.close_threshold is not None else config.close_threshold
-    monitor_only = args.monitor_only  # ✅ 获取 monitor_only 参数
+    collect_orderbook_data = bool(args.collect_orderbook_data)
+    monitor_only = args.monitor_only or collect_orderbook_data  # 数据采集模式隐含只监控
     if args.min_depth_quantity:
         min_depth_quantity = Decimal(str(args.min_depth_quantity))
     elif hasattr(config, 'min_depth_quantity') and config.min_depth_quantity is not None:
@@ -635,6 +647,9 @@ async def main():
         f"  质量日志间隔: {stat_arb_quality_log_interval:.1f}s\n"
         f"  统计套利过滤:  同向={ '是' if stat_arb_require_same_sign else '否'} | 阻断regime={ '是' if stat_arb_block_regime else '否'}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
+        f"  数据采集模式: {'启用' if collect_orderbook_data else '禁用'}\n"
+        f"  采集写盘间隔: {args.orderbook_collection_interval_seconds:.2f}s\n"
+        f"  采集目录:     {args.orderbook_collection_dir or str(Path(__file__).parent.parent / 'logs/arbitrage/orderbook_data')}\n"
         f"  累计模式:     {'启用' if accumulate_mode else '禁用'}\n"
         f"  最大持仓:     {max_position}\n"
         f"  负向滑点方向下单: { '是' if not direction_reverse else '否'}\n"
@@ -767,6 +782,13 @@ async def main():
         edge_latency_free_ms=edge_latency_free_ms,
         risk_control=risk_control_config,
         local_override_path=str(Path(__file__).parent / "config" / "overrides.local.yaml"),
+        data_collection_only=collect_orderbook_data,
+        orderbook_collection_interval_seconds=args.orderbook_collection_interval_seconds,
+        orderbook_collection_dir=(
+            args.orderbook_collection_dir
+            if args.orderbook_collection_dir
+            else str(Path(__file__).parent.parent / "logs/arbitrage/orderbook_data")
+        ),
     )
     signal_mailbox = SignalMailbox()
     signal_execution_service = SignalExecutionService(
@@ -777,7 +799,7 @@ async def main():
     strategy.set_signal_submitter(signal_execution_service.submit, signal_execution_service.clear)
     logger.info("✅ 策略创建成功\n")
     # ========== ✅ 新增：Step 4.5 启动时同步仓位 ==========
-    if accumulate_mode:
+    if accumulate_mode and not collect_orderbook_data:
         logger.info("🔄 累计模式：正在从交易所同步仓位...")
         try:
             synced_qty = await strategy.position_manager.sync_from_exchanges(
@@ -803,7 +825,8 @@ async def main():
     # ========== 新增部分结束 ==========
     # Step 5: 启动策略
     try:
-        await signal_execution_service.start()
+        if not collect_orderbook_data:
+            await signal_execution_service.start()
         await strategy.start()
         
         mode_text = "监控模式" if monitor_only else "交易模式"
@@ -844,7 +867,8 @@ async def main():
     
     finally:
         logger.info("🧹 清理资源...")
-        await signal_execution_service.stop()
+        if not collect_orderbook_data:
+            await signal_execution_service.stop()
         await strategy.stop()
         if lark_bot is not None:
             await lark_bot.close()

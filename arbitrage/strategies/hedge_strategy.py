@@ -66,6 +66,9 @@ class HedgeStrategy(BaseStrategy):
         edge_latency_free_ms: float = 120.0,
         risk_control: Optional[dict] = None,
         local_override_path: Optional[str] = None,
+        data_collection_only: bool = False,
+        orderbook_collection_interval_seconds: float = 1.0,
+        orderbook_collection_dir: Optional[str] = None,
     ):
         super().__init__(
             strategy_name=f"Hedge-{symbol}",
@@ -118,6 +121,15 @@ class HedgeStrategy(BaseStrategy):
         self.start_vol_b = 0
         self.start_equity_b = 0
         self.local_override_path = Path(local_override_path).expanduser() if local_override_path else None
+        self.data_collection_only = bool(data_collection_only)
+        self.orderbook_collection_interval_seconds = float(orderbook_collection_interval_seconds)
+        self.orderbook_collection_dir = (
+            Path(orderbook_collection_dir).expanduser()
+            if orderbook_collection_dir
+            else Path("logs/arbitrage/orderbook_data")
+        )
+        self._orderbook_collection_path: Optional[Path] = None
+        self._last_orderbook_collection_time = 0.0
 
         # ✅ 新增：结束时间
         self.end_time_stamp = None
@@ -346,6 +358,9 @@ class HedgeStrategy(BaseStrategy):
             f"   手续费估计: {self.edge_fee_bps:.2f} bps\n"
             f"   延迟风险系数: {self.edge_latency_bps_per_100ms:.2f} bps/100ms\n"
             f"   延迟免惩罚阈值: {self.edge_latency_free_ms:.0f} ms\n"
+            f"   数据采集模式: {'✅ 启用' if self.data_collection_only else '❌ 禁用'}\n"
+            f"   订单簿写盘间隔: {self.orderbook_collection_interval_seconds:.2f}s\n"
+            f"   订单簿写盘目录: {self.orderbook_collection_dir}\n"
             f"   本地热加载配置: {self.local_override_path or '--'}"
         )
         if self.signal_mode == 'stat_arb' and not accumulate_mode:
@@ -364,6 +379,12 @@ class HedgeStrategy(BaseStrategy):
         # 启动后台风控（异步监控，不阻塞信号热路径）
         if self.risk_control_enabled:
             await self.risk_control_service.start()
+        self._init_orderbook_collection_log()
+        if self.data_collection_only:
+            self.monitor.subscribe(self._on_price_update)
+            self.is_running = True
+            logger.info(f"✅ 订单簿采集已启动: {self.strategy_name}")
+            return
         # ✅ 新增：启动时同步仓位
         if self.position_manager.accumulate_mode:
             logger.info("🔄 累计模式启动，同步交易所仓位...")
@@ -426,6 +447,117 @@ class HedgeStrategy(BaseStrategy):
         logger.info(f"📊 B所交易量: {b_exchange_volume:.2f}, 权益: {b_exchange_equity:.2f}")
         return a_exchange_volume, a_exchange_equity, b_exchange_volume, b_exchange_equity
 
+    def _init_orderbook_collection_log(self) -> None:
+        """初始化订单簿采集 CSV 文件。"""
+        self.orderbook_collection_dir.mkdir(parents=True, exist_ok=True)
+        date_tag = datetime.now().strftime('%Y%m%d')
+        pair_tag = self.pair_id or self.symbol.lower()
+        self._orderbook_collection_path = self.orderbook_collection_dir / f"orderbook_samples_{pair_tag}_{date_tag}.csv"
+        if self._orderbook_collection_path.exists():
+            logger.info(f"📁 [{self.symbol}] 订单簿采集文件: {self._orderbook_collection_path}")
+            return
+
+        with self._orderbook_collection_path.open('w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'timestamp',
+                'datetime',
+                'pair_id',
+                'symbol',
+                'exchange_a',
+                'exchange_b',
+                'exchange_a_bid',
+                'exchange_a_ask',
+                'exchange_a_mark',
+                'exchange_a_bid_size',
+                'exchange_a_ask_size',
+                'exchange_a_timestamp',
+                'exchange_a_quote_id',
+                'exchange_b_bid',
+                'exchange_b_ask',
+                'exchange_b_mark',
+                'exchange_b_bid_size',
+                'exchange_b_ask_size',
+                'exchange_b_timestamp',
+                'exchange_b_quote_id',
+                'signal_delay_ms_a',
+                'signal_delay_ms_b',
+                'is_stale',
+                'spread_pct',
+                'reverse_spread_pct',
+                'avg_local_spread_pct',
+                'total_local_spread_pct',
+                'baseline_adjustment_pct',
+                'orderbook_a_updates',
+                'orderbook_b_updates',
+                'fetch_duration_ms_b',
+            ])
+        logger.info(f"📁 [{self.symbol}] 创建订单簿采集文件: {self._orderbook_collection_path}")
+
+    def _collect_orderbook_snapshot(
+        self,
+        prices: PriceSnapshot,
+        signal_delay_ms_a: float,
+        signal_delay_ms_b: float,
+        is_stale: bool,
+    ) -> None:
+        """按固定频率记录订单簿快照。"""
+        if self._orderbook_collection_path is None:
+            self._init_orderbook_collection_log()
+        if self._orderbook_collection_path is None:
+            return
+
+        now = time.time()
+        if now - self._last_orderbook_collection_time < self.orderbook_collection_interval_seconds:
+            return
+        self._last_orderbook_collection_time = now
+
+        avg_local_spread_pct = self._calculate_avg_local_spread_pct(prices)
+        total_local_spread_pct = avg_local_spread_pct * Decimal('2')
+        baseline_adjustment_pct = (
+            total_local_spread_pct * Decimal(str(self.stat_arb_baseline_ratio))
+            if self.stat_arb_baseline_adjustment
+            else Decimal('0')
+        )
+        orderbook_b = getattr(self.monitor, 'orderbook_b', None) or {}
+        fetch_duration = orderbook_b.get('fetch_duration')
+
+        with self._orderbook_collection_path.open('a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                f"{now:.6f}",
+                datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                self.pair_id or '',
+                self.symbol,
+                self.exchange_a.exchange_name,
+                self.exchange_b.exchange_name,
+                f"{prices.exchange_a_bid}",
+                f"{prices.exchange_a_ask}",
+                f"{prices.exchange_a_mark}" if prices.exchange_a_mark is not None else "",
+                f"{prices.exchange_a_bid_size}" if prices.exchange_a_bid_size is not None else "",
+                f"{prices.exchange_a_ask_size}" if prices.exchange_a_ask_size is not None else "",
+                f"{self._normalize_timestamp(prices.exchange_a_timestamp):.6f}",
+                prices.exchange_a_quote_id or '',
+                f"{prices.exchange_b_bid}",
+                f"{prices.exchange_b_ask}",
+                f"{prices.exchange_b_mark}" if prices.exchange_b_mark is not None else "",
+                f"{prices.exchange_b_bid_size}" if prices.exchange_b_bid_size is not None else "",
+                f"{prices.exchange_b_ask_size}" if prices.exchange_b_ask_size is not None else "",
+                f"{self._normalize_timestamp(prices.exchange_b_timestamp):.6f}",
+                prices.exchange_b_quote_id or '',
+                f"{signal_delay_ms_a:.3f}",
+                f"{signal_delay_ms_b:.3f}",
+                "1" if is_stale else "0",
+                f"{prices.calculate_spread_pct():.6f}",
+                f"{prices.calculate_reverse_spread_pct():.6f}",
+                f"{avg_local_spread_pct:.6f}",
+                f"{total_local_spread_pct:.6f}",
+                f"{baseline_adjustment_pct:.6f}",
+                getattr(self.monitor, 'orderbook_a_updates', 0),
+                getattr(self.monitor, 'orderbook_b_updates', 0),
+                f"{float(fetch_duration):.3f}" if fetch_duration is not None else "",
+            ])
+
     async def _on_price_update(self, prices: PriceSnapshot):
         """
         处理价格更新
@@ -436,25 +568,30 @@ class HedgeStrategy(BaseStrategy):
         """
         if not self.is_running:
             return
+
+        price_update_time_a = self._normalize_timestamp(prices.exchange_a_timestamp)
+        price_update_time_b = self._normalize_timestamp(prices.exchange_b_timestamp)
+        signal_trigger_time = time.time()
+        signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
+        signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
         is_stale, stale_msg = self.monitor.is_orderbook_stale(
             max_age_a=self.max_signal_delay_ms_a / 1000,
             max_age_b=self.max_signal_delay_ms_b / 1000,
         )
+        self._collect_orderbook_snapshot(
+            prices=prices,
+            signal_delay_ms_a=signal_delay_ms_a,
+            signal_delay_ms_b=signal_delay_ms_b,
+            is_stale=is_stale,
+        )
+        if self.data_collection_only:
+            return
         if is_stale:
             if self.threshold_manager:
                 self._log_threshold_skip_reason("订单簿过时", detail=stale_msg)
             await self._clear_all_signal_states(f"订单簿过时: {stale_msg}")
             return
         try:
-            # ✅ 记录价格更新的时间
-            price_update_time_a = self._normalize_timestamp(prices.exchange_a_timestamp)
-            price_update_time_b = self._normalize_timestamp(prices.exchange_b_timestamp)
-
-            # 记录信号触发时间
-            signal_trigger_time = time.time()
-            signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
-            signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
-        
             signal_flag = False
             self.signal_total += 1
             # ✅ 过滤延迟过大的信号
