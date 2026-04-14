@@ -298,9 +298,13 @@ async def main():
     parser.add_argument('--signal-stat-arb-long-min-samples', type=int, default=None, help='统计套利长期窗口最小样本数（默认 240）')
     parser.add_argument('--signal-stat-arb-medium-weight', type=float, default=None, help='统计套利 30 分钟分数权重（默认 0.4）')
     parser.add_argument('--signal-stat-arb-long-weight', type=float, default=None, help='统计套利 60 分钟分数权重（默认 0.6）')
+    parser.add_argument('--signal-stat-arb-score-mode', choices=['weighted', 'long_baseline'], default=None, help='统计套利分数模式（weighted 或 long_baseline）')
     parser.add_argument('--signal-stat-arb-entry-threshold', type=float, default=None, help='统计套利最终开仓分数阈值（默认 2.8）')
+    parser.add_argument('--signal-stat-arb-entry-raw-floor-pct', type=float, default=None, help='统计套利开仓方向真实可执行价差底线（默认读取配置）')
     parser.add_argument('--signal-stat-arb-exit-threshold', type=float, default=None, help='统计套利回归平仓分数阈值（默认 0.8）')
+    parser.add_argument('--signal-stat-arb-exit-score-source', choices=['final', 'medium'], default=None, help='统计套利退出使用的分数来源（final 或 medium）')
     parser.add_argument('--signal-stat-arb-exit-spread-floor-pct', type=float, default=None, help='统计套利回归平仓时退出方向真实可执行价差底线（默认 -0.01）')
+    parser.add_argument('--signal-stat-arb-exit-take-profit-pct', type=float, default=None, help='统计套利若退出方向 raw spread 达到该阈值则提前止盈（默认读取配置）')
     parser.add_argument('--signal-stat-arb-min-score-gap', type=float, default=None, help='统计套利两个方向最小分数差（默认 0.5）')
     parser.add_argument('--signal-stat-arb-min-mad-pct', type=float, default=None, help='统计套利 MAD 下限（默认 0.003）')
     parser.add_argument('--signal-stat-arb-quality-log-interval-seconds', type=float, default=None, help='统计套利回归质量日志输出间隔（秒，默认 15）')
@@ -371,10 +375,14 @@ async def main():
         parser.error("--signal-stat-arb-long-min-samples 必须大于 0")
     if args.signal_stat_arb_entry_threshold is not None and args.signal_stat_arb_entry_threshold <= 0:
         parser.error("--signal-stat-arb-entry-threshold 必须大于 0")
+    if args.signal_stat_arb_entry_raw_floor_pct is not None and args.signal_stat_arb_entry_raw_floor_pct > 100:
+        parser.error("--signal-stat-arb-entry-raw-floor-pct 不能大于 100")
     if args.signal_stat_arb_exit_threshold is not None and args.signal_stat_arb_exit_threshold < 0:
         parser.error("--signal-stat-arb-exit-threshold 不能小于 0")
     if args.signal_stat_arb_exit_spread_floor_pct is not None and args.signal_stat_arb_exit_spread_floor_pct > 100:
         parser.error("--signal-stat-arb-exit-spread-floor-pct 不能大于 100")
+    if args.signal_stat_arb_exit_take_profit_pct is not None and args.signal_stat_arb_exit_take_profit_pct > 100:
+        parser.error("--signal-stat-arb-exit-take-profit-pct 不能大于 100")
     if args.signal_stat_arb_min_score_gap is not None and args.signal_stat_arb_min_score_gap < 0:
         parser.error("--signal-stat-arb-min-score-gap 不能小于 0")
     if args.signal_stat_arb_min_mad_pct is not None and args.signal_stat_arb_min_mad_pct <= 0:
@@ -535,12 +543,20 @@ async def main():
         stat_arb_logic['medium_weight'] = float(args.signal_stat_arb_medium_weight)
     if args.signal_stat_arb_long_weight is not None:
         stat_arb_logic['long_weight'] = float(args.signal_stat_arb_long_weight)
+    if args.signal_stat_arb_score_mode is not None:
+        stat_arb_logic['score_mode'] = str(args.signal_stat_arb_score_mode)
     if args.signal_stat_arb_entry_threshold is not None:
         stat_arb_logic['entry_threshold'] = float(args.signal_stat_arb_entry_threshold)
+    if args.signal_stat_arb_entry_raw_floor_pct is not None:
+        stat_arb_logic['entry_raw_floor_pct'] = float(args.signal_stat_arb_entry_raw_floor_pct)
     if args.signal_stat_arb_exit_threshold is not None:
         stat_arb_logic['exit_threshold'] = float(args.signal_stat_arb_exit_threshold)
+    if args.signal_stat_arb_exit_score_source is not None:
+        stat_arb_logic['exit_score_source'] = str(args.signal_stat_arb_exit_score_source)
     if args.signal_stat_arb_exit_spread_floor_pct is not None:
         stat_arb_logic['exit_spread_floor_pct'] = float(args.signal_stat_arb_exit_spread_floor_pct)
+    if args.signal_stat_arb_exit_take_profit_pct is not None:
+        stat_arb_logic['exit_take_profit_pct'] = float(args.signal_stat_arb_exit_take_profit_pct)
     if args.signal_stat_arb_min_score_gap is not None:
         stat_arb_logic['min_score_gap'] = float(args.signal_stat_arb_min_score_gap)
     if args.signal_stat_arb_min_mad_pct is not None:
@@ -589,9 +605,13 @@ async def main():
     stat_arb_long_min_samples = int(stat_arb_logic.get('long_min_samples', 240))
     stat_arb_medium_weight = float(stat_arb_logic.get('medium_weight', 0.4))
     stat_arb_long_weight = float(stat_arb_logic.get('long_weight', 0.6))
+    stat_arb_score_mode = str(stat_arb_logic.get('score_mode', 'weighted')).lower()
     stat_arb_entry_threshold = float(stat_arb_logic.get('entry_threshold', 2.8))
+    stat_arb_entry_raw_floor_pct = stat_arb_logic.get('entry_raw_floor_pct', None)
     stat_arb_exit_threshold = float(stat_arb_logic.get('exit_threshold', 0.8))
+    stat_arb_exit_score_source = str(stat_arb_logic.get('exit_score_source', 'final')).lower()
     stat_arb_exit_spread_floor_pct = float(stat_arb_logic.get('exit_spread_floor_pct', -0.01))
+    stat_arb_exit_take_profit_pct = stat_arb_logic.get('exit_take_profit_pct', None)
     stat_arb_min_score_gap = float(stat_arb_logic.get('min_score_gap', 0.5))
     stat_arb_min_mad_pct = float(stat_arb_logic.get('min_mad_pct', 0.003))
     stat_arb_quality_log_interval = float(stat_arb_logic.get('quality_log_interval_seconds', 15.0))
@@ -643,7 +663,8 @@ async def main():
         f"  统计套利窗口:  30m={stat_arb_medium_window_seconds}s / 60m={stat_arb_long_window_seconds}s\n"
         f"  统计套利样本:  30m={stat_arb_medium_min_samples} / 60m={stat_arb_long_min_samples}\n"
         f"  统计套利权重:  30m={stat_arb_medium_weight:.2f} / 60m={stat_arb_long_weight:.2f}\n"
-        f"  统计套利阈值:  entry={stat_arb_entry_threshold:.3f} | exit={stat_arb_exit_threshold:.3f} | exit_floor={stat_arb_exit_spread_floor_pct:.4f}% | gap={stat_arb_min_score_gap:.3f} | MAD下限={stat_arb_min_mad_pct:.6f}\n"
+        f"  统计套利模式:  score_mode={stat_arb_score_mode} | exit_score={stat_arb_exit_score_source}\n"
+        f"  统计套利阈值:  entry={stat_arb_entry_threshold:.3f} | entry_floor={stat_arb_entry_raw_floor_pct if stat_arb_entry_raw_floor_pct is not None else '--'} | exit={stat_arb_exit_threshold:.3f} | exit_floor={stat_arb_exit_spread_floor_pct:.4f}% | exit_tp={stat_arb_exit_take_profit_pct if stat_arb_exit_take_profit_pct is not None else '--'} | gap={stat_arb_min_score_gap:.3f} | MAD下限={stat_arb_min_mad_pct:.6f}\n"
         f"  质量日志间隔: {stat_arb_quality_log_interval:.1f}s\n"
         f"  统计套利过滤:  同向={ '是' if stat_arb_require_same_sign else '否'} | 阻断regime={ '是' if stat_arb_block_regime else '否'}\n"
         f"  监控模式:     {'是' if monitor_only else '否'}\n"  # ✅ 显示监控模式
