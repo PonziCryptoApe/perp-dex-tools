@@ -28,7 +28,9 @@ class DirectionStats:
     long_mad_pct: Optional[float]
     medium_score: Optional[float]
     long_score: Optional[float]
+    long_baseline_score: Optional[float]
     final_score: Optional[float]
+    active_score: Optional[float]
     medium_samples: int
     long_samples: int
     medium_span_seconds: float
@@ -53,7 +55,9 @@ class DirectionStats:
             "long_mad_pct": self.long_mad_pct,
             "medium_score": self.medium_score,
             "long_score": self.long_score,
+            "long_baseline_score": self.long_baseline_score,
             "final_score": self.final_score,
+            "active_score": self.active_score,
             "medium_samples": self.medium_samples,
             "long_samples": self.long_samples,
             "medium_span_seconds": self.medium_span_seconds,
@@ -81,6 +85,7 @@ class StatArbSignalManager:
         long_min_samples: int = 240,
         medium_weight: float = 0.4,
         long_weight: float = 0.6,
+        score_mode: str = "weighted",
         entry_threshold: float = 2.8,
         min_score_gap: float = 0.5,
         min_mad_pct: float = 0.003,
@@ -95,6 +100,7 @@ class StatArbSignalManager:
         self.long_min_samples = int(long_min_samples)
         self.medium_weight = float(medium_weight)
         self.long_weight = float(long_weight)
+        self.score_mode = str(score_mode).lower()
         self.entry_threshold = float(entry_threshold)
         self.min_score_gap = float(min_score_gap)
         self.min_mad_pct = float(min_mad_pct)
@@ -118,6 +124,7 @@ class StatArbSignalManager:
             f"   窗口: 30m={self.medium_window_seconds}s, 60m={self.long_window_seconds}s\n"
             f"   最小样本: 30m={self.medium_min_samples}, 60m={self.long_min_samples}\n"
             f"   权重: 30m={self.medium_weight:.2f}, 60m={self.long_weight:.2f}\n"
+            f"   分数模式: {self.score_mode}\n"
             f"   阈值: entry={self.entry_threshold:.3f}, gap={self.min_score_gap:.3f}, MAD下限={self.min_mad_pct:.6f}"
         )
 
@@ -235,7 +242,9 @@ class StatArbSignalManager:
                 long_mad_pct=None,
                 medium_score=None,
                 long_score=None,
+                long_baseline_score=None,
                 final_score=None,
+                active_score=None,
                 medium_samples=medium_samples,
                 long_samples=long_samples,
                 medium_span_seconds=medium_span_seconds,
@@ -260,7 +269,9 @@ class StatArbSignalManager:
                 long_mad_pct=None,
                 medium_score=None,
                 long_score=None,
+                long_baseline_score=None,
                 final_score=None,
+                active_score=None,
                 medium_samples=medium_samples,
                 long_samples=long_samples,
                 medium_span_seconds=medium_span_seconds,
@@ -286,7 +297,9 @@ class StatArbSignalManager:
         long_mad_pct = max(float(long_mad_raw or 0.0), self.min_mad_pct)
         medium_score = (medium_median_pct - current_adjusted_pct) / medium_mad_pct
         long_score = (long_median_pct - current_adjusted_pct) / long_mad_pct
+        long_baseline_score = (long_median_pct - current_adjusted_pct) / medium_mad_pct
         final_score = self.medium_weight * medium_score + self.long_weight * long_score
+        active_score = long_baseline_score if self.score_mode == "long_baseline" else final_score
 
         same_sign = self._same_sign(medium_median_pct, long_median_pct)
         median_gap_scale = max(medium_mad_pct, long_mad_pct, self.min_mad_pct)
@@ -300,9 +313,9 @@ class StatArbSignalManager:
         elif self.block_when_regime_suspected and regime_suspected:
             eligible = False
             reject_reason = "怀疑发生 regime 变化"
-        elif final_score < self.entry_threshold:
+        elif active_score < self.entry_threshold:
             eligible = False
-            reject_reason = f"分数不足({final_score:.3f} < {self.entry_threshold:.3f})"
+            reject_reason = f"分数不足({active_score:.3f} < {self.entry_threshold:.3f})"
 
         return DirectionStats(
             current_raw_pct=current_raw_pct,
@@ -314,7 +327,9 @@ class StatArbSignalManager:
             long_mad_pct=long_mad_pct,
             medium_score=medium_score,
             long_score=long_score,
+            long_baseline_score=long_baseline_score,
             final_score=final_score,
+            active_score=active_score,
             medium_samples=medium_samples,
             long_samples=long_samples,
             medium_span_seconds=medium_span_seconds,
@@ -353,8 +368,8 @@ class StatArbSignalManager:
             selected_signal_type = SignalType.CLOSE
             selection_reason = "仅 CLOSE 方向满足统计套利条件"
         elif open_stats.eligible and close_stats.eligible:
-            open_score = open_stats.final_score or 0.0
-            close_score = close_stats.final_score or 0.0
+            open_score = open_stats.active_score or 0.0
+            close_score = close_stats.active_score or 0.0
             score_gap = abs(open_score - close_score)
             if score_gap < self.min_score_gap:
                 selection_reason = (

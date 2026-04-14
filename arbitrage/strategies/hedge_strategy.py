@@ -266,10 +266,20 @@ class HedgeStrategy(BaseStrategy):
         self.stat_arb_long_min_samples = int(self.stat_arb_logic.get('long_min_samples', 240))
         self.stat_arb_medium_weight = float(self.stat_arb_logic.get('medium_weight', 0.4))
         self.stat_arb_long_weight = float(self.stat_arb_logic.get('long_weight', 0.6))
+        self.stat_arb_score_mode = str(self.stat_arb_logic.get('score_mode', 'weighted')).lower()
         self.stat_arb_entry_threshold = float(self.stat_arb_logic.get('entry_threshold', 2.8))
+        entry_raw_floor = self.stat_arb_logic.get('entry_raw_floor_pct')
+        self.stat_arb_entry_raw_floor_pct = (
+            Decimal(str(entry_raw_floor)) if entry_raw_floor is not None else None
+        )
         self.stat_arb_exit_threshold = float(self.stat_arb_logic.get('exit_threshold', 0.8))
+        self.stat_arb_exit_score_source = str(self.stat_arb_logic.get('exit_score_source', 'final')).lower()
         self.stat_arb_exit_spread_floor_pct = Decimal(
             str(self.stat_arb_logic.get('exit_spread_floor_pct', -0.01))
+        )
+        exit_take_profit = self.stat_arb_logic.get('exit_take_profit_pct')
+        self.stat_arb_exit_take_profit_pct = (
+            Decimal(str(exit_take_profit)) if exit_take_profit is not None else None
         )
         self.stat_arb_min_score_gap = float(self.stat_arb_logic.get('min_score_gap', 0.5))
         self.stat_arb_min_mad_pct = float(self.stat_arb_logic.get('min_mad_pct', 0.003))
@@ -308,6 +318,7 @@ class HedgeStrategy(BaseStrategy):
                 long_min_samples=self.stat_arb_long_min_samples,
                 medium_weight=self.stat_arb_medium_weight,
                 long_weight=self.stat_arb_long_weight,
+                score_mode=self.stat_arb_score_mode,
                 entry_threshold=self.stat_arb_entry_threshold,
                 min_score_gap=self.stat_arb_min_score_gap,
                 min_mad_pct=self.stat_arb_min_mad_pct,
@@ -350,7 +361,8 @@ class HedgeStrategy(BaseStrategy):
             f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
             f"   统计套利开关: {'✅ 启用' if self.stat_arb_enabled else '❌ 禁用'}\n"
             f"   统计套利窗口: 30m={self.stat_arb_medium_window_seconds}s | 60m={self.stat_arb_long_window_seconds}s\n"
-            f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | exit={self.stat_arb_exit_threshold:.3f} | exit_floor={self.stat_arb_exit_spread_floor_pct:.4f}% | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
+            f"   统计套利模式: score_mode={self.stat_arb_score_mode} | exit_score={self.stat_arb_exit_score_source}\n"
+            f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | entry_floor={self.stat_arb_entry_raw_floor_pct if self.stat_arb_entry_raw_floor_pct is not None else '--'} | exit={self.stat_arb_exit_threshold:.3f} | exit_floor={self.stat_arb_exit_spread_floor_pct:.4f}% | exit_tp={self.stat_arb_exit_take_profit_pct if self.stat_arb_exit_take_profit_pct is not None else '--'} | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
             f"   统计套利质量日志间隔: {self.stat_arb_quality_log_interval_seconds:.1f}s\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
             f"   最小安全边际: {self.min_edge_bps:.2f} bps\n"
@@ -1204,9 +1216,37 @@ class HedgeStrategy(BaseStrategy):
             f"   30m 中位数/MAD: {direction_stats.medium_median_pct:.4f}% / {direction_stats.medium_mad_pct:.4f}%\n"
             f"   60m 中位数/MAD: {direction_stats.long_median_pct:.4f}% / {direction_stats.long_mad_pct:.4f}%\n"
             f"   30m/60m 分数: {direction_stats.medium_score:.3f} / {direction_stats.long_score:.3f}\n"
+            f"   1h基准/30m偏离分数: {direction_stats.long_baseline_score:.3f}\n"
             f"   最终分数: {direction_stats.final_score:.3f}\n"
+            f"   当前生效分数: {direction_stats.active_score:.3f}\n"
             f"   选择原因: {self._stat_arb_context.get('selection_reason', '--')}\n"
         )
+
+    def _get_stat_arb_entry_score(self, direction_stats) -> Optional[float]:
+        """返回当前统计套利入场使用的分数。"""
+        if direction_stats is None:
+            return None
+        if getattr(direction_stats, 'active_score', None) is not None:
+            return float(direction_stats.active_score)
+        return float(direction_stats.final_score) if direction_stats.final_score is not None else None
+
+    def _get_stat_arb_exit_score(self, direction_stats) -> Optional[float]:
+        """返回当前统计套利退出使用的分数。"""
+        if direction_stats is None:
+            return None
+        if self.stat_arb_exit_score_source == 'medium':
+            return float(direction_stats.medium_score) if direction_stats.medium_score is not None else None
+        return float(direction_stats.final_score) if direction_stats.final_score is not None else None
+
+    def _get_stat_arb_entry_raw_spread_pct(
+        self,
+        signal_type: SignalType,
+        prices: PriceSnapshot,
+    ) -> Decimal:
+        """返回统计套利开仓方向的真实可执行价差。"""
+        if signal_type == SignalType.OPEN:
+            return prices.calculate_spread_pct()
+        return prices.calculate_reverse_spread_pct()
 
     def _set_stat_arb_position_context_from_signal(self, signal: TradingSignal) -> None:
         """记录统计套利当前持仓的入场上下文。"""
@@ -1232,7 +1272,9 @@ class HedgeStrategy(BaseStrategy):
             "active_direction": active_direction,
             "entry_signal_id": signal.signal_id,
             "entry_time": time.time(),
-            "entry_score": float(stat_arb_meta.get("final_score", 0.0) or 0.0),
+            "entry_score": float(
+                stat_arb_meta.get("active_score", stat_arb_meta.get("final_score", 0.0)) or 0.0
+            ),
             "entry_adjusted_pct": float(stat_arb_meta.get("current_adjusted_pct", 0.0) or 0.0),
         }
 
@@ -1268,14 +1310,23 @@ class HedgeStrategy(BaseStrategy):
     ) -> tuple[bool, str]:
         """判断统计套利当前持仓是否满足回归平仓条件。"""
         direction_stats = self._get_stat_arb_direction_stats(reference_direction)
-        if direction_stats is None or direction_stats.final_score is None:
+        current_score = self._get_stat_arb_exit_score(direction_stats)
+        if direction_stats is None or current_score is None:
             return False, "缺少当前方向统计快照"
 
-        current_score = float(direction_stats.final_score)
+        exit_spread_pct = self._get_stat_arb_exit_executable_spread_pct(execute_signal_type, prices)
+        if (
+            self.stat_arb_exit_take_profit_pct is not None
+            and exit_spread_pct >= self.stat_arb_exit_take_profit_pct
+        ):
+            return True, (
+                f"退出可执行价差触发止盈({exit_spread_pct:.4f}% >= "
+                f"{self.stat_arb_exit_take_profit_pct:.4f}%)"
+            )
+
         if current_score > self.stat_arb_exit_threshold:
             return False, f"分数仍高于退出阈值({current_score:.3f} > {self.stat_arb_exit_threshold:.3f})"
 
-        exit_spread_pct = self._get_stat_arb_exit_executable_spread_pct(execute_signal_type, prices)
         if exit_spread_pct < self.stat_arb_exit_spread_floor_pct:
             logger.info(
                 f"⏸️ [{self.symbol}] 统计套利退出被抑制: "
@@ -1318,17 +1369,24 @@ class HedgeStrategy(BaseStrategy):
             "stat_arb": direction_stats.to_dict(),
             "exit_reason": reason,
             "exit_threshold": self.stat_arb_exit_threshold,
+            "exit_score_source": self.stat_arb_exit_score_source,
             "exit_spread_floor_pct": str(self.stat_arb_exit_spread_floor_pct),
+            "exit_take_profit_pct": (
+                str(self.stat_arb_exit_take_profit_pct)
+                if self.stat_arb_exit_take_profit_pct is not None
+                else None
+            ),
             "exit_executable_spread_pct": str(
                 self._get_stat_arb_exit_executable_spread_pct(execute_signal_type, prices)
             ),
             "reference_direction": reference_direction.value,
         }
 
+        current_score = self._get_stat_arb_exit_score(direction_stats)
         logger.info(
             f"🔁 [{self.symbol}] 统计套利回归平仓触发: "
             f"执行方向={execute_signal_type.value}, 参考方向={reference_direction.value}, "
-            f"current_score={direction_stats.final_score:.3f}, exit_threshold={self.stat_arb_exit_threshold:.3f}, "
+            f"current_score={current_score:.3f}, exit_threshold={self.stat_arb_exit_threshold:.3f}, "
             f"reason={reason}"
         )
 
@@ -1357,11 +1415,11 @@ class HedgeStrategy(BaseStrategy):
             return
 
         direction_stats = self._get_stat_arb_direction_stats(active_direction)
-        if direction_stats is None or direction_stats.final_score is None:
+        current_score = self._get_stat_arb_exit_score(direction_stats)
+        if direction_stats is None or current_score is None:
             return
 
         entry_score = float(self._stat_arb_position_context.get("entry_score", 0.0))
-        current_score = float(direction_stats.final_score)
         score_revert = entry_score - current_score
         entry_adjusted_pct = float(self._stat_arb_position_context.get("entry_adjusted_pct", 0.0))
         current_adjusted_pct = float(direction_stats.current_adjusted_pct)
@@ -1862,9 +1920,10 @@ class HedgeStrategy(BaseStrategy):
             if not self._is_stat_arb_selected(SignalType.OPEN):
                 return None
             stat_arb_stats = self._get_stat_arb_direction_stats(SignalType.OPEN)
-            if stat_arb_stats is None or stat_arb_stats.final_score is None:
+            entry_score = self._get_stat_arb_entry_score(stat_arb_stats)
+            if stat_arb_stats is None or entry_score is None:
                 return None
-            compare_spread_pct = Decimal(str(stat_arb_stats.final_score))
+            compare_spread_pct = Decimal(str(entry_score))
             threshold_pct = Decimal(str(self.stat_arb_entry_threshold))
             threshold_label = "score阈值"
             spread_label = "统计分数"
@@ -1892,6 +1951,16 @@ class HedgeStrategy(BaseStrategy):
                 return
 
         if compare_spread_pct >= threshold_pct:
+            if self.signal_mode == 'stat_arb' and self.stat_arb_entry_raw_floor_pct is not None:
+                entry_raw_spread_pct = self._get_stat_arb_entry_raw_spread_pct(SignalType.OPEN, prices)
+                if entry_raw_spread_pct < self.stat_arb_entry_raw_floor_pct:
+                    logger.info(
+                        f"⏭️ [{self.symbol}] 开仓信号因原始价差不足被拦截:\n"
+                        f"{extra_spread_info}"
+                        f"   entry_raw: {entry_raw_spread_pct:.4f}% < floor: {self.stat_arb_entry_raw_floor_pct:.4f}%\n"
+                        f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
+                    )
+                    return
             self.signal_stats['open']['total'] += 1
             # 记录信号触发时间
             signal_trigger_time = time.time()
@@ -2063,9 +2132,10 @@ class HedgeStrategy(BaseStrategy):
             if not self._is_stat_arb_selected(SignalType.CLOSE):
                 return None
             stat_arb_stats = self._get_stat_arb_direction_stats(SignalType.CLOSE)
-            if stat_arb_stats is None or stat_arb_stats.final_score is None:
+            entry_score = self._get_stat_arb_entry_score(stat_arb_stats)
+            if stat_arb_stats is None or entry_score is None:
                 return None
-            compare_spread_pct = Decimal(str(stat_arb_stats.final_score))
+            compare_spread_pct = Decimal(str(entry_score))
             threshold_pct = Decimal(str(self.stat_arb_entry_threshold))
             threshold_label = "score阈值"
             spread_label = "统计分数"
@@ -2093,6 +2163,16 @@ class HedgeStrategy(BaseStrategy):
                 return
 
         if compare_spread_pct >= threshold_pct:
+            if self.signal_mode == 'stat_arb' and self.stat_arb_entry_raw_floor_pct is not None:
+                entry_raw_spread_pct = self._get_stat_arb_entry_raw_spread_pct(SignalType.CLOSE, prices)
+                if entry_raw_spread_pct < self.stat_arb_entry_raw_floor_pct:
+                    logger.info(
+                        f"⏭️ [{self.symbol}] 反向开仓信号因原始价差不足被拦截:\n"
+                        f"{extra_spread_info}"
+                        f"   entry_raw: {entry_raw_spread_pct:.4f}% < floor: {self.stat_arb_entry_raw_floor_pct:.4f}%\n"
+                        f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
+                    )
+                    return
             self.signal_stats['close']['total'] += 1
 
             # 记录信号触发时间
@@ -2333,18 +2413,54 @@ class HedgeStrategy(BaseStrategy):
         if isinstance(signal_logic, dict):
             stat_arb = signal_logic.get('stat_arb', {})
             if isinstance(stat_arb, dict):
+                if 'score_mode' in stat_arb:
+                    update_attr('stat_arb_score_mode', stat_arb['score_mode'], lambda value: str(value).lower(), label='signal_logic.stat_arb.score_mode')
+                    if self.stat_arb_manager is not None:
+                        self.stat_arb_manager.score_mode = str(self.stat_arb_score_mode).lower()
                 if 'entry_threshold' in stat_arb:
                     update_attr('stat_arb_entry_threshold', stat_arb['entry_threshold'], float, label='signal_logic.stat_arb.entry_threshold')
                     if self.stat_arb_manager is not None:
                         self.stat_arb_manager.entry_threshold = float(self.stat_arb_entry_threshold)
+                if 'entry_raw_floor_pct' in stat_arb:
+                    if stat_arb['entry_raw_floor_pct'] is None:
+                        current_value = self.stat_arb_entry_raw_floor_pct
+                        if current_value is not None:
+                            self.stat_arb_entry_raw_floor_pct = None
+                            logger.info(
+                                f"🔄 [{self.symbol}] 本地覆盖更新 signal_logic.stat_arb.entry_raw_floor_pct: "
+                                f"{current_value} -> None"
+                            )
+                    else:
+                        update_decimal_attr(
+                            'stat_arb_entry_raw_floor_pct',
+                            stat_arb['entry_raw_floor_pct'],
+                            label='signal_logic.stat_arb.entry_raw_floor_pct',
+                        )
                 if 'exit_threshold' in stat_arb:
                     update_attr('stat_arb_exit_threshold', stat_arb['exit_threshold'], float, label='signal_logic.stat_arb.exit_threshold')
+                if 'exit_score_source' in stat_arb:
+                    update_attr('stat_arb_exit_score_source', stat_arb['exit_score_source'], lambda value: str(value).lower(), label='signal_logic.stat_arb.exit_score_source')
                 if 'exit_spread_floor_pct' in stat_arb:
                     update_decimal_attr(
                         'stat_arb_exit_spread_floor_pct',
                         stat_arb['exit_spread_floor_pct'],
                         label='signal_logic.stat_arb.exit_spread_floor_pct',
                     )
+                if 'exit_take_profit_pct' in stat_arb:
+                    if stat_arb['exit_take_profit_pct'] is None:
+                        current_value = self.stat_arb_exit_take_profit_pct
+                        if current_value is not None:
+                            self.stat_arb_exit_take_profit_pct = None
+                            logger.info(
+                                f"🔄 [{self.symbol}] 本地覆盖更新 signal_logic.stat_arb.exit_take_profit_pct: "
+                                f"{current_value} -> None"
+                            )
+                    else:
+                        update_decimal_attr(
+                            'stat_arb_exit_take_profit_pct',
+                            stat_arb['exit_take_profit_pct'],
+                            label='signal_logic.stat_arb.exit_take_profit_pct',
+                        )
                 if 'min_score_gap' in stat_arb:
                     update_attr('stat_arb_min_score_gap', stat_arb['min_score_gap'], float, label='signal_logic.stat_arb.min_score_gap')
                     if self.stat_arb_manager is not None:

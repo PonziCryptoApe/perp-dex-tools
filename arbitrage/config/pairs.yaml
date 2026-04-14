@@ -31,9 +31,13 @@ common:
 
       medium_weight: 0.4         # 30 分钟标准化偏离分数权重
       long_weight: 0.6           # 60 分钟标准化偏离分数权重
+      score_mode: long_baseline       # weighted=30m/60m加权；long_baseline=1h基准+30m偏离
       entry_threshold: 2.8       # 最终开仓分数阈值，建议先从 2.5~3.0 开始试
-      exit_threshold: 0.8        # 回归平仓分数阈值，分数回落到该值以下时尝试平仓
-      exit_spread_floor_pct: -0.01  # 回归平仓时退出方向的真实可执行价差底线，低于该值则暂不退出
+      entry_raw_floor_pct: -0.01  # 开仓方向真实可执行价差底线；null 表示不启用
+      exit_threshold: 1.2        # 回归平仓分数阈值，分数回落到该值以下时尝试平仓
+      exit_score_source: medium   # final=当前主分数；medium=30m分数
+      exit_spread_floor_pct: 0  # 回归平仓时退出方向的真实可执行价差底线，低于该值则暂不退出
+      exit_take_profit_pct: 0.02 # 若退出方向 raw spread 达到该阈值，则提前止盈退出
       min_score_gap: 0.5         # 两个方向分数最小差值，避免方向不明确时开仓
       min_mad_pct: 0.003         # MAD 下限，防止波动尺度过小导致分数异常放大
       quality_log_interval_seconds: 15  # 回归质量日志输出间隔（秒）
