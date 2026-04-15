@@ -267,6 +267,7 @@ class HedgeStrategy(BaseStrategy):
         self.stat_arb_medium_weight = float(self.stat_arb_logic.get('medium_weight', 0.4))
         self.stat_arb_long_weight = float(self.stat_arb_logic.get('long_weight', 0.6))
         self.stat_arb_score_mode = str(self.stat_arb_logic.get('score_mode', 'weighted')).lower()
+        self.stat_arb_breakout_quantile = float(self.stat_arb_logic.get('breakout_quantile', 0.7))
         self.stat_arb_entry_threshold = float(self.stat_arb_logic.get('entry_threshold', 2.8))
         entry_raw_floor = self.stat_arb_logic.get('entry_raw_floor_pct')
         self.stat_arb_entry_raw_floor_pct = (
@@ -319,6 +320,7 @@ class HedgeStrategy(BaseStrategy):
                 medium_weight=self.stat_arb_medium_weight,
                 long_weight=self.stat_arb_long_weight,
                 score_mode=self.stat_arb_score_mode,
+                breakout_quantile=self.stat_arb_breakout_quantile,
                 entry_threshold=self.stat_arb_entry_threshold,
                 min_score_gap=self.stat_arb_min_score_gap,
                 min_mad_pct=self.stat_arb_min_mad_pct,
@@ -361,7 +363,7 @@ class HedgeStrategy(BaseStrategy):
             f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
             f"   统计套利开关: {'✅ 启用' if self.stat_arb_enabled else '❌ 禁用'}\n"
             f"   统计套利窗口: 30m={self.stat_arb_medium_window_seconds}s | 60m={self.stat_arb_long_window_seconds}s\n"
-            f"   统计套利模式: score_mode={self.stat_arb_score_mode} | exit_score={self.stat_arb_exit_score_source}\n"
+            f"   统计套利模式: score_mode={self.stat_arb_score_mode} | breakout_q={self.stat_arb_breakout_quantile:.2f} | exit_score={self.stat_arb_exit_score_source}\n"
             f"   统计套利阈值: entry={self.stat_arb_entry_threshold:.3f} | entry_floor={self.stat_arb_entry_raw_floor_pct if self.stat_arb_entry_raw_floor_pct is not None else '--'} | exit={self.stat_arb_exit_threshold:.3f} | exit_floor={self.stat_arb_exit_spread_floor_pct:.4f}% | exit_tp={self.stat_arb_exit_take_profit_pct if self.stat_arb_exit_take_profit_pct is not None else '--'} | gap={self.stat_arb_min_score_gap:.3f} | MAD下限={self.stat_arb_min_mad_pct:.6f}\n"
             f"   统计套利质量日志间隔: {self.stat_arb_quality_log_interval_seconds:.1f}s\n"
             f"   边际二次过滤: {'✅ 启用' if self.edge_filter_enabled else '❌ 禁用'}\n"
@@ -1215,8 +1217,10 @@ class HedgeStrategy(BaseStrategy):
             f"   基线修正值: {direction_stats.baseline_pct:.4f}%\n"
             f"   30m 中位数/MAD: {direction_stats.medium_median_pct:.4f}% / {direction_stats.medium_mad_pct:.4f}%\n"
             f"   60m 中位数/MAD: {direction_stats.long_median_pct:.4f}% / {direction_stats.long_mad_pct:.4f}%\n"
+            f"   30m/60m 分位阈值: {direction_stats.medium_quantile_pct:.4f}% / {direction_stats.long_quantile_pct:.4f}%\n"
             f"   30m/60m 分数: {direction_stats.medium_score:.3f} / {direction_stats.long_score:.3f}\n"
             f"   1h基准/30m偏离分数: {direction_stats.long_baseline_score:.3f}\n"
+            f"   分位突破强度: {direction_stats.breakout_score:.3f}\n"
             f"   最终分数: {direction_stats.final_score:.3f}\n"
             f"   当前生效分数: {direction_stats.active_score:.3f}\n"
             f"   选择原因: {self._stat_arb_context.get('selection_reason', '--')}\n"
@@ -2417,6 +2421,10 @@ class HedgeStrategy(BaseStrategy):
                     update_attr('stat_arb_score_mode', stat_arb['score_mode'], lambda value: str(value).lower(), label='signal_logic.stat_arb.score_mode')
                     if self.stat_arb_manager is not None:
                         self.stat_arb_manager.score_mode = str(self.stat_arb_score_mode).lower()
+                if 'breakout_quantile' in stat_arb:
+                    update_attr('stat_arb_breakout_quantile', stat_arb['breakout_quantile'], float, label='signal_logic.stat_arb.breakout_quantile')
+                    if self.stat_arb_manager is not None:
+                        self.stat_arb_manager.breakout_quantile = float(self.stat_arb_breakout_quantile)
                 if 'entry_threshold' in stat_arb:
                     update_attr('stat_arb_entry_threshold', stat_arb['entry_threshold'], float, label='signal_logic.stat_arb.entry_threshold')
                     if self.stat_arb_manager is not None:

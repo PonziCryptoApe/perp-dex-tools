@@ -24,11 +24,14 @@ class DirectionStats:
     baseline_pct: float
     medium_median_pct: Optional[float]
     long_median_pct: Optional[float]
+    medium_quantile_pct: Optional[float]
+    long_quantile_pct: Optional[float]
     medium_mad_pct: Optional[float]
     long_mad_pct: Optional[float]
     medium_score: Optional[float]
     long_score: Optional[float]
     long_baseline_score: Optional[float]
+    breakout_score: Optional[float]
     final_score: Optional[float]
     active_score: Optional[float]
     medium_samples: int
@@ -51,11 +54,14 @@ class DirectionStats:
             "baseline_pct": self.baseline_pct,
             "medium_median_pct": self.medium_median_pct,
             "long_median_pct": self.long_median_pct,
+            "medium_quantile_pct": self.medium_quantile_pct,
+            "long_quantile_pct": self.long_quantile_pct,
             "medium_mad_pct": self.medium_mad_pct,
             "long_mad_pct": self.long_mad_pct,
             "medium_score": self.medium_score,
             "long_score": self.long_score,
             "long_baseline_score": self.long_baseline_score,
+            "breakout_score": self.breakout_score,
             "final_score": self.final_score,
             "active_score": self.active_score,
             "medium_samples": self.medium_samples,
@@ -86,6 +92,7 @@ class StatArbSignalManager:
         medium_weight: float = 0.4,
         long_weight: float = 0.6,
         score_mode: str = "weighted",
+        breakout_quantile: float = 0.7,
         entry_threshold: float = 2.8,
         min_score_gap: float = 0.5,
         min_mad_pct: float = 0.003,
@@ -100,7 +107,13 @@ class StatArbSignalManager:
         self.long_min_samples = int(long_min_samples)
         self.medium_weight = float(medium_weight)
         self.long_weight = float(long_weight)
-        self.score_mode = str(score_mode).lower()
+        normalized_score_mode = str(score_mode).lower()
+        self.score_mode = (
+            normalized_score_mode
+            if normalized_score_mode in {"weighted", "long_baseline", "quantile_breakout"}
+            else "weighted"
+        )
+        self.breakout_quantile = min(max(float(breakout_quantile), 0.0), 1.0)
         self.entry_threshold = float(entry_threshold)
         self.min_score_gap = float(min_score_gap)
         self.min_mad_pct = float(min_mad_pct)
@@ -124,7 +137,7 @@ class StatArbSignalManager:
             f"   窗口: 30m={self.medium_window_seconds}s, 60m={self.long_window_seconds}s\n"
             f"   最小样本: 30m={self.medium_min_samples}, 60m={self.long_min_samples}\n"
             f"   权重: 30m={self.medium_weight:.2f}, 60m={self.long_weight:.2f}\n"
-            f"   分数模式: {self.score_mode}\n"
+            f"   分数模式: {self.score_mode} | 分位突破阈值={self.breakout_quantile:.2f}\n"
             f"   阈值: entry={self.entry_threshold:.3f}, gap={self.min_score_gap:.3f}, MAD下限={self.min_mad_pct:.6f}"
         )
 
@@ -186,6 +199,21 @@ class StatArbSignalManager:
         deviations = [abs(value - center) for value in values]
         return float(median(deviations))
 
+    def _calc_quantile(self, values: list[float], q: float) -> Optional[float]:
+        """计算分位数，使用线性插值。"""
+        if not values:
+            return None
+        if len(values) == 1:
+            return float(values[0])
+        ordered = sorted(float(value) for value in values)
+        position = (len(ordered) - 1) * q
+        lower_index = int(position)
+        upper_index = min(lower_index + 1, len(ordered) - 1)
+        lower_value = ordered[lower_index]
+        upper_value = ordered[upper_index]
+        weight = position - lower_index
+        return float(lower_value + (upper_value - lower_value) * weight)
+
     def _same_sign(self, medium_value: Optional[float], long_value: Optional[float]) -> bool:
         """判断中长期中枢是否同向。"""
         if medium_value is None or long_value is None:
@@ -238,11 +266,14 @@ class StatArbSignalManager:
                 baseline_pct=self._current_baseline_pct,
                 medium_median_pct=None,
                 long_median_pct=None,
+                medium_quantile_pct=None,
+                long_quantile_pct=None,
                 medium_mad_pct=None,
                 long_mad_pct=None,
                 medium_score=None,
                 long_score=None,
                 long_baseline_score=None,
+                breakout_score=None,
                 final_score=None,
                 active_score=None,
                 medium_samples=medium_samples,
@@ -291,6 +322,8 @@ class StatArbSignalManager:
 
         medium_median_pct = float(median(medium_values))
         long_median_pct = float(median(long_values))
+        medium_quantile_pct = self._calc_quantile(medium_values, self.breakout_quantile)
+        long_quantile_pct = self._calc_quantile(long_values, self.breakout_quantile)
         medium_mad_raw = self._calc_mad(medium_values, medium_median_pct)
         long_mad_raw = self._calc_mad(long_values, long_median_pct)
         medium_mad_pct = max(float(medium_mad_raw or 0.0), self.min_mad_pct)
@@ -298,8 +331,18 @@ class StatArbSignalManager:
         medium_score = (medium_median_pct - current_adjusted_pct) / medium_mad_pct
         long_score = (long_median_pct - current_adjusted_pct) / long_mad_pct
         long_baseline_score = (long_median_pct - current_adjusted_pct) / medium_mad_pct
+        breakout_score = (
+            (current_adjusted_pct - long_quantile_pct) / medium_mad_pct
+            if long_quantile_pct is not None
+            else None
+        )
         final_score = self.medium_weight * medium_score + self.long_weight * long_score
-        active_score = long_baseline_score if self.score_mode == "long_baseline" else final_score
+        if self.score_mode == "long_baseline":
+            active_score = long_baseline_score
+        elif self.score_mode == "quantile_breakout":
+            active_score = breakout_score
+        else:
+            active_score = final_score
 
         same_sign = self._same_sign(medium_median_pct, long_median_pct)
         median_gap_scale = max(medium_mad_pct, long_mad_pct, self.min_mad_pct)
@@ -313,9 +356,21 @@ class StatArbSignalManager:
         elif self.block_when_regime_suspected and regime_suspected:
             eligible = False
             reject_reason = "怀疑发生 regime 变化"
+        elif self.score_mode == "quantile_breakout" and (
+            medium_quantile_pct is None
+            or long_quantile_pct is None
+            or current_adjusted_pct <= medium_quantile_pct
+            or current_adjusted_pct <= long_quantile_pct
+        ):
+            eligible = False
+            reject_reason = "未突破30m/60m分位阈值"
         elif active_score < self.entry_threshold:
             eligible = False
-            reject_reason = f"分数不足({active_score:.3f} < {self.entry_threshold:.3f})"
+            reject_reason = (
+                f"突破强度不足({active_score:.3f} < {self.entry_threshold:.3f})"
+                if self.score_mode == "quantile_breakout"
+                else f"分数不足({active_score:.3f} < {self.entry_threshold:.3f})"
+            )
 
         return DirectionStats(
             current_raw_pct=current_raw_pct,
@@ -323,11 +378,14 @@ class StatArbSignalManager:
             baseline_pct=self._current_baseline_pct,
             medium_median_pct=medium_median_pct,
             long_median_pct=long_median_pct,
+            medium_quantile_pct=medium_quantile_pct,
+            long_quantile_pct=long_quantile_pct,
             medium_mad_pct=medium_mad_pct,
             long_mad_pct=long_mad_pct,
             medium_score=medium_score,
             long_score=long_score,
             long_baseline_score=long_baseline_score,
+            breakout_score=breakout_score,
             final_score=final_score,
             active_score=active_score,
             medium_samples=medium_samples,

@@ -31,7 +31,8 @@ common:
 
       medium_weight: 0.4         # 30 分钟标准化偏离分数权重
       long_weight: 0.6           # 60 分钟标准化偏离分数权重
-      score_mode: long_baseline       # weighted=30m/60m加权；long_baseline=1h基准+30m偏离
+      score_mode: long_baseline       # weighted=30m/60m加权；long_baseline=1h基准+30m偏离；quantile_breakout=30m/1h分位突破
+      breakout_quantile: 0.7      # quantile_breakout 模式使用的 30m/1h 分位阈值
       entry_threshold: 2.8       # 最终开仓分数阈值，建议先从 2.5~3.0 开始试
       entry_raw_floor_pct: -0.01  # 开仓方向真实可执行价差底线；null 表示不启用
       exit_threshold: 1.2        # 回归平仓分数阈值，分数回落到该值以下时尝试平仓
