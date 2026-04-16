@@ -21,6 +21,7 @@ from ..services.price_monitor import PriceMonitorService
 from ..services.position_manager import PositionManagerService
 from ..services.order_executor_parallel import OrderExecutor
 from ..services.dynamic_threshold import DynamicThresholdManager
+from ..services.median_edge_signal_manager import MedianEdgeSignalManager
 from ..services.quantile_signal_manager import QuantileSignalManager
 from ..services.stat_arb_signal_manager import StatArbSignalManager
 from ..services.risk_control_service import RiskControlService, RiskLevel
@@ -254,6 +255,19 @@ class HedgeStrategy(BaseStrategy):
         self.quantile_log_dir = Path(self.signal_logic.get('log_dir', 'logs/arbitrage/quantile_signal'))
         self._quantile_samples_path: Optional[Path] = None
         self._quantile_events_path: Optional[Path] = None
+        self.median_edge_logic = self.signal_logic.get('median_edge', {})
+        if not isinstance(self.median_edge_logic, dict):
+            self.median_edge_logic = {}
+        self.median_edge_enabled = bool(self.median_edge_logic.get('enabled', False))
+        self.median_edge_baseline_adjustment = bool(self.median_edge_logic.get('baseline_adjustment', True))
+        self.median_edge_baseline_ratio = float(self.median_edge_logic.get('baseline_ratio', 0.5))
+        self.median_edge_medium_window_seconds = int(self.median_edge_logic.get('medium_window_seconds', 1800))
+        self.median_edge_long_window_seconds = int(self.median_edge_logic.get('long_window_seconds', 3600))
+        self.median_edge_medium_min_samples = int(self.median_edge_logic.get('medium_min_samples', 120))
+        self.median_edge_long_min_samples = int(self.median_edge_logic.get('long_min_samples', 240))
+        self.median_edge_min_edge_bps = float(self.median_edge_logic.get('min_edge_bps', 2.25))
+        self.median_edge_manager = None
+        self._median_edge_context = None
         self.stat_arb_logic = self.signal_logic.get('stat_arb', {})
         if not isinstance(self.stat_arb_logic, dict):
             self.stat_arb_logic = {}
@@ -309,6 +323,17 @@ class HedgeStrategy(BaseStrategy):
             if self.quantile_log_enabled or self.quantile_event_log_enabled:
                 self._init_quantile_logs()
 
+        if self.signal_mode == 'median_edge' and self.median_edge_enabled:
+            self.median_edge_manager = MedianEdgeSignalManager(
+                baseline_adjustment=self.median_edge_baseline_adjustment,
+                baseline_ratio=self.median_edge_baseline_ratio,
+                medium_window_seconds=self.median_edge_medium_window_seconds,
+                long_window_seconds=self.median_edge_long_window_seconds,
+                medium_min_samples=self.median_edge_medium_min_samples,
+                long_min_samples=self.median_edge_long_min_samples,
+                min_edge_bps=self.median_edge_min_edge_bps,
+            )
+
         if self.signal_mode == 'stat_arb' and self.stat_arb_enabled:
             self.stat_arb_manager = StatArbSignalManager(
                 baseline_adjustment=self.stat_arb_baseline_adjustment,
@@ -357,10 +382,15 @@ class HedgeStrategy(BaseStrategy):
             f"   Monitor Only: {monitor_only}\n"
             f"   累计模式: {'✅ 启用' if accumulate_mode else '❌ 禁用'}\n"
             f"   风控模块: {'✅ 启用' if self.risk_control_enabled else '❌ 禁用'}\n"
-            f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else ('统计套利' if self.signal_mode == 'stat_arb' else '标准差')}\n"
+            f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else ('双中位数超额' if self.signal_mode == 'median_edge' else ('统计套利' if self.signal_mode == 'stat_arb' else '标准差'))}\n"
             f"   分位数配置: P{int(self.signal_quantile * 100)} | 样本{self.signal_sample_size} | 最小样本{self.signal_min_samples}\n"
             f"   分位数最小边际: {self.signal_min_edge_pct:.4f}%\n"
             f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
+            f"   双中位数开关: {'✅ 启用' if self.median_edge_enabled else '❌ 禁用'}\n"
+            f"   双中位数基线修正: {'✅ 启用' if self.median_edge_baseline_adjustment else '❌ 禁用'} | ratio={self.median_edge_baseline_ratio:.3f}\n"
+            f"   双中位数窗口: 30m={self.median_edge_medium_window_seconds}s | 60m={self.median_edge_long_window_seconds}s\n"
+            f"   双中位数样本: 30m={self.median_edge_medium_min_samples} | 60m={self.median_edge_long_min_samples}\n"
+            f"   双中位数超额门槛: {self.median_edge_min_edge_bps:.2f} bps\n"
             f"   统计套利开关: {'✅ 启用' if self.stat_arb_enabled else '❌ 禁用'}\n"
             f"   统计套利窗口: 30m={self.stat_arb_medium_window_seconds}s | 60m={self.stat_arb_long_window_seconds}s\n"
             f"   统计套利模式: score_mode={self.stat_arb_score_mode} | breakout_q={self.stat_arb_breakout_quantile:.2f} | exit_score={self.stat_arb_exit_score_source}\n"
@@ -377,9 +407,9 @@ class HedgeStrategy(BaseStrategy):
             f"   订单簿写盘目录: {self.orderbook_collection_dir}\n"
             f"   本地热加载配置: {self.local_override_path or '--'}"
         )
-        if self.signal_mode == 'stat_arb' and not accumulate_mode:
+        if self.signal_mode in {'stat_arb', 'median_edge'} and not accumulate_mode:
             logger.warning(
-                "⚠️ 当前使用 stat_arb 且未开启累计模式：第一版仅在累计模式下完整支持双方向建仓，"
+                "⚠️ 当前使用双方向信号模式但未开启累计模式：第一版仅在累计模式下完整支持双方向建仓，"
                 "传统模式下 CLOSE 方向仍沿用“有持仓才评估”的旧语义"
             )
     
@@ -682,6 +712,37 @@ class HedgeStrategy(BaseStrategy):
                         reverse_spread_pct=reverse_spread_pct,
                         avg_local_spread_pct=avg_local_spread_pct,
                     )
+                elif self.signal_mode == 'median_edge' and self.median_edge_manager:
+                    self._update_median_edge_context(
+                        spread_pct=spread_pct,
+                        reverse_spread_pct=reverse_spread_pct,
+                        prices=prices,
+                    )
+                    median_edge_ready = bool(self._median_edge_context and self._median_edge_context.get('ready'))
+                    if not median_edge_ready:
+                        total_samples = self._median_edge_context.get('total_samples', 0) if self._median_edge_context else 0
+                        open_stats = self._median_edge_context.get('open') if self._median_edge_context else None
+                        close_stats = self._median_edge_context.get('close') if self._median_edge_context else None
+                        open_medium_samples = open_stats.medium_samples if open_stats else 0
+                        open_long_samples = open_stats.long_samples if open_stats else 0
+                        close_medium_samples = close_stats.medium_samples if close_stats else 0
+                        close_long_samples = close_stats.long_samples if close_stats else 0
+                        open_medium_span = open_stats.medium_span_seconds if open_stats else 0.0
+                        open_long_span = open_stats.long_span_seconds if open_stats else 0.0
+                        close_medium_span = close_stats.medium_span_seconds if close_stats else 0.0
+                        close_long_span = close_stats.long_span_seconds if close_stats else 0.0
+                        self._log_threshold_skip_reason(
+                            "双中位数窗口尚未就绪",
+                            detail=(
+                                f"总样本={total_samples}, "
+                                f"OPEN(30m/60m)={open_medium_samples}/{open_long_samples}, "
+                                f"CLOSE(30m/60m)={close_medium_samples}/{close_long_samples}, "
+                                f"OPEN跨度={open_medium_span:.1f}/{open_long_span:.1f}s, "
+                                f"CLOSE跨度={close_medium_span:.1f}/{close_long_span:.1f}s"
+                            ),
+                        )
+                        await self._clear_all_signal_states("双中位数窗口样本尚未就绪")
+                        return
                 elif self.signal_mode == 'stat_arb' and self.stat_arb_manager:
                     self._update_stat_arb_context(
                         spread_pct=spread_pct,
@@ -989,6 +1050,8 @@ class HedgeStrategy(BaseStrategy):
         prefix = "未触发动态阈值调整"
         if self.signal_mode == 'quantile':
             prefix = "未触发分位数信号"
+        elif self.signal_mode == 'median_edge':
+            prefix = "未触发双中位数超额信号"
         elif self.signal_mode == 'stat_arb':
             prefix = "未触发统计套利信号"
         message = f"🧭 [{self.symbol}] {prefix}: {reason}"
@@ -1172,6 +1235,53 @@ class HedgeStrategy(BaseStrategy):
         if open_q is None or close_q is None:
             return None, None
         return Decimal(str(open_q)), Decimal(str(close_q))
+
+    def _update_median_edge_context(
+        self,
+        spread_pct: Decimal,
+        reverse_spread_pct: Decimal,
+        prices: PriceSnapshot,
+    ) -> None:
+        """刷新双中位数超额上下文。"""
+        if not self.median_edge_manager:
+            self._median_edge_context = None
+            return
+
+        total_local_spread_pct = self._calculate_avg_local_spread_pct(prices) * Decimal('2')
+        self.median_edge_manager.add_spreads(
+            open_spread=spread_pct,
+            close_spread=reverse_spread_pct,
+            baseline_pct=total_local_spread_pct,
+        )
+        self._median_edge_context = self.median_edge_manager.get_signal_context()
+
+    def _get_median_edge_direction_stats(self, signal_type: SignalType):
+        """获取某个方向的双中位数超额快照。"""
+        if not self._median_edge_context:
+            return None
+        if signal_type == SignalType.OPEN:
+            return self._median_edge_context.get('open')
+        return self._median_edge_context.get('close')
+
+    def _is_median_edge_selected(self, signal_type: SignalType) -> bool:
+        """当前双中位数上下文是否选择了该方向。"""
+        if not self._median_edge_context:
+            return False
+        return self._median_edge_context.get('selected_signal_type') == signal_type
+
+    def _format_median_edge_extra_info(self, signal_type: SignalType) -> str:
+        """构建双中位数超额信号附加日志。"""
+        direction_stats = self._get_median_edge_direction_stats(signal_type)
+        if direction_stats is None:
+            return ""
+        return (
+            f"   调整后价差: {direction_stats.current_adjusted_pct:.4f}%\n"
+            f"   基线修正值: {direction_stats.baseline_pct:.4f}%\n"
+            f"   30m/60m 中位数: {direction_stats.medium_median_pct:.4f}% / {direction_stats.long_median_pct:.4f}%\n"
+            f"   30m/60m 超额: {direction_stats.medium_edge_pct:.4f}% / {direction_stats.long_edge_pct:.4f}%\n"
+            f"   生效门槛: {direction_stats.threshold_pct:.4f}%\n"
+            f"   选择原因: {self._median_edge_context.get('selection_reason', '--')}\n"
+        )
 
     def _update_stat_arb_context(
         self,
@@ -1919,8 +2029,20 @@ class HedgeStrategy(BaseStrategy):
         threshold_label = "阈值"
         spread_label = "价差"
         extra_spread_info = ""
+        median_edge_stats = None
         stat_arb_stats = None
-        if self.signal_mode == 'stat_arb' and self.stat_arb_manager:
+        if self.signal_mode == 'median_edge' and self.median_edge_manager:
+            if not self._is_median_edge_selected(SignalType.OPEN):
+                return None
+            median_edge_stats = self._get_median_edge_direction_stats(SignalType.OPEN)
+            if median_edge_stats is None or median_edge_stats.threshold_pct is None:
+                return None
+            compare_spread_pct = Decimal(str(median_edge_stats.current_adjusted_pct))
+            threshold_pct = Decimal(str(median_edge_stats.threshold_pct))
+            threshold_label = "双中位数+边际"
+            spread_label = "调整后价差"
+            extra_spread_info = self._format_median_edge_extra_info(SignalType.OPEN)
+        elif self.signal_mode == 'stat_arb' and self.stat_arb_manager:
             if not self._is_stat_arb_selected(SignalType.OPEN):
                 return None
             stat_arb_stats = self._get_stat_arb_direction_stats(SignalType.OPEN)
@@ -2018,7 +2140,7 @@ class HedgeStrategy(BaseStrategy):
 
             edge_estimate = None
             edge_apply, edge_ctx = self._should_apply_edge_filter('open')
-            if self.edge_filter_enabled and self.signal_mode != 'stat_arb':
+            if self.edge_filter_enabled and self.signal_mode not in {'stat_arb', 'median_edge'}:
                 if edge_apply:
                     passed_edge, edge_estimate = self._passes_edge_filter(
                         spread_pct=spread_pct,
@@ -2082,6 +2204,7 @@ class HedgeStrategy(BaseStrategy):
                     'threshold_label': threshold_label,
                     'spread_label': spread_label,
                     'signal_mode': self.signal_mode,
+                    'median_edge': median_edge_stats.to_dict() if median_edge_stats else {},
                     'stat_arb': stat_arb_stats.to_dict() if stat_arb_stats else {},
                 },
             )
@@ -2131,8 +2254,20 @@ class HedgeStrategy(BaseStrategy):
         threshold_label = "阈值"
         spread_label = "价差"
         extra_spread_info = ""
+        median_edge_stats = None
         stat_arb_stats = None
-        if self.signal_mode == 'stat_arb' and self.stat_arb_manager:
+        if self.signal_mode == 'median_edge' and self.median_edge_manager:
+            if not self._is_median_edge_selected(SignalType.CLOSE):
+                return None
+            median_edge_stats = self._get_median_edge_direction_stats(SignalType.CLOSE)
+            if median_edge_stats is None or median_edge_stats.threshold_pct is None:
+                return None
+            compare_spread_pct = Decimal(str(median_edge_stats.current_adjusted_pct))
+            threshold_pct = Decimal(str(median_edge_stats.threshold_pct))
+            threshold_label = "双中位数+边际"
+            spread_label = "调整后价差"
+            extra_spread_info = self._format_median_edge_extra_info(SignalType.CLOSE)
+        elif self.signal_mode == 'stat_arb' and self.stat_arb_manager:
             if not self._is_stat_arb_selected(SignalType.CLOSE):
                 return None
             stat_arb_stats = self._get_stat_arb_direction_stats(SignalType.CLOSE)
@@ -2231,7 +2366,7 @@ class HedgeStrategy(BaseStrategy):
 
             edge_estimate = None
             edge_apply, edge_ctx = self._should_apply_edge_filter('close')
-            if self.edge_filter_enabled and self.signal_mode != 'stat_arb':
+            if self.edge_filter_enabled and self.signal_mode not in {'stat_arb', 'median_edge'}:
                 if edge_apply:
                     passed_edge, edge_estimate = self._passes_edge_filter(
                         spread_pct=spread_pct,
@@ -2299,6 +2434,7 @@ class HedgeStrategy(BaseStrategy):
                     'threshold_label': threshold_label,
                     'spread_label': spread_label,
                     'signal_mode': self.signal_mode,
+                    'median_edge': median_edge_stats.to_dict() if median_edge_stats else {},
                     'stat_arb': stat_arb_stats.to_dict() if stat_arb_stats else {},
                 },
             )
@@ -2415,6 +2551,73 @@ class HedgeStrategy(BaseStrategy):
 
         signal_logic = overrides.get('signal_logic', {})
         if isinstance(signal_logic, dict):
+            median_edge = signal_logic.get('median_edge', {})
+            if isinstance(median_edge, dict):
+                if 'baseline_adjustment' in median_edge:
+                    update_attr(
+                        'median_edge_baseline_adjustment',
+                        median_edge['baseline_adjustment'],
+                        bool,
+                        label='signal_logic.median_edge.baseline_adjustment',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.baseline_adjustment = bool(self.median_edge_baseline_adjustment)
+                if 'baseline_ratio' in median_edge:
+                    update_attr(
+                        'median_edge_baseline_ratio',
+                        median_edge['baseline_ratio'],
+                        float,
+                        label='signal_logic.median_edge.baseline_ratio',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.baseline_ratio = float(self.median_edge_baseline_ratio)
+                if 'medium_window_seconds' in median_edge:
+                    update_attr(
+                        'median_edge_medium_window_seconds',
+                        median_edge['medium_window_seconds'],
+                        int,
+                        label='signal_logic.median_edge.medium_window_seconds',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.medium_window_seconds = int(self.median_edge_medium_window_seconds)
+                if 'long_window_seconds' in median_edge:
+                    update_attr(
+                        'median_edge_long_window_seconds',
+                        median_edge['long_window_seconds'],
+                        int,
+                        label='signal_logic.median_edge.long_window_seconds',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.long_window_seconds = int(self.median_edge_long_window_seconds)
+                if 'medium_min_samples' in median_edge:
+                    update_attr(
+                        'median_edge_medium_min_samples',
+                        median_edge['medium_min_samples'],
+                        int,
+                        label='signal_logic.median_edge.medium_min_samples',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.medium_min_samples = int(self.median_edge_medium_min_samples)
+                if 'long_min_samples' in median_edge:
+                    update_attr(
+                        'median_edge_long_min_samples',
+                        median_edge['long_min_samples'],
+                        int,
+                        label='signal_logic.median_edge.long_min_samples',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.long_min_samples = int(self.median_edge_long_min_samples)
+                if 'min_edge_bps' in median_edge:
+                    update_attr(
+                        'median_edge_min_edge_bps',
+                        median_edge['min_edge_bps'],
+                        float,
+                        label='signal_logic.median_edge.min_edge_bps',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.min_edge_bps = float(self.median_edge_min_edge_bps)
+                        self.median_edge_manager.min_edge_pct = float(self.median_edge_min_edge_bps) / 100.0
+
             stat_arb = signal_logic.get('stat_arb', {})
             if isinstance(stat_arb, dict):
                 if 'score_mode' in stat_arb:

@@ -7,6 +7,7 @@ common:
     # 可选值：
     # - legacy: 现有标准差/动态阈值逻辑
     # - quantile: 现有分位数逻辑
+    # - median_edge: 调整后价差同时突破 30m/60m 中位数并超出固定 bps
     # - stat_arb: 预留给统计套利逻辑
     mode: legacy
 
@@ -16,6 +17,17 @@ common:
     min_samples: 2000          # 分位数冷启动最小样本数
     min_edge_pct: 0.01         # 分位数模式最小安全边际（%）
     min_abs_spread_pct: 0.03   # 分位数模式绝对净价差底线（%）
+
+    # ========== median_edge 模式公共默认值 ==========
+    median_edge:
+      enabled: false             # 双中位数超额总开关。仅当 mode=median_edge 且 enabled=true 时启用
+      baseline_adjustment: true  # 是否先减去两边盘口点差和的一半
+      baseline_ratio: 0.5        # 基线修正比例，0.5 表示减去两边点差和的一半
+      medium_window_seconds: 1800  # 中期窗口，默认 30 分钟
+      long_window_seconds: 3600    # 长期窗口，默认 60 分钟
+      medium_min_samples: 120      # 中期窗口最小样本数
+      long_min_samples: 240        # 长期窗口最小样本数
+      min_edge_bps: 2.25           # 当前调整后价差需至少高于 30m/60m 中位数多少 bps
 
     # ========== stat_arb 模式公共默认值 ==========
     stat_arb:
