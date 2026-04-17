@@ -131,6 +131,26 @@ class HedgeStrategy(BaseStrategy):
         )
         self._orderbook_collection_path: Optional[Path] = None
         self._last_orderbook_collection_time = 0.0
+        self._orderbook_write_queue = asyncio.Queue(maxsize=1024)
+        self._orderbook_writer_task: Optional[asyncio.Task] = None
+        self._last_orderbook_queue_drop_log_time = 0.0
+        self._yaml_reload_task: Optional[asyncio.Task] = None
+        self._latest_price_snapshot: Optional[PriceSnapshot] = None
+        self._latest_price_snapshot_received_at = 0.0
+        self._latest_price_version = 0
+        self._price_update_event = asyncio.Event()
+        self._price_processing_task: Optional[asyncio.Task] = None
+        self._price_pipeline_log_interval = 10.0
+        self._last_price_pipeline_log_time = 0.0
+        self._price_pipeline_stats = {
+            'snapshots_received': 0,
+            'snapshots_processed': 0,
+            'snapshots_overwritten': 0,
+            'snapshot_queue_wait_total_ms': 0.0,
+            'snapshot_queue_wait_max_ms': 0.0,
+            'process_total_ms': 0.0,
+            'process_max_ms': 0.0,
+        }
 
         # ✅ 新增：结束时间
         self.end_time_stamp = None
@@ -429,9 +449,10 @@ class HedgeStrategy(BaseStrategy):
         if self.risk_control_enabled:
             await self.risk_control_service.start()
         self._init_orderbook_collection_log()
+        self._start_background_tasks()
         if self.data_collection_only:
-            self.monitor.subscribe(self._on_price_update)
             self.is_running = True
+            self.monitor.subscribe(self._on_price_snapshot)
             logger.info(f"✅ 订单簿采集已启动: {self.strategy_name}")
             return
         # ✅ 新增：启动时同步仓位
@@ -461,9 +482,8 @@ class HedgeStrategy(BaseStrategy):
         self.start_vol_b = b_exchange_volume
         self.start_equity_b = b_exchange_equity
         # 订阅价格更新
-        self.monitor.subscribe(self._on_price_update)
-        
         self.is_running = True
+        self.monitor.subscribe(self._on_price_snapshot)
         logger.info(f"✅ 策略已启动: {self.strategy_name}")
     
     async def stop(self):
@@ -472,7 +492,7 @@ class HedgeStrategy(BaseStrategy):
         
         self.is_running = False
         # 取消订阅价格更新
-        self.monitor.unsubscribe(self._on_price_update)
+        self.monitor.unsubscribe(self._on_price_snapshot)
         await self.process_diagnostics.stop()
         
         # 停止价格监控
@@ -481,8 +501,178 @@ class HedgeStrategy(BaseStrategy):
             await self.risk_control_service.stop()
         if self.executor is not None:
             await self.executor.close()
+        await self._stop_background_tasks()
         
         logger.info(f"✅ 策略已停止: {self.strategy_name}")
+
+    def _start_background_tasks(self) -> None:
+        """启动低频后台任务，避免占用价格热路径。"""
+        if self._yaml_reload_task is None or self._yaml_reload_task.done():
+            self._yaml_reload_task = asyncio.create_task(
+                self._yaml_reload_loop(),
+                name=f"yaml-reload-{self.symbol}",
+            )
+
+        if self._orderbook_writer_task is None or self._orderbook_writer_task.done():
+            self._orderbook_writer_task = asyncio.create_task(
+                self._orderbook_writer_loop(),
+                name=f"orderbook-writer-{self.symbol}",
+            )
+
+        if self._price_processing_task is None or self._price_processing_task.done():
+            self._price_processing_task = asyncio.create_task(
+                self._price_update_consumer_loop(),
+                name=f"price-update-consumer-{self.symbol}",
+            )
+
+    async def _stop_background_tasks(self) -> None:
+        """停止后台任务；写盘任务优先冲刷队列。"""
+        if self._price_processing_task is not None:
+            self._price_processing_task.cancel()
+            try:
+                await self._price_processing_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._price_processing_task = None
+        self._price_update_event.clear()
+        self._latest_price_snapshot = None
+        self._latest_price_snapshot_received_at = 0.0
+
+        if self._yaml_reload_task is not None:
+            self._yaml_reload_task.cancel()
+            try:
+                await self._yaml_reload_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._yaml_reload_task = None
+
+        if self._orderbook_writer_task is not None:
+            await self._orderbook_write_queue.put(None)
+            try:
+                await self._orderbook_writer_task
+            finally:
+                self._orderbook_writer_task = None
+
+    async def _on_price_snapshot(self, prices: PriceSnapshot) -> None:
+        """轻量刷新最新价格快照，避免在行情回调里执行完整策略逻辑。"""
+        self._latest_price_snapshot = prices
+        self._latest_price_snapshot_received_at = time.time()
+        self._latest_price_version += 1
+        self._price_pipeline_stats['snapshots_received'] += 1
+        self._price_update_event.set()
+
+    async def _price_update_consumer_loop(self) -> None:
+        """串行消费最新价格快照，只处理最新状态。"""
+        last_processed_version = 0
+        try:
+            while True:
+                await self._price_update_event.wait()
+
+                while True:
+                    snapshot = self._latest_price_snapshot
+                    snapshot_received_at = self._latest_price_snapshot_received_at
+                    version = self._latest_price_version
+                    self._price_update_event.clear()
+
+                    if snapshot is None or version == last_processed_version:
+                        break
+
+                    overwritten_count = max(0, version - last_processed_version - 1)
+                    if overwritten_count > 0:
+                        self._price_pipeline_stats['snapshots_overwritten'] += overwritten_count
+
+                    process_start = time.time()
+                    queue_wait_ms = max(0.0, (process_start - snapshot_received_at) * 1000)
+                    self._price_pipeline_stats['snapshots_processed'] += 1
+                    self._price_pipeline_stats['snapshot_queue_wait_total_ms'] += queue_wait_ms
+                    self._price_pipeline_stats['snapshot_queue_wait_max_ms'] = max(
+                        self._price_pipeline_stats['snapshot_queue_wait_max_ms'],
+                        queue_wait_ms,
+                    )
+
+                    await self._on_price_update(snapshot)
+
+                    process_cost_ms = max(0.0, (time.time() - process_start) * 1000)
+                    self._price_pipeline_stats['process_total_ms'] += process_cost_ms
+                    self._price_pipeline_stats['process_max_ms'] = max(
+                        self._price_pipeline_stats['process_max_ms'],
+                        process_cost_ms,
+                    )
+                    last_processed_version = version
+                    self._log_price_pipeline_stats_if_needed()
+
+                    if not self._price_update_event.is_set():
+                        break
+        except asyncio.CancelledError:
+            raise
+
+    def _log_price_pipeline_stats_if_needed(self) -> None:
+        """按固定频率输出价格链路延迟摘要。"""
+        now = time.time()
+        if now - self._last_price_pipeline_log_time < self._price_pipeline_log_interval:
+            return
+
+        processed = int(self._price_pipeline_stats['snapshots_processed'])
+        received = int(self._price_pipeline_stats['snapshots_received'])
+        overwritten = int(self._price_pipeline_stats['snapshots_overwritten'])
+        avg_queue_wait_ms = (
+            self._price_pipeline_stats['snapshot_queue_wait_total_ms'] / processed
+            if processed > 0 else 0.0
+        )
+        avg_process_ms = (
+            self._price_pipeline_stats['process_total_ms'] / processed
+            if processed > 0 else 0.0
+        )
+
+        logger.info(
+            f"⏱️ [{self.symbol}] 价格链路摘要:\n"
+            f"   snapshots: received={received}, processed={processed}, overwritten={overwritten}\n"
+            f"   enqueue->process: avg={avg_queue_wait_ms:.2f} ms, max={self._price_pipeline_stats['snapshot_queue_wait_max_ms']:.2f} ms\n"
+            f"   process_cost: avg={avg_process_ms:.2f} ms, max={self._price_pipeline_stats['process_max_ms']:.2f} ms"
+        )
+
+        self._last_price_pipeline_log_time = now
+        self._price_pipeline_stats = {
+            'snapshots_received': 0,
+            'snapshots_processed': 0,
+            'snapshots_overwritten': 0,
+            'snapshot_queue_wait_total_ms': 0.0,
+            'snapshot_queue_wait_max_ms': 0.0,
+            'process_total_ms': 0.0,
+            'process_max_ms': 0.0,
+        }
+
+    async def _yaml_reload_loop(self) -> None:
+        """周期检查本地覆盖配置，避免每次价格更新都触发文件 IO。"""
+        try:
+            while True:
+                await asyncio.sleep(self._yaml_check_interval)
+                self.check_yaml_config_updates()
+        except asyncio.CancelledError:
+            raise
+
+    async def _orderbook_writer_loop(self) -> None:
+        """后台写入订单簿采样，避免热路径直接落盘。"""
+        while True:
+            row = await self._orderbook_write_queue.get()
+            try:
+                if row is None:
+                    return
+
+                if self._orderbook_collection_path is None:
+                    self._init_orderbook_collection_log()
+                if self._orderbook_collection_path is None:
+                    continue
+
+                with self._orderbook_collection_path.open('a', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(row)
+            except Exception as exc:
+                logger.exception(f"⚠️ [{self.symbol}] 订单簿采样后台写盘失败: {exc}")
+            finally:
+                self._orderbook_write_queue.task_done()
 
     async def get_equity_and_volume(self):
         """获取交易所的权益和交易量"""
@@ -550,7 +740,7 @@ class HedgeStrategy(BaseStrategy):
         signal_delay_ms_b: float,
         is_stale: bool,
     ) -> None:
-        """按固定频率记录订单簿快照。"""
+        """按固定频率投递订单簿快照，由后台任务异步写盘。"""
         if self._orderbook_collection_path is None:
             self._init_orderbook_collection_log()
         if self._orderbook_collection_path is None:
@@ -570,42 +760,49 @@ class HedgeStrategy(BaseStrategy):
         )
         orderbook_b = getattr(self.monitor, 'orderbook_b', None) or {}
         fetch_duration = orderbook_b.get('fetch_duration')
+        row = [
+            f"{now:.6f}",
+            datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+            self.pair_id or '',
+            self.symbol,
+            self.exchange_a.exchange_name,
+            self.exchange_b.exchange_name,
+            f"{prices.exchange_a_bid}",
+            f"{prices.exchange_a_ask}",
+            f"{prices.exchange_a_mark}" if prices.exchange_a_mark is not None else "",
+            f"{prices.exchange_a_bid_size}" if prices.exchange_a_bid_size is not None else "",
+            f"{prices.exchange_a_ask_size}" if prices.exchange_a_ask_size is not None else "",
+            f"{self._normalize_timestamp(prices.exchange_a_timestamp):.6f}",
+            prices.exchange_a_quote_id or '',
+            f"{prices.exchange_b_bid}",
+            f"{prices.exchange_b_ask}",
+            f"{prices.exchange_b_mark}" if prices.exchange_b_mark is not None else "",
+            f"{prices.exchange_b_bid_size}" if prices.exchange_b_bid_size is not None else "",
+            f"{prices.exchange_b_ask_size}" if prices.exchange_b_ask_size is not None else "",
+            f"{self._normalize_timestamp(prices.exchange_b_timestamp):.6f}",
+            prices.exchange_b_quote_id or '',
+            f"{signal_delay_ms_a:.3f}",
+            f"{signal_delay_ms_b:.3f}",
+            "1" if is_stale else "0",
+            f"{prices.calculate_spread_pct():.6f}",
+            f"{prices.calculate_reverse_spread_pct():.6f}",
+            f"{avg_local_spread_pct:.6f}",
+            f"{total_local_spread_pct:.6f}",
+            f"{baseline_adjustment_pct:.6f}",
+            getattr(self.monitor, 'orderbook_a_updates', 0),
+            getattr(self.monitor, 'orderbook_b_updates', 0),
+            f"{float(fetch_duration):.3f}" if fetch_duration is not None else "",
+        ]
 
-        with self._orderbook_collection_path.open('a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                f"{now:.6f}",
-                datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-                self.pair_id or '',
-                self.symbol,
-                self.exchange_a.exchange_name,
-                self.exchange_b.exchange_name,
-                f"{prices.exchange_a_bid}",
-                f"{prices.exchange_a_ask}",
-                f"{prices.exchange_a_mark}" if prices.exchange_a_mark is not None else "",
-                f"{prices.exchange_a_bid_size}" if prices.exchange_a_bid_size is not None else "",
-                f"{prices.exchange_a_ask_size}" if prices.exchange_a_ask_size is not None else "",
-                f"{self._normalize_timestamp(prices.exchange_a_timestamp):.6f}",
-                prices.exchange_a_quote_id or '',
-                f"{prices.exchange_b_bid}",
-                f"{prices.exchange_b_ask}",
-                f"{prices.exchange_b_mark}" if prices.exchange_b_mark is not None else "",
-                f"{prices.exchange_b_bid_size}" if prices.exchange_b_bid_size is not None else "",
-                f"{prices.exchange_b_ask_size}" if prices.exchange_b_ask_size is not None else "",
-                f"{self._normalize_timestamp(prices.exchange_b_timestamp):.6f}",
-                prices.exchange_b_quote_id or '',
-                f"{signal_delay_ms_a:.3f}",
-                f"{signal_delay_ms_b:.3f}",
-                "1" if is_stale else "0",
-                f"{prices.calculate_spread_pct():.6f}",
-                f"{prices.calculate_reverse_spread_pct():.6f}",
-                f"{avg_local_spread_pct:.6f}",
-                f"{total_local_spread_pct:.6f}",
-                f"{baseline_adjustment_pct:.6f}",
-                getattr(self.monitor, 'orderbook_a_updates', 0),
-                getattr(self.monitor, 'orderbook_b_updates', 0),
-                f"{float(fetch_duration):.3f}" if fetch_duration is not None else "",
-            ])
+        try:
+            self._orderbook_write_queue.put_nowait(row)
+        except asyncio.QueueFull:
+            now_log = time.time()
+            if now_log - self._last_orderbook_queue_drop_log_time >= 30.0:
+                self._last_orderbook_queue_drop_log_time = now_log
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 订单簿采样写盘队列已满，丢弃部分样本以保护热路径"
+                )
 
     async def _on_price_update(self, prices: PriceSnapshot):
         """
@@ -983,7 +1180,6 @@ class HedgeStrategy(BaseStrategy):
                         "当前价格下 CLOSE 条件不成立" if self.signal_mode != 'stat_arb' else "统计套利回归平仓条件未满足",
                     )
             
-            self.check_yaml_config_updates()
             if self.end_time_stamp:
                 current_timestamp = time.time()
                 if current_timestamp >= self.end_time_stamp:

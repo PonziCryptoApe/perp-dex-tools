@@ -1,6 +1,7 @@
 """Lighter 交易所适配器"""
 
 import asyncio
+import heapq
 import logging
 import json
 import os
@@ -790,6 +791,7 @@ class LighterAdapter(ExchangeAdapter):
     async def _handle_lighter_snapshot(self, data: dict):
         """处理 Lighter 快照消息"""
         try:
+            notification_payload = None
             async with self.lighter_order_book_lock:
                 # ✅ 清空订单簿
                 self.lighter_order_book = {"bids": {}, "asks": {}}
@@ -845,8 +847,11 @@ class LighterAdapter(ExchangeAdapter):
                 if offset is not None:
                     logger.info(f"📌 Lighter 初始订单簿 offset: {offset}")
                 
-                # 通知回调
-                await self._notify_orderbook_update_if_changed()
+                # 仅在锁内准备通知内容，真正回调放到锁外执行
+                notification_payload = self._prepare_orderbook_notification_if_changed()
+
+            if notification_payload is not None:
+                await self._emit_orderbook_notification(notification_payload)
         
         except Exception as e:
             logger.exception(f"❌ 处理 Lighter 快照失败: {e}")
@@ -858,6 +863,7 @@ class LighterAdapter(ExchangeAdapter):
         
         try:
             request_snapshot = False
+            notification_payload = None
             async with self.lighter_order_book_lock:
                 # ✅ 数据在 order_book 字段内
                 order_book = data.get("order_book", {})
@@ -901,11 +907,13 @@ class LighterAdapter(ExchangeAdapter):
                     if not self._validate_order_book_integrity():
                         request_snapshot = True
                     else:
-                        # 通知回调（仅在订单簿有变化时）
-                        await self._notify_orderbook_update_if_changed()
+                        # 仅在锁内准备通知内容，真正回调放到锁外执行
+                        notification_payload = self._prepare_orderbook_notification_if_changed()
 
             if request_snapshot:
                 await self._request_fresh_snapshot()
+            elif notification_payload is not None:
+                await self._emit_orderbook_notification(notification_payload)
         
         except Exception as e:
             logger.exception(f"❌ 处理 Lighter 更新失败: {e}")
@@ -922,15 +930,15 @@ class LighterAdapter(ExchangeAdapter):
         else:
             self.lighter_best_ask = None
     
-    async def _notify_orderbook_update(self):
-        """通知订单簿更新（不检查内容变化的内部版本）"""
-        if self._orderbook_callback and not self.lighter_best_bid or not self.lighter_best_ask:
+    def _build_orderbook_notification_payload(self) -> Optional[dict]:
+        """基于当前本地订单簿状态构造一次上游通知 payload。"""
+        if self._orderbook_callback and (not self.lighter_best_bid or not self.lighter_best_ask):
             logger.warning(
                 f"⚠️ 订单簿数据不完整: {self.symbol}\n"
                 f"   Best Bid: {self.lighter_best_bid}\n"
                 f"   Best Ask: {self.lighter_best_ask}"
             )
-            return
+            return None
         
         # 格式化为标准订单簿格式
         bid_size = float(self.lighter_order_book["bids"].get(self.lighter_best_bid, 0))
@@ -941,7 +949,7 @@ class LighterAdapter(ExchangeAdapter):
         processing_delay_ms = 0.0
         if orderbook_message_ts > 0:
             processing_delay_ms = max(0.0, (ts - orderbook_message_ts) * 1000)
-        self._orderbook = {
+        orderbook_payload = {
             'bids': [[float(self.lighter_best_bid), bid_size]],
             'asks': [[float(self.lighter_best_ask), ask_size]],
             'timestamp': ts,
@@ -950,29 +958,25 @@ class LighterAdapter(ExchangeAdapter):
             'poll_duration_ms': 0,  # WebSocket 无延迟
             'mark_price': self._lighter_market_stats_parsed.get('mark_price')
         }
-        self.client.order_book = {
-                    'bids': dict(self.lighter_order_book['bids']),
-                    'asks': dict(self.lighter_order_book['asks'])
-                }
-        self.client.best_bid = self.lighter_best_bid
-        self.client.best_ask = self.lighter_best_ask
-        # logger.debug("✅ Order book synced to Client")
-        # logger.debug(
-        #     f"📗 Lighter 订单簿更新:\n"
-        #     f"   Bid: ${self.lighter_best_bid} x {bid_size}\n"
-        #     f"   Ask: ${self.lighter_best_ask} x {ask_size}"
-        #     f"   时间戳 {ts:.3f}"
-        # )
-        
-        # 触发回调
-        if self._orderbook_callback:
-            await self._orderbook_callback(self._orderbook)
-            self.lighter_last_notify_ts = ts
+        return {
+            'orderbook': orderbook_payload,
+            'client_order_book': {
+                'bids': (
+                    {self.lighter_best_bid: self.lighter_order_book['bids'].get(self.lighter_best_bid, Decimal('0'))}
+                    if self.lighter_best_bid is not None else {}
+                ),
+                'asks': (
+                    {self.lighter_best_ask: self.lighter_order_book['asks'].get(self.lighter_best_ask, Decimal('0'))}
+                    if self.lighter_best_ask is not None else {}
+                )
+            },
+            'best_bid': self.lighter_best_bid,
+            'best_ask': self.lighter_best_ask,
+            'notify_ts': ts,
+        }
 
-    async def _notify_orderbook_update_if_changed(self):
-        """
-        仅当订单簿内容发生变化时才触发回调，并记录真正的事件时间
-        """
+    def _prepare_orderbook_notification_if_changed(self) -> Optional[dict]:
+        """仅当订单簿内容发生变化或心跳到期时准备一次上游通知 payload。"""
         try:
             fingerprint = self._make_orderbook_fingerprint()
             # 取消息自带时间（若有），否则用当前时间
@@ -987,34 +991,51 @@ class LighterAdapter(ExchangeAdapter):
                     self.lighter_last_notify_ts == 0.0
                     or (self.lighter_last_update_ts - self.lighter_last_notify_ts) >= heartbeat_gap
                 ):
-                    await self._notify_orderbook_update()
-                return
+                    return self._build_orderbook_notification_payload()
+                return None
 
             self._order_book_fingerprint = fingerprint
-            await self._notify_orderbook_update()
+            return self._build_orderbook_notification_payload()
         except Exception as e:
             logger.exception(f"❌ 通知订单簿更新失败: {e}")
+            return None
+
+    async def _emit_orderbook_notification(self, notification_payload: dict) -> None:
+        """在锁外同步 client 缓存并触发上游回调。"""
+        try:
+            self._orderbook = notification_payload['orderbook']
+            self.client.order_book = notification_payload['client_order_book']
+            self.client.best_bid = notification_payload['best_bid']
+            self.client.best_ask = notification_payload['best_ask']
+
+            if self._orderbook_callback:
+                await self._orderbook_callback(self._orderbook)
+
+            self.lighter_last_notify_ts = float(notification_payload['notify_ts'])
+        except Exception as e:
+            logger.exception(f"❌ 锁外通知订单簿更新失败: {e}")
 
     def _make_orderbook_fingerprint(self) -> int:
         """
         生成订单簿内容指纹，用于检测内容是否变化。
-        仅比较前 N 档摘要，降低整本订单簿排序带来的长期运行开销。
+        仅比较前 N 档摘要；使用 nlargest/nsmallest 避免每次全量排序整本订单簿。
         """
         top_levels = self.orderbook_fingerprint_levels
+        bids_top = heapq.nlargest(
+            top_levels,
+            self.lighter_order_book["bids"].items(),
+            key=lambda item: item[0],
+        )
+        asks_top = heapq.nsmallest(
+            top_levels,
+            self.lighter_order_book["asks"].items(),
+            key=lambda item: item[0],
+        )
         bids_tuple = tuple(
-            (str(price), str(size))
-            for price, size in sorted(
-                self.lighter_order_book["bids"].items(),
-                key=lambda item: item[0],
-                reverse=True
-            )[:top_levels]
+            (str(price), str(size)) for price, size in bids_top
         )
         asks_tuple = tuple(
-            (str(price), str(size))
-            for price, size in sorted(
-                self.lighter_order_book["asks"].items(),
-                key=lambda item: item[0]
-            )[:top_levels]
+            (str(price), str(size)) for price, size in asks_top
         )
         return hash((bids_tuple, asks_tuple))
 
