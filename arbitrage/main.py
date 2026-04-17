@@ -289,14 +289,16 @@ async def main():
     parser.add_argument('--signal-sample-size', type=int, default=None, help='分位数样本数（冷启动阈值）')
     parser.add_argument('--signal-min-edge-pct', type=float, default=None, help='分位数模式最小安全边际（%）')
     parser.add_argument('--signal-min-abs-spread-pct', type=float, default=None, help='分位数模式绝对净价差底线（%）')
-    parser.add_argument('--signal-median-edge-enabled', choices=['on', 'off'], default=None, help='双中位数超额模式总开关（默认读取配置）')
-    parser.add_argument('--signal-median-edge-baseline-adjustment', choices=['on', 'off'], default=None, help='双中位数超额模式是否启用盘口点差基线修正')
-    parser.add_argument('--signal-median-edge-baseline-ratio', type=float, default=None, help='双中位数超额模式盘口基线修正比例（默认 0.5）')
-    parser.add_argument('--signal-median-edge-medium-window-seconds', type=int, default=None, help='双中位数超额模式 30m 窗口秒数（默认 1800）')
-    parser.add_argument('--signal-median-edge-long-window-seconds', type=int, default=None, help='双中位数超额模式 60m 窗口秒数（默认 3600）')
-    parser.add_argument('--signal-median-edge-medium-min-samples', type=int, default=None, help='双中位数超额模式 30m 最小样本数（默认 120）')
-    parser.add_argument('--signal-median-edge-long-min-samples', type=int, default=None, help='双中位数超额模式 60m 最小样本数（默认 240）')
-    parser.add_argument('--signal-median-edge-min-edge-bps', type=float, default=None, help='双中位数超额模式最小超额门槛（bps，默认 2.25）')
+    parser.add_argument('--signal-median-edge-enabled', choices=['on', 'off'], default=None, help='双窗口参考线超额模式总开关（默认读取配置）')
+    parser.add_argument('--signal-median-edge-baseline-adjustment', choices=['on', 'off'], default=None, help='双窗口参考线超额模式是否启用盘口点差基线修正')
+    parser.add_argument('--signal-median-edge-baseline-ratio', type=float, default=None, help='双窗口参考线超额模式盘口基线修正比例（默认 0.5）')
+    parser.add_argument('--signal-median-edge-medium-window-seconds', type=int, default=None, help='双窗口参考线超额模式 30m 窗口秒数（默认 1800）')
+    parser.add_argument('--signal-median-edge-long-window-seconds', type=int, default=None, help='双窗口参考线超额模式 60m 窗口秒数（默认 3600）')
+    parser.add_argument('--signal-median-edge-medium-min-samples', type=int, default=None, help='双窗口参考线超额模式 30m 最小样本数（默认 120）')
+    parser.add_argument('--signal-median-edge-long-min-samples', type=int, default=None, help='双窗口参考线超额模式 60m 最小样本数（默认 240）')
+    parser.add_argument('--signal-median-edge-min-edge-bps', type=float, default=None, help='双窗口参考线超额模式最小超额门槛（bps，默认 2.25）')
+    parser.add_argument('--signal-median-edge-reference-mode', choices=['median', 'quantile'], default=None, help='双窗口参考线模式：median 或 quantile')
+    parser.add_argument('--signal-median-edge-reference-quantile', type=float, default=None, help='双窗口参考线 quantile 模式使用的分位数（如 0.8 表示 P80）')
     parser.add_argument('--signal-stat-arb-enabled', choices=['on', 'off'], default=None, help='统计套利模式总开关（默认读取配置）')
     parser.add_argument('--signal-stat-arb-baseline-adjustment', choices=['on', 'off'], default=None, help='统计套利是否启用盘口点差基线修正（默认读取配置）')
     parser.add_argument('--signal-stat-arb-baseline-ratio', type=float, default=None, help='统计套利盘口基线修正比例（默认 0.5）')
@@ -384,6 +386,8 @@ async def main():
         parser.error("--signal-median-edge-long-min-samples 必须大于 0")
     if args.signal_median_edge_min_edge_bps is not None and args.signal_median_edge_min_edge_bps < 0:
         parser.error("--signal-median-edge-min-edge-bps 不能小于 0")
+    if args.signal_median_edge_reference_quantile is not None and not (0 < args.signal_median_edge_reference_quantile < 1):
+        parser.error("--signal-median-edge-reference-quantile 必须在 0 和 1 之间")
     if args.signal_stat_arb_baseline_ratio is not None and args.signal_stat_arb_baseline_ratio < 0:
         parser.error("--signal-stat-arb-baseline-ratio 不能小于 0")
     if args.signal_stat_arb_medium_window_seconds is not None and args.signal_stat_arb_medium_window_seconds <= 0:
@@ -564,6 +568,10 @@ async def main():
         median_edge_logic['long_min_samples'] = int(args.signal_median_edge_long_min_samples)
     if args.signal_median_edge_min_edge_bps is not None:
         median_edge_logic['min_edge_bps'] = float(args.signal_median_edge_min_edge_bps)
+    if args.signal_median_edge_reference_mode is not None:
+        median_edge_logic['reference_mode'] = str(args.signal_median_edge_reference_mode).lower()
+    if args.signal_median_edge_reference_quantile is not None:
+        median_edge_logic['reference_quantile'] = float(args.signal_median_edge_reference_quantile)
     signal_logic['median_edge'] = median_edge_logic
     stat_arb_logic = signal_logic.get('stat_arb', {})
     if not isinstance(stat_arb_logic, dict):
@@ -649,6 +657,8 @@ async def main():
     median_edge_medium_min_samples = int(median_edge_logic.get('medium_min_samples', 120))
     median_edge_long_min_samples = int(median_edge_logic.get('long_min_samples', 240))
     median_edge_min_edge_bps = float(median_edge_logic.get('min_edge_bps', 2.25))
+    median_edge_reference_mode = str(median_edge_logic.get('reference_mode', 'median')).lower()
+    median_edge_reference_quantile = float(median_edge_logic.get('reference_quantile', 0.8))
     stat_arb_enabled = bool(stat_arb_logic.get('enabled', False))
     stat_arb_baseline_adjustment = bool(stat_arb_logic.get('baseline_adjustment', True))
     stat_arb_baseline_ratio = float(stat_arb_logic.get('baseline_ratio', 0.5))
@@ -710,13 +720,14 @@ async def main():
         f"  样本数:       {dt_sample_size}\n"
         f"  最大标准差系数: {dt_max_std_multiplier}\n"
         f"  最小标准差系数: {dt_min_std_multiplier}\n"
-        f"  信号逻辑:     {'分位数' if signal_mode == 'quantile' else ('双中位数超额' if signal_mode == 'median_edge' else ('统计套利' if signal_mode == 'stat_arb' else '标准差'))}\n"
+        f"  信号逻辑:     {'分位数' if signal_mode == 'quantile' else ('双窗口参考线超额' if signal_mode == 'median_edge' else ('统计套利' if signal_mode == 'stat_arb' else '标准差'))}\n"
         f"  分位数配置:   P{int(signal_quantile * 100)} | 样本{signal_sample_size} | 最小样本{signal_min_samples}\n"
-        f"  双中位数开关: {'启用' if median_edge_enabled else '禁用'}\n"
-        f"  双中位数基线修正: {'启用' if median_edge_baseline_adjustment else '禁用'} | ratio={median_edge_baseline_ratio:.3f}\n"
-        f"  双中位数窗口: 30m={median_edge_medium_window_seconds}s / 60m={median_edge_long_window_seconds}s\n"
-        f"  双中位数样本: 30m={median_edge_medium_min_samples} / 60m={median_edge_long_min_samples}\n"
-        f"  双中位数超额: {median_edge_min_edge_bps:.2f} bps\n"
+        f"  双窗口参考线开关: {'启用' if median_edge_enabled else '禁用'}\n"
+        f"  双窗口参考线基线修正: {'启用' if median_edge_baseline_adjustment else '禁用'} | ratio={median_edge_baseline_ratio:.3f}\n"
+        f"  双窗口参考线窗口: 30m={median_edge_medium_window_seconds}s / 60m={median_edge_long_window_seconds}s\n"
+        f"  双窗口参考线样本: 30m={median_edge_medium_min_samples} / 60m={median_edge_long_min_samples}\n"
+        f"  双窗口参考线模式: {median_edge_reference_mode} | q={median_edge_reference_quantile:.2f}\n"
+        f"  双窗口参考线超额: {median_edge_min_edge_bps:.2f} bps\n"
         f"  统计套利开关: {'启用' if stat_arb_enabled else '禁用'}\n"
         f"  统计套利基线修正: {'启用' if stat_arb_baseline_adjustment else '禁用'} | ratio={stat_arb_baseline_ratio:.3f}\n"
         f"  统计套利窗口:  30m={stat_arb_medium_window_seconds}s / 60m={stat_arb_long_window_seconds}s\n"
@@ -758,7 +769,7 @@ async def main():
     )
 
     if signal_mode == 'median_edge' and not median_edge_enabled:
-        logger.error("❌ 当前 signal_mode=median_edge，但 signal_logic.median_edge.enabled=false，请先打开双中位数超额开关")
+        logger.error("❌ 当前 signal_mode=median_edge，但 signal_logic.median_edge.enabled=false，请先打开双窗口参考线超额开关")
         return
     if signal_mode == 'stat_arb' and not stat_arb_enabled:
         logger.error("❌ 当前 signal_mode=stat_arb，但 signal_logic.stat_arb.enabled=false，请先打开统计套利开关")

@@ -266,6 +266,8 @@ class HedgeStrategy(BaseStrategy):
         self.median_edge_medium_min_samples = int(self.median_edge_logic.get('medium_min_samples', 120))
         self.median_edge_long_min_samples = int(self.median_edge_logic.get('long_min_samples', 240))
         self.median_edge_min_edge_bps = float(self.median_edge_logic.get('min_edge_bps', 2.25))
+        self.median_edge_reference_mode = str(self.median_edge_logic.get('reference_mode', 'median')).lower()
+        self.median_edge_reference_quantile = float(self.median_edge_logic.get('reference_quantile', 0.8))
         self.median_edge_manager = None
         self._median_edge_context = None
         self.stat_arb_logic = self.signal_logic.get('stat_arb', {})
@@ -332,6 +334,8 @@ class HedgeStrategy(BaseStrategy):
                 medium_min_samples=self.median_edge_medium_min_samples,
                 long_min_samples=self.median_edge_long_min_samples,
                 min_edge_bps=self.median_edge_min_edge_bps,
+                reference_mode=self.median_edge_reference_mode,
+                reference_quantile=self.median_edge_reference_quantile,
             )
 
         if self.signal_mode == 'stat_arb' and self.stat_arb_enabled:
@@ -382,15 +386,16 @@ class HedgeStrategy(BaseStrategy):
             f"   Monitor Only: {monitor_only}\n"
             f"   累计模式: {'✅ 启用' if accumulate_mode else '❌ 禁用'}\n"
             f"   风控模块: {'✅ 启用' if self.risk_control_enabled else '❌ 禁用'}\n"
-            f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else ('双中位数超额' if self.signal_mode == 'median_edge' else ('统计套利' if self.signal_mode == 'stat_arb' else '标准差'))}\n"
+            f"   信号逻辑: {'分位数' if self.signal_mode == 'quantile' else ('双窗口参考线超额' if self.signal_mode == 'median_edge' else ('统计套利' if self.signal_mode == 'stat_arb' else '标准差'))}\n"
             f"   分位数配置: P{int(self.signal_quantile * 100)} | 样本{self.signal_sample_size} | 最小样本{self.signal_min_samples}\n"
             f"   分位数最小边际: {self.signal_min_edge_pct:.4f}%\n"
             f"   分位数绝对底线: {self.signal_min_abs_spread_pct:.4f}%\n"
-            f"   双中位数开关: {'✅ 启用' if self.median_edge_enabled else '❌ 禁用'}\n"
-            f"   双中位数基线修正: {'✅ 启用' if self.median_edge_baseline_adjustment else '❌ 禁用'} | ratio={self.median_edge_baseline_ratio:.3f}\n"
-            f"   双中位数窗口: 30m={self.median_edge_medium_window_seconds}s | 60m={self.median_edge_long_window_seconds}s\n"
-            f"   双中位数样本: 30m={self.median_edge_medium_min_samples} | 60m={self.median_edge_long_min_samples}\n"
-            f"   双中位数超额门槛: {self.median_edge_min_edge_bps:.2f} bps\n"
+            f"   双窗口参考线开关: {'✅ 启用' if self.median_edge_enabled else '❌ 禁用'}\n"
+            f"   双窗口参考线基线修正: {'✅ 启用' if self.median_edge_baseline_adjustment else '❌ 禁用'} | ratio={self.median_edge_baseline_ratio:.3f}\n"
+            f"   双窗口参考线窗口: 30m={self.median_edge_medium_window_seconds}s | 60m={self.median_edge_long_window_seconds}s\n"
+            f"   双窗口参考线样本: 30m={self.median_edge_medium_min_samples} | 60m={self.median_edge_long_min_samples}\n"
+            f"   双窗口参考线模式: {self.median_edge_reference_mode} | q={self.median_edge_reference_quantile:.2f}\n"
+            f"   双窗口参考线超额门槛: {self.median_edge_min_edge_bps:.2f} bps\n"
             f"   统计套利开关: {'✅ 启用' if self.stat_arb_enabled else '❌ 禁用'}\n"
             f"   统计套利窗口: 30m={self.stat_arb_medium_window_seconds}s | 60m={self.stat_arb_long_window_seconds}s\n"
             f"   统计套利模式: score_mode={self.stat_arb_score_mode} | breakout_q={self.stat_arb_breakout_quantile:.2f} | exit_score={self.stat_arb_exit_score_source}\n"
@@ -732,7 +737,7 @@ class HedgeStrategy(BaseStrategy):
                         close_medium_span = close_stats.medium_span_seconds if close_stats else 0.0
                         close_long_span = close_stats.long_span_seconds if close_stats else 0.0
                         self._log_threshold_skip_reason(
-                            "双中位数窗口尚未就绪",
+                            "双窗口参考线尚未就绪",
                             detail=(
                                 f"总样本={total_samples}, "
                                 f"OPEN(30m/60m)={open_medium_samples}/{open_long_samples}, "
@@ -741,7 +746,7 @@ class HedgeStrategy(BaseStrategy):
                                 f"CLOSE跨度={close_medium_span:.1f}/{close_long_span:.1f}s"
                             ),
                         )
-                        await self._clear_all_signal_states("双中位数窗口样本尚未就绪")
+                        await self._clear_all_signal_states("双窗口参考线样本尚未就绪")
                         return
                 elif self.signal_mode == 'stat_arb' and self.stat_arb_manager:
                     self._update_stat_arb_context(
@@ -1051,7 +1056,7 @@ class HedgeStrategy(BaseStrategy):
         if self.signal_mode == 'quantile':
             prefix = "未触发分位数信号"
         elif self.signal_mode == 'median_edge':
-            prefix = "未触发双中位数超额信号"
+            prefix = "未触发双窗口参考线超额信号"
         elif self.signal_mode == 'stat_arb':
             prefix = "未触发统计套利信号"
         message = f"🧭 [{self.symbol}] {prefix}: {reason}"
@@ -1242,7 +1247,7 @@ class HedgeStrategy(BaseStrategy):
         reverse_spread_pct: Decimal,
         prices: PriceSnapshot,
     ) -> None:
-        """刷新双中位数超额上下文。"""
+        """刷新双窗口参考线超额上下文。"""
         if not self.median_edge_manager:
             self._median_edge_context = None
             return
@@ -1256,7 +1261,7 @@ class HedgeStrategy(BaseStrategy):
         self._median_edge_context = self.median_edge_manager.get_signal_context()
 
     def _get_median_edge_direction_stats(self, signal_type: SignalType):
-        """获取某个方向的双中位数超额快照。"""
+        """获取某个方向的双窗口参考线超额快照。"""
         if not self._median_edge_context:
             return None
         if signal_type == SignalType.OPEN:
@@ -1264,20 +1269,20 @@ class HedgeStrategy(BaseStrategy):
         return self._median_edge_context.get('close')
 
     def _is_median_edge_selected(self, signal_type: SignalType) -> bool:
-        """当前双中位数上下文是否选择了该方向。"""
+        """当前双窗口参考线上下文是否选择了该方向。"""
         if not self._median_edge_context:
             return False
         return self._median_edge_context.get('selected_signal_type') == signal_type
 
     def _format_median_edge_extra_info(self, signal_type: SignalType) -> str:
-        """构建双中位数超额信号附加日志。"""
+        """构建双窗口参考线超额信号附加日志。"""
         direction_stats = self._get_median_edge_direction_stats(signal_type)
         if direction_stats is None:
             return ""
         return (
             f"   调整后价差: {direction_stats.current_adjusted_pct:.4f}%\n"
             f"   基线修正值: {direction_stats.baseline_pct:.4f}%\n"
-            f"   30m/60m 中位数: {direction_stats.medium_median_pct:.4f}% / {direction_stats.long_median_pct:.4f}%\n"
+            f"   30m/60m 参考线({direction_stats.reference_label}): {direction_stats.medium_reference_pct:.4f}% / {direction_stats.long_reference_pct:.4f}%\n"
             f"   30m/60m 超额: {direction_stats.medium_edge_pct:.4f}% / {direction_stats.long_edge_pct:.4f}%\n"
             f"   生效门槛: {direction_stats.threshold_pct:.4f}%\n"
             f"   选择原因: {self._median_edge_context.get('selection_reason', '--')}\n"
@@ -2039,7 +2044,7 @@ class HedgeStrategy(BaseStrategy):
                 return None
             compare_spread_pct = Decimal(str(median_edge_stats.current_adjusted_pct))
             threshold_pct = Decimal(str(median_edge_stats.threshold_pct))
-            threshold_label = "双中位数+边际"
+            threshold_label = "双窗口参考线+边际"
             spread_label = "调整后价差"
             extra_spread_info = self._format_median_edge_extra_info(SignalType.OPEN)
         elif self.signal_mode == 'stat_arb' and self.stat_arb_manager:
@@ -2264,7 +2269,7 @@ class HedgeStrategy(BaseStrategy):
                 return None
             compare_spread_pct = Decimal(str(median_edge_stats.current_adjusted_pct))
             threshold_pct = Decimal(str(median_edge_stats.threshold_pct))
-            threshold_label = "双中位数+边际"
+            threshold_label = "双窗口参考线+边际"
             spread_label = "调整后价差"
             extra_spread_info = self._format_median_edge_extra_info(SignalType.CLOSE)
         elif self.signal_mode == 'stat_arb' and self.stat_arb_manager:
@@ -2617,6 +2622,24 @@ class HedgeStrategy(BaseStrategy):
                     if self.median_edge_manager is not None:
                         self.median_edge_manager.min_edge_bps = float(self.median_edge_min_edge_bps)
                         self.median_edge_manager.min_edge_pct = float(self.median_edge_min_edge_bps) / 100.0
+                if 'reference_mode' in median_edge:
+                    update_attr(
+                        'median_edge_reference_mode',
+                        median_edge['reference_mode'],
+                        lambda value: str(value).lower(),
+                        label='signal_logic.median_edge.reference_mode',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.reference_mode = str(self.median_edge_reference_mode).lower()
+                if 'reference_quantile' in median_edge:
+                    update_attr(
+                        'median_edge_reference_quantile',
+                        median_edge['reference_quantile'],
+                        float,
+                        label='signal_logic.median_edge.reference_quantile',
+                    )
+                    if self.median_edge_manager is not None:
+                        self.median_edge_manager.reference_quantile = float(self.median_edge_reference_quantile)
 
             stat_arb = signal_logic.get('stat_arb', {})
             if isinstance(stat_arb, dict):
