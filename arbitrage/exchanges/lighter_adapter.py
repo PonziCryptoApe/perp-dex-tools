@@ -929,6 +929,14 @@ class LighterAdapter(ExchangeAdapter):
             self.lighter_best_ask = min(self.lighter_order_book["asks"].keys())
         else:
             self.lighter_best_ask = None
+
+    def get_cached_best_bid_ask(self) -> tuple[Optional[Decimal], Optional[Decimal], float]:
+        """返回本地 WS 缓存的一档价和最近更新时间，不触发 REST。"""
+        return (
+            self.lighter_best_bid,
+            self.lighter_best_ask,
+            float(self.lighter_last_update_ts or 0.0),
+        )
     
     def _build_orderbook_notification_payload(self) -> Optional[dict]:
         """基于当前本地订单簿状态构造一次上游通知 payload。"""

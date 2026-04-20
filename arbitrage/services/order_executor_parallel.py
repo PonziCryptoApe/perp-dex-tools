@@ -103,6 +103,115 @@ class OrderExecutor:
         
         return normalized
 
+    @staticmethod
+    def _to_decimal(value) -> Optional[Decimal]:
+        """将输入安全转换为 Decimal。"""
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_lighter_exchange(exchange: ExchangeAdapter) -> bool:
+        """判断是否为 Lighter 适配器。"""
+        return str(getattr(exchange, 'exchange_name', '')).lower() == 'lighter'
+
+    def _get_cached_best_bid_ask(self, exchange: ExchangeAdapter) -> tuple[Optional[Decimal], Optional[Decimal], float]:
+        """仅读取本地缓存的一档价，不触发 REST。"""
+        getter = getattr(exchange, 'get_cached_best_bid_ask', None)
+        if callable(getter):
+            try:
+                best_bid, best_ask, book_ts = getter()
+                return self._to_decimal(best_bid), self._to_decimal(best_ask), float(book_ts or 0.0)
+            except Exception as exc:
+                logger.warning(f"⚠️ 读取 {exchange.exchange_name} 本地缓存一档价失败: {exc}")
+
+        best_bid = self._to_decimal(getattr(exchange, 'lighter_best_bid', None))
+        best_ask = self._to_decimal(getattr(exchange, 'lighter_best_ask', None))
+        book_ts = float(getattr(exchange, 'lighter_last_update_ts', 0.0) or 0.0)
+        return best_bid, best_ask, book_ts
+
+    def _precheck_lighter_bbo(
+        self,
+        exchange: ExchangeAdapter,
+        side: str,
+        signal_price: Decimal,
+        order_type: str,
+    ) -> tuple[bool, Optional[str]]:
+        """Lighter 下单前仅用本地缓存一档价做复核，不现场拉 REST。"""
+        if not self._is_lighter_exchange(exchange):
+            return True, None
+
+        signal_price_decimal = self._to_decimal(signal_price)
+        if signal_price_decimal is None or signal_price_decimal <= 0:
+            error = f"{exchange.exchange_name} 复核失败：无效信号价 {signal_price}"
+            logger.warning(f"⚠️ {error}")
+            return False, error
+
+        best_bid, best_ask, book_ts = self._get_cached_best_bid_ask(exchange)
+        side_upper = side.upper()
+        if side_upper == 'BUY':
+            latest_price = best_ask
+            book_side = 'ask'
+            adverse_move_ratio = (
+                max(Decimal('0'), (latest_price - signal_price_decimal) / signal_price_decimal)
+                if latest_price is not None else None
+            )
+        elif side_upper == 'SELL':
+            latest_price = best_bid
+            book_side = 'bid'
+            adverse_move_ratio = (
+                max(Decimal('0'), (signal_price_decimal - latest_price) / signal_price_decimal)
+                if latest_price is not None else None
+            )
+        else:
+            error = f"{exchange.exchange_name} 复核失败：未知方向 {side}"
+            logger.warning(f"⚠️ {error}")
+            return False, error
+
+        if latest_price is None:
+            error = (
+                f"{exchange.exchange_name} 本地缓存 {book_side} 缺失，"
+                f"跳过本次 {order_type}/{side_upper} 下单以避免使用陈旧报价"
+            )
+            logger.warning(f"⚠️ {error}")
+            return False, error
+
+        configured_slippage = self._to_decimal(getattr(exchange, 'slippage', None))
+        quote_age_ms = (time.time() - book_ts) * 1000 if book_ts > 0 else None
+
+        if configured_slippage is None:
+            logger.info(
+                f"💡 {exchange.exchange_name} 下单前复核通过（未配置独立滑点阈值）: "
+                f"{order_type}/{side_upper} | signal=${signal_price_decimal} | "
+                f"latest_{book_side}=${latest_price}"
+                + (f" | quote_age={quote_age_ms:.2f}ms" if quote_age_ms is not None else "")
+            )
+            return True, None
+
+        if adverse_move_ratio is not None and adverse_move_ratio > configured_slippage:
+            adverse_move_pct = adverse_move_ratio * Decimal('100')
+            limit_pct = configured_slippage * Decimal('100')
+            error = (
+                f"{exchange.exchange_name} 本地下单前复核未通过: {order_type}/{side_upper} | "
+                f"signal=${signal_price_decimal} | latest_{book_side}=${latest_price} | "
+                f"不利偏移={adverse_move_pct:.4f}% > 阈值={limit_pct:.4f}%"
+            )
+            if quote_age_ms is not None:
+                error += f" | quote_age={quote_age_ms:.2f}ms"
+            logger.warning(f"⚠️ {error}")
+            return False, error
+
+        logger.info(
+            f"💡 {exchange.exchange_name} 下单前复核通过: "
+            f"{order_type}/{side_upper} | signal=${signal_price_decimal} | "
+            f"latest_{book_side}=${latest_price}"
+            + (f" | quote_age={quote_age_ms:.2f}ms" if quote_age_ms is not None else "")
+        )
+        return True, None
+
     async def _handle_unknown_order_status(
         self,
         exchange_name: str,
@@ -750,6 +859,26 @@ class OrderExecutor:
             )
         
         try:
+            precheck_ok_a, precheck_error_a = self._precheck_lighter_bbo(
+                exchange=self.exchange_a,
+                side='sell',
+                signal_price=exchange_a_price,
+                order_type='open',
+            )
+            if not precheck_ok_a:
+                logger.warning(f"⚠️ 开仓前复核失败，跳过本次机会: {precheck_error_a}")
+                return False, None
+
+            precheck_ok_b, precheck_error_b = self._precheck_lighter_bbo(
+                exchange=self.exchange_b,
+                side='buy',
+                signal_price=exchange_b_price,
+                order_type='open',
+            )
+            if not precheck_ok_b:
+                logger.warning(f"⚠️ 开仓前复核失败，跳过本次机会: {precheck_error_b}")
+                return False, None
+
             # ✅ 1. 并行下单（首次尝试）
             logger.info(f"🚀 {action_start_name}...")
 
@@ -1186,6 +1315,26 @@ class OrderExecutor:
             )
         
         try:
+            precheck_ok_a, precheck_error_a = self._precheck_lighter_bbo(
+                exchange=self.exchange_a,
+                side='buy',
+                signal_price=exchange_a_price,
+                order_type='close',
+            )
+            if not precheck_ok_a:
+                logger.warning(f"⚠️ 平仓前复核失败，跳过本次执行: {precheck_error_a}")
+                return False, None
+
+            precheck_ok_b, precheck_error_b = self._precheck_lighter_bbo(
+                exchange=self.exchange_b,
+                side='sell',
+                signal_price=exchange_b_price,
+                order_type='close',
+            )
+            if not precheck_ok_b:
+                logger.warning(f"⚠️ 平仓前复核失败，跳过本次执行: {precheck_error_b}")
+                return False, None
+
             # ✅ 1. 并行下单（首次尝试）
             logger.info(f"🚀 {action_start_name}...")
 

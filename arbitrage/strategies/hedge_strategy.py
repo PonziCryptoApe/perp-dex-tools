@@ -50,6 +50,7 @@ class HedgeStrategy(BaseStrategy):
         trade_logger=None,
         max_signal_delay_ms_a: int = 200,
         max_signal_delay_ms_b: int = 200,
+        max_cross_exchange_skew_ms: int = 30,
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
@@ -90,6 +91,7 @@ class HedgeStrategy(BaseStrategy):
         self.signal_clearer = None
         self.max_signal_delay_ms_a = max_signal_delay_ms_a
         self.max_signal_delay_ms_b = max_signal_delay_ms_b
+        self.max_cross_exchange_skew_ms = max(0, int(max_cross_exchange_skew_ms))
         self.min_depth_quantity = min_depth_quantity
         self.direction_reverse = direction_reverse
         self.cooldown_seconds = cooldown_seconds
@@ -399,6 +401,7 @@ class HedgeStrategy(BaseStrategy):
             f"   Symbol: {symbol}\n"
             f"   Quantity: {quantity}\n"
             f"   延迟阈值(A/B): {self.max_signal_delay_ms_a}/{self.max_signal_delay_ms_b} ms\n"
+            f"   跨所时间偏斜阈值: {self.max_cross_exchange_skew_ms} ms\n"
             f"   Open Threshold: {self.open_threshold_pct}%\n"
             f"   Close Threshold: {self.close_threshold_pct}%\n"
             f"   Exchange A: {exchange_a.exchange_name}\n"
@@ -820,6 +823,7 @@ class HedgeStrategy(BaseStrategy):
         signal_trigger_time = time.time()
         signal_delay_ms_a = (signal_trigger_time - price_update_time_a) * 1000
         signal_delay_ms_b = (signal_trigger_time - price_update_time_b) * 1000
+        cross_exchange_skew_ms = abs(signal_delay_ms_a - signal_delay_ms_b)
         is_stale, stale_msg = self.monitor.is_orderbook_stale(
             max_age_a=self.max_signal_delay_ms_a / 1000,
             max_age_b=self.max_signal_delay_ms_b / 1000,
@@ -868,6 +872,23 @@ class HedgeStrategy(BaseStrategy):
                 )
                 await self._clear_all_signal_states("信号延迟超过阈值")
                 return  # 丢弃该信号
+            if self.max_cross_exchange_skew_ms > 0 and cross_exchange_skew_ms > self.max_cross_exchange_skew_ms:
+                if self.threshold_manager:
+                    self._log_threshold_skip_reason(
+                        "A/B 时间偏斜超过阈值",
+                        detail=(
+                            f"skew={cross_exchange_skew_ms:.2f}/{self.max_cross_exchange_skew_ms}ms, "
+                            f"A={signal_delay_ms_a:.2f}ms, B={signal_delay_ms_b:.2f}ms"
+                        ),
+                        level=logging.WARNING,
+                    )
+                logger.warning(
+                    f"⚠️ [{self.symbol}] A/B 时间偏斜过大: "
+                    f"skew {cross_exchange_skew_ms:.2f} ms（阈值: {self.max_cross_exchange_skew_ms} ms），"
+                    f"A {signal_delay_ms_a:.2f} ms，B {signal_delay_ms_b:.2f} ms"
+                )
+                await self._clear_all_signal_states("A/B 时间偏斜超过阈值")
+                return
             # 计算价差
             spread_pct = prices.calculate_spread_pct()
             reverse_spread_pct = prices.calculate_reverse_spread_pct()
@@ -2727,6 +2748,8 @@ class HedgeStrategy(BaseStrategy):
             update_attr('max_signal_delay_ms_a', overrides['max_signal_delay_ms_a'], int, label='max_signal_delay_ms_a')
         if 'max_signal_delay_ms_b' in overrides:
             update_attr('max_signal_delay_ms_b', overrides['max_signal_delay_ms_b'], int, label='max_signal_delay_ms_b')
+        if 'max_cross_exchange_skew_ms' in overrides:
+            update_attr('max_cross_exchange_skew_ms', overrides['max_cross_exchange_skew_ms'], int, label='max_cross_exchange_skew_ms')
         if 'direction_reverse' in overrides:
             update_attr('direction_reverse', overrides['direction_reverse'], bool, label='direction_reverse')
 
