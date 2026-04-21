@@ -51,6 +51,8 @@ class HedgeStrategy(BaseStrategy):
         max_signal_delay_ms_a: int = 200,
         max_signal_delay_ms_b: int = 200,
         max_cross_exchange_skew_ms: int = 30,
+        trigger_exchange: str = 'exchange_b',
+        trigger_dedup_window_ms: int = 20,
         min_depth_quantity: Decimal = Decimal('0.01'),
         accumulate_mode: bool = False,
         max_position: Decimal = Decimal('0.1'),
@@ -92,6 +94,8 @@ class HedgeStrategy(BaseStrategy):
         self.max_signal_delay_ms_a = max_signal_delay_ms_a
         self.max_signal_delay_ms_b = max_signal_delay_ms_b
         self.max_cross_exchange_skew_ms = max(0, int(max_cross_exchange_skew_ms))
+        self.trigger_exchange = str(trigger_exchange or 'exchange_b').strip().lower()
+        self.trigger_dedup_window_ms = max(0, int(trigger_dedup_window_ms))
         self.min_depth_quantity = min_depth_quantity
         self.direction_reverse = direction_reverse
         self.cooldown_seconds = cooldown_seconds
@@ -177,7 +181,8 @@ class HedgeStrategy(BaseStrategy):
             symbol=symbol,
             exchange_a=exchange_a,
             exchange_b=exchange_b,
-            trigger_exchange='exchange_b'
+            trigger_exchange=self.trigger_exchange,
+            trigger_dedup_window_ms=self.trigger_dedup_window_ms,
         )
         self.process_diagnostics = ProcessDiagnosticsService(
             symbol=symbol,
@@ -402,6 +407,8 @@ class HedgeStrategy(BaseStrategy):
             f"   Quantity: {quantity}\n"
             f"   延迟阈值(A/B): {self.max_signal_delay_ms_a}/{self.max_signal_delay_ms_b} ms\n"
             f"   跨所时间偏斜阈值: {self.max_cross_exchange_skew_ms} ms\n"
+            f"   触发模式: {self.trigger_exchange}\n"
+            f"   触发去重窗口: {self.trigger_dedup_window_ms} ms\n"
             f"   Open Threshold: {self.open_threshold_pct}%\n"
             f"   Close Threshold: {self.close_threshold_pct}%\n"
             f"   Exchange A: {exchange_a.exchange_name}\n"
@@ -2725,6 +2732,64 @@ class HedgeStrategy(BaseStrategy):
         def update_decimal_attr(attr_name: str, new_value, *, label: Optional[str] = None) -> None:
             update_attr(attr_name, new_value, lambda value: Decimal(str(value)), label=label)
 
+        def update_trigger_exchange(new_value, *, label: str) -> None:
+            normalized = str(new_value or 'exchange_b').strip().lower()
+            if normalized not in {'exchange_a', 'exchange_b', 'both'}:
+                logger.warning(f"⚠️ [{self.symbol}] 跳过本地覆盖字段 {label}: 不支持的值 {new_value}")
+                return
+            current_value = self.trigger_exchange
+            if normalized == current_value:
+                return
+            self.trigger_exchange = normalized
+            self.monitor.set_trigger_exchange(normalized)
+            logger.info(
+                f"🔄 [{self.symbol}] 本地覆盖更新 {label}: "
+                f"{current_value} -> {normalized}"
+            )
+
+        def update_trigger_dedup_window_ms(new_value, *, label: str) -> None:
+            try:
+                converted = max(0, int(new_value))
+            except Exception as exc:
+                logger.warning(f"⚠️ [{self.symbol}] 跳过本地覆盖字段 {label}: {exc}")
+                return
+            current_value = self.trigger_dedup_window_ms
+            if converted == current_value:
+                return
+            self.trigger_dedup_window_ms = converted
+            self.monitor.set_trigger_dedup_window_ms(converted)
+            logger.info(
+                f"🔄 [{self.symbol}] 本地覆盖更新 {label}: "
+                f"{current_value} -> {converted}"
+            )
+
+        def update_exchange_slippage(exchange_attr: str, new_value, *, label: str) -> None:
+            exchange = getattr(self, exchange_attr, None)
+            if exchange is None:
+                logger.warning(f"⚠️ [{self.symbol}] 跳过本地覆盖字段 {label}: 交易所实例不存在")
+                return
+            try:
+                converted = Decimal(str(new_value))
+            except Exception as exc:
+                logger.warning(f"⚠️ [{self.symbol}] 跳过本地覆盖字段 {label}: {exc}")
+                return
+
+            current_value = getattr(exchange, 'slippage', None)
+            if current_value is not None:
+                try:
+                    current_value = Decimal(str(current_value))
+                except Exception:
+                    current_value = getattr(exchange, 'slippage', None)
+
+            if converted == current_value:
+                return
+
+            setattr(exchange, 'slippage', converted)
+            logger.info(
+                f"🔄 [{self.symbol}] 本地覆盖更新 {label}: "
+                f"{current_value} -> {converted}"
+            )
+
         if 'max_position' in overrides:
             current_max_position = self.position_manager.max_position
             new_max_position = Decimal(str(overrides['max_position']))
@@ -2750,6 +2815,14 @@ class HedgeStrategy(BaseStrategy):
             update_attr('max_signal_delay_ms_b', overrides['max_signal_delay_ms_b'], int, label='max_signal_delay_ms_b')
         if 'max_cross_exchange_skew_ms' in overrides:
             update_attr('max_cross_exchange_skew_ms', overrides['max_cross_exchange_skew_ms'], int, label='max_cross_exchange_skew_ms')
+        if 'trigger_exchange' in overrides:
+            update_trigger_exchange(overrides['trigger_exchange'], label='trigger_exchange')
+        if 'trigger_dedup_window_ms' in overrides:
+            update_trigger_dedup_window_ms(overrides['trigger_dedup_window_ms'], label='trigger_dedup_window_ms')
+        if 'exchange_a_slippage' in overrides:
+            update_exchange_slippage('exchange_a', overrides['exchange_a_slippage'], label='exchange_a_slippage')
+        if 'exchange_b_slippage' in overrides:
+            update_exchange_slippage('exchange_b', overrides['exchange_b_slippage'], label='exchange_b_slippage')
         if 'direction_reverse' in overrides:
             update_attr('direction_reverse', overrides['direction_reverse'], bool, label='direction_reverse')
 

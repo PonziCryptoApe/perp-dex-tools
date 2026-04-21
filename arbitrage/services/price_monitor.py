@@ -29,7 +29,8 @@ class PriceMonitorService:
         exchange_a: ExchangeAdapter,
         exchange_b: ExchangeAdapter,
         min_depth_multiplier: float = 1.0,  # 最小深度倍数
-        trigger_exchange: str = 'exchange_b'  # 触发信号的交易所
+        trigger_exchange: str = 'exchange_b',  # 触发信号的交易所
+        trigger_dedup_window_ms: int = 20,  # 双边触发时的轻量去重窗口
     ):
         """
         Args:
@@ -42,7 +43,8 @@ class PriceMonitorService:
         self.exchange_a = exchange_a
         self.exchange_b = exchange_b
         self.min_depth_multiplier = min_depth_multiplier
-        self.trigger_exchange = trigger_exchange
+        self.trigger_exchange = self._normalize_trigger_exchange(trigger_exchange)
+        self.trigger_dedup_window_seconds = max(0.0, float(trigger_dedup_window_ms) / 1000.0)
         
         # ✅ 订阅者列表
         self._subscribers: List[Callable] = []
@@ -70,6 +72,8 @@ class PriceMonitorService:
         # 回调限流（避免过于频繁触发）
         self.last_callback_time = 0.0
         self.min_callback_interval = 0.1  # 最小回调间隔（秒）
+        self._last_notify_signature = None
+        self._last_notify_mono = 0.0
         
         # 状态
         self._running = False
@@ -82,7 +86,39 @@ class PriceMonitorService:
             f"   Exchange A: {exchange_a.exchange_name}\n"
             f"   Exchange B: {exchange_b.exchange_name}\n"
             f"   Min Depth Multiplier: {min_depth_multiplier}x\n"
-            f"   Trigger Exchange: {trigger_exchange}"
+            f"   Trigger Exchange: {self.trigger_exchange}\n"
+            f"   Trigger Dedup Window: {self.trigger_dedup_window_seconds * 1000:.0f} ms"
+        )
+
+    @staticmethod
+    def _normalize_trigger_exchange(trigger_exchange: str) -> str:
+        """标准化触发模式，仅允许 exchange_a / exchange_b / both。"""
+        normalized = str(trigger_exchange or 'exchange_b').strip().lower()
+        if normalized not in {'exchange_a', 'exchange_b', 'both'}:
+            raise ValueError(f"不支持的 trigger_exchange: {trigger_exchange}")
+        return normalized
+
+    def set_trigger_exchange(self, trigger_exchange: str) -> None:
+        """动态更新触发侧配置。"""
+        normalized = self._normalize_trigger_exchange(trigger_exchange)
+        if normalized == self.trigger_exchange:
+            return
+        previous = self.trigger_exchange
+        self.trigger_exchange = normalized
+        logger.info(
+            f"🔄 [{self.symbol}] 更新触发模式: {previous} -> {self.trigger_exchange}"
+        )
+
+    def set_trigger_dedup_window_ms(self, trigger_dedup_window_ms: int) -> None:
+        """动态更新双边触发去重窗口。"""
+        normalized_ms = max(0, int(trigger_dedup_window_ms))
+        normalized_seconds = float(normalized_ms) / 1000.0
+        if normalized_seconds == self.trigger_dedup_window_seconds:
+            return
+        previous_ms = self.trigger_dedup_window_seconds * 1000.0
+        self.trigger_dedup_window_seconds = normalized_seconds
+        logger.info(
+            f"🔄 [{self.symbol}] 更新触发去重窗口: {previous_ms:.0f}ms -> {normalized_ms}ms"
         )
     
     def subscribe(self, callback: Callable):
@@ -289,8 +325,8 @@ class PriceMonitorService:
                 #     f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
                 #     f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
                 # )
-        if self.trigger_exchange == 'exchange_a':
-            await self._notify_price_update()
+        if self.trigger_exchange in {'exchange_a', 'both'}:
+            await self._notify_price_update('exchange_a')
     
     async def _on_orderbook_b_update(self, orderbook: dict):
         """交易所 B 订单簿更新"""
@@ -308,10 +344,25 @@ class PriceMonitorService:
             #         f"   Bid: ${bids[0][0]:.2f} x {bids[0][1] if len(bids[0]) > 1 else 'N/A'}\n"
             #         f"   Ask: ${asks[0][0]:.2f} x {asks[0][1] if len(asks[0]) > 1 else 'N/A'}"
             #     )
-        if self.trigger_exchange == 'exchange_b':
-            await self._notify_price_update()
+        if self.trigger_exchange in {'exchange_b', 'both'}:
+            await self._notify_price_update('exchange_b')
 
-    async def _notify_price_update(self):
+    def _make_notify_signature(self, prices: PriceSnapshot) -> tuple:
+        """构造轻量状态签名，用于双边触发去重。"""
+        return (
+            str(prices.exchange_a_bid),
+            str(prices.exchange_a_ask),
+            str(getattr(prices, 'exchange_a_bid_size', '')),
+            str(getattr(prices, 'exchange_a_ask_size', '')),
+            str(prices.exchange_b_bid),
+            str(prices.exchange_b_ask),
+            str(getattr(prices, 'exchange_b_bid_size', '')),
+            str(getattr(prices, 'exchange_b_ask_size', '')),
+            str(prices.exchange_a_mark) if prices.exchange_a_mark is not None else '',
+            str(prices.exchange_b_mark) if prices.exchange_b_mark is not None else '',
+        )
+
+    async def _notify_price_update(self, trigger_source: str):
         """通知所有订阅者（带限流）"""
         if not self._subscribers:
             return
@@ -330,6 +381,21 @@ class PriceMonitorService:
         
         prices = self.get_latest_prices()
         if prices:
+            if self.trigger_exchange == 'both' and self.trigger_dedup_window_seconds > 0:
+                signature = self._make_notify_signature(prices)
+                now_mono = time.monotonic()
+                if (
+                    signature == self._last_notify_signature
+                    and (now_mono - self._last_notify_mono) <= self.trigger_dedup_window_seconds
+                ):
+                    logger.debug(
+                        f"💡 [{self.symbol}] 双边触发命中轻量去重窗口，跳过重复快照: "
+                        f"source={trigger_source}, window={self.trigger_dedup_window_seconds * 1000:.0f}ms"
+                    )
+                    return
+                self._last_notify_signature = signature
+                self._last_notify_mono = now_mono
+
             # ✅ 通知所有订阅者
             for callback in self._subscribers:
                 try:

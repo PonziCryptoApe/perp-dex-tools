@@ -344,6 +344,8 @@ async def main():
     parser.add_argument('--max-signal-delay-ms', type=int, default=200, help='交易所信号延迟总阈值（默认200ms）')
     parser.add_argument('--max-signal-delay-ms-a', type=int, default=None, help='交易所 A 信号延迟阈值（ms，不传则使用 --max-signal-delay-ms）')
     parser.add_argument('--max-signal-delay-ms-b', type=int, default=None, help='交易所 B 信号延迟阈值（ms，不传则使用 --max-signal-delay-ms）')
+    parser.add_argument('--trigger-exchange', choices=['exchange_a', 'exchange_b', 'both'], default='exchange_b', help='信号触发侧（默认 exchange_b）')
+    parser.add_argument('--trigger-dedup-window-ms', type=int, default=20, help='双边触发时的轻量去重窗口（ms，默认20）')
     parser.add_argument('--max-std-multiplier', type=float, default=4.0, help='标准差的最大系数')
     parser.add_argument('--min-std-multiplier', type=float, default=0.0, help='标准差的最小系数')
     parser.add_argument('--edge-filter', choices=['on', 'off'], default=None, help='边际二次过滤开关（默认读取配置，配置缺失时为 off）')
@@ -374,6 +376,8 @@ async def main():
         parser.error("--max-signal-delay-ms-a 必须大于 0")
     if args.max_signal_delay_ms_b is not None and args.max_signal_delay_ms_b <= 0:
         parser.error("--max-signal-delay-ms-b 必须大于 0")
+    if args.trigger_dedup_window_ms < 0:
+        parser.error("--trigger-dedup-window-ms 不能小于 0")
     if args.signal_median_edge_baseline_ratio is not None and args.signal_median_edge_baseline_ratio < 0:
         parser.error("--signal-median-edge-baseline-ratio 不能小于 0")
     if args.signal_median_edge_medium_window_seconds is not None and args.signal_median_edge_medium_window_seconds <= 0:
@@ -752,6 +756,8 @@ async def main():
         f"  Lighter 重连最大等待: {args.lighter_reconnect_max_delay}s\n"
         f"  信号延迟A阈值: {args.max_signal_delay_ms_a if args.max_signal_delay_ms_a is not None else args.max_signal_delay_ms} ms\n"
         f"  信号延迟B阈值: {args.max_signal_delay_ms_b if args.max_signal_delay_ms_b is not None else args.max_signal_delay_ms} ms\n"
+        f"  触发模式:     {args.trigger_exchange}\n"
+        f"  触发去重窗口: {args.trigger_dedup_window_ms} ms\n"
         f"  边际二次过滤: {'启用' if edge_filter_enabled else '禁用'}\n"
         f"  最小安全边际: {min_edge_bps:.2f} bps\n"
         f"  基础成本估计: {edge_base_cost_bps:.2f} bps\n"
@@ -860,6 +866,8 @@ async def main():
         trade_logger=trade_logger,  # ✅ 传递交易日志记录器
         max_signal_delay_ms_a=args.max_signal_delay_ms_a if args.max_signal_delay_ms_a is not None else args.max_signal_delay_ms,
         max_signal_delay_ms_b=args.max_signal_delay_ms_b if args.max_signal_delay_ms_b is not None else args.max_signal_delay_ms,
+        trigger_exchange=args.trigger_exchange,
+        trigger_dedup_window_ms=args.trigger_dedup_window_ms,
         min_depth_quantity=min_depth_quantity,  # ✅ 传递最小深度数量
         accumulate_mode=accumulate_mode,
         max_position=max_position,

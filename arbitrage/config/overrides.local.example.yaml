@@ -12,6 +12,8 @@ pairs:
     min_depth_quantity: 5
     max_signal_delay_ms_a: 100
     max_signal_delay_ms_b: 60
+    trigger_exchange: both
+    trigger_dedup_window_ms: 20
     open_threshold: 0.10
     close_threshold: 0.10
     direction_reverse: false
