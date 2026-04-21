@@ -1,6 +1,7 @@
 """Lighter 交易所适配器"""
 
 import asyncio
+from collections import OrderedDict
 import heapq
 import logging
 import json
@@ -76,10 +77,40 @@ class LighterAdapter(ExchangeAdapter):
         # 消息计数器
         self.message_count = 0
 
-        self._order_status_data: Dict[int, dict] = {}  # key: client_order_index
+        # 订单状态短期缓存：
+        # - IN-PROGRESS 默认保留 600 秒，给晚到终态留窗口
+        # - 终态默认保留 120 秒，覆盖“先回报、后读取”的短时乱序
+        # - 超出上限时按最老缓存淘汰，避免长期运行后字典无边界增长
+        self._order_status_data: OrderedDict[int, dict] = OrderedDict()  # key: client_order_index
         self._order_status_futures: Dict[int, asyncio.Future] = {}
         self._last_client_order_ms = 0
         self._client_order_seq = 0
+        INPROGRESS_TTL_DEFAULT = 600.0
+        TERMINAL_TTL_DEFAULT = 120.0
+        try:
+            self.order_status_in_progress_ttl_seconds = float(
+                self.config.get('order_status_in_progress_ttl_seconds', INPROGRESS_TTL_DEFAULT)
+            )
+        except (TypeError, ValueError):
+            self.order_status_in_progress_ttl_seconds = INPROGRESS_TTL_DEFAULT
+        if self.order_status_in_progress_ttl_seconds <= 0:
+            self.order_status_in_progress_ttl_seconds = INPROGRESS_TTL_DEFAULT
+        try:
+            self.order_status_terminal_ttl_seconds = float(
+                self.config.get('order_status_terminal_ttl_seconds', TERMINAL_TTL_DEFAULT)
+            )
+        except (TypeError, ValueError):
+            self.order_status_terminal_ttl_seconds = TERMINAL_TTL_DEFAULT
+        if self.order_status_terminal_ttl_seconds <= 0:
+            self.order_status_terminal_ttl_seconds = TERMINAL_TTL_DEFAULT
+        try:
+            self.order_status_cache_max_entries = int(
+                self.config.get('order_status_cache_max_entries', 128)
+            )
+        except (TypeError, ValueError):
+            self.order_status_cache_max_entries = 128
+        if self.order_status_cache_max_entries <= 0:
+            self.order_status_cache_max_entries = 128
         # ✅ Lighter 账户统计（WS: user_stats）缓存
         self._lighter_user_stats_raw: Dict[str, Any] = {}
         self._lighter_user_stats_ts: float = 0.0
@@ -1122,6 +1153,7 @@ class LighterAdapter(ExchangeAdapter):
     def _on_order_update(self, order_update: dict):
         """处理 WebSocket 订单更新（同步回调）"""
         try:
+            self._cleanup_order_status_cache()
             raw_client_order_index = order_update.get('client_order_index')
             if raw_client_order_index is None:
                 logger.debug(f"⏭️ 跳过无 client_order_index 的更新")
@@ -1146,7 +1178,8 @@ class LighterAdapter(ExchangeAdapter):
             contract_id = self.client.config.contract_id
 
             # 某些终态更新可能不再携带成交量/成交价，避免把已有有效值覆盖为 0
-            previous_data = self._order_status_data.get(client_order_index)
+            previous_record = self._order_status_data.get(client_order_index)
+            previous_data = previous_record.get('data') if isinstance(previous_record, dict) else None
             if previous_data:
                 previous_filled_size = Decimal(str(previous_data.get('filled_size', '0')))
                 if filled_base_amount <= 0 and previous_filled_size > 0:
@@ -1166,10 +1199,13 @@ class LighterAdapter(ExchangeAdapter):
                 'contract_id': contract_id,
                 'filled_size': filled_base_amount
             }
-            # 无论是否还在等待，都缓存，避免“晚到回报”丢失
-            self._order_status_data[client_order_index] = data
-
             future = self._order_status_futures.pop(client_order_index, None)
+            should_cache = future is None or status == 'IN-PROGRESS'
+            if should_cache:
+                self._cache_order_status_data(client_order_index, data, status)
+            else:
+                # 首条终态已直接交付给等待者时，不再长期保留同一份状态。
+                self._order_status_data.pop(client_order_index, None)
             if future and not future.done():
                 future.set_result(data)
                 logger.debug(f"✅ 订单状态 Future 已完成: {client_order_index} -> {status}")
@@ -1190,7 +1226,7 @@ class LighterAdapter(ExchangeAdapter):
 
     async def _wait_for_order_status(self, client_order_index: int, timeout: float = 1.5) -> dict:
         """等待订单状态（使用 Future）"""
-        cached = self._order_status_data.pop(client_order_index, None)
+        cached = self._pop_cached_order_status_data(client_order_index)
         if cached:
             return cached
 
@@ -1220,11 +1256,55 @@ class LighterAdapter(ExchangeAdapter):
         """等待晚到的订单状态回报（用于 WS 超时后的短暂兜底）"""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            cached = self._order_status_data.pop(client_order_index, None)
+            cached = self._pop_cached_order_status_data(client_order_index)
             if cached:
                 return cached
             await asyncio.sleep(poll_interval)
         return None
+
+    def _cache_order_status_data(self, client_order_index: int, data: dict, status: str) -> None:
+        """写入短期订单状态缓存，并在写入时顺手完成过期/容量清理。"""
+        now = time.time()
+        ttl_seconds = (
+            self.order_status_in_progress_ttl_seconds
+            if str(status).upper() == 'IN-PROGRESS'
+            else self.order_status_terminal_ttl_seconds
+        )
+        self._cleanup_order_status_cache(now)
+        self._order_status_data[client_order_index] = {
+            'data': dict(data),
+            'cached_at': now,
+            'expires_at': now + ttl_seconds,
+        }
+        self._order_status_data.move_to_end(client_order_index)
+        self._enforce_order_status_cache_limit()
+
+    def _pop_cached_order_status_data(self, client_order_index: int) -> Optional[dict]:
+        """读取并删除一条未过期缓存。"""
+        self._cleanup_order_status_cache()
+        record = self._order_status_data.pop(client_order_index, None)
+        if not record:
+            return None
+        data = record.get('data')
+        return dict(data) if isinstance(data, dict) else None
+
+    def _cleanup_order_status_cache(self, now: Optional[float] = None) -> None:
+        """删除过期订单状态缓存。"""
+        if not self._order_status_data:
+            return
+        current = time.time() if now is None else float(now)
+        expired_keys = [
+            client_order_index
+            for client_order_index, record in self._order_status_data.items()
+            if float(record.get('expires_at', 0.0)) <= current
+        ]
+        for client_order_index in expired_keys:
+            self._order_status_data.pop(client_order_index, None)
+
+    def _enforce_order_status_cache_limit(self) -> None:
+        """限制订单状态缓存大小，只保留最近的短期兜底状态。"""
+        while len(self._order_status_data) > self.order_status_cache_max_entries:
+            self._order_status_data.popitem(last=False)
 
     async def _wait_until_terminal_order_status(
         self,

@@ -1,7 +1,8 @@
 """持仓管理服务（支持仓位累计模式）"""
 
 import logging
-from typing import Optional, List
+from collections import deque
+from typing import Optional
 from decimal import Decimal
 from datetime import datetime
 from ..models.position import Position
@@ -51,7 +52,10 @@ class PositionManagerService:
         self.current_position_qty = Decimal('0')
         
         # ✅ 历史仓位记录（用于追踪）
-        self.position_history: List[Position] = []
+        # 运行时只依赖“最近一笔”，因此内存里仅保留最近 20 笔；全量历史仍以 CSV 为准。
+        self.position_history_limit = 20
+        self.position_history = deque(maxlen=self.position_history_limit)
+        self.position_history_total_count = 0
         
         logger.info(
             f"📦 PositionManager 初始化:\n"
@@ -204,6 +208,7 @@ class PositionManagerService:
         else:
             # ✅ 累计模式：记录到历史
             self.position_history.append(position)
+            self.position_history_total_count += 1
             
             # ✅ 注意：这里不更新 current_position_qty
             # 因为 add_position() 会专门处理累计逻辑
@@ -246,6 +251,7 @@ class PositionManagerService:
         
         # ✅ 记录到历史
         self.position_history.append(position)
+        self.position_history_total_count += 1
         
         # ✅ 记录开仓交易到 CSV
         self._log_open_trade(position, signal_delay_ms_a, signal_delay_ms_b)
@@ -393,6 +399,8 @@ class PositionManagerService:
             'effective_max_position': float(effective_max_position),
             'position_step': float(self.position_step),
             'history_count': len(self.position_history),
+            'history_total_count': self.position_history_total_count,
+            'history_buffer_limit': self.position_history_limit,
             'utilization': round(utilization, 2),
             'direction': 'short' if self.current_position_qty < 0 else ('long' if self.current_position_qty > 0 else 'neutral')
         }
