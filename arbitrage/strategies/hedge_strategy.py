@@ -2344,24 +2344,18 @@ class HedgeStrategy(BaseStrategy):
                 )
                 return
 
-            # ========== ✅ 新增：检查深度 ==========
+            # ========== ✅ 新增：仅检查 A 所深度 ==========
             # Exchange A: 卖出（使用买一深度）
             depth_a = prices.exchange_a_bid_size
-            # Exchange B: 买入（使用卖一深度）
-            depth_b = prices.exchange_b_ask_size
-            
-            # ✅ 取最小深度
-            min_depth = min(depth_a, depth_b)
 
-            # ✅ 检查最小深度阈值
-            if min_depth < self.min_depth_quantity:
+            # ✅ 检查 A 所最小深度阈值
+            if depth_a < self.min_depth_quantity:
                 self.signal_stats['open']['depth_insufficient'] += 1
 
                 logger.warning(
-                    f"⚠️ [{self.symbol}] 开仓深度不足，跳过:\n"
+                    f"⚠️ [{self.symbol}] 开仓 A 所深度不足，跳过:\n"
                     f"   {self.exchange_a.exchange_name} 买一深度: {depth_a}\n"
-                    f"   {self.exchange_b.exchange_name} 卖一深度: {depth_b}\n"
-                    f"   最小深度: {min_depth} < 阈值: {self.min_depth_quantity}\n"
+                    f"   A 所深度: {depth_a} < 阈值: {self.min_depth_quantity}\n"
                     f"{extra_spread_info}"
                     f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
                 )
@@ -2570,24 +2564,18 @@ class HedgeStrategy(BaseStrategy):
                 )
                 return
 
-            # ========== ✅ 新增：检查平仓深度 ==========
+            # ========== ✅ 新增：仅检查 A 所深度 ==========
             # Exchange A: 买入平空（使用卖一深度）
             depth_a = prices.exchange_a_ask_size
-            # Exchange B: 卖出平多（使用买一深度）
-            depth_b = prices.exchange_b_bid_size
-            
-            # ✅ 取最小深度
-            min_depth = min(depth_a, depth_b)
 
-            # ✅ 检查最小深度阈值
-            if min_depth < self.min_depth_quantity:
+            # ✅ 检查 A 所最小深度阈值
+            if depth_a < self.min_depth_quantity:
                 self.signal_stats['close']['depth_insufficient'] += 1
 
                 logger.warning(
-                    f"⚠️ [{self.symbol}] 反向开仓深度不足，跳过:\n"
+                    f"⚠️ [{self.symbol}] 反向开仓 A 所深度不足，跳过:\n"
                     f"   {self.exchange_a.exchange_name} 卖一深度: {depth_a}\n"
-                    f"   {self.exchange_b.exchange_name} 买一深度: {depth_b}\n"
-                    f"   最小深度: {min_depth} < 阈值: {self.min_depth_quantity}\n"
+                    f"   A 所深度: {depth_a} < 阈值: {self.min_depth_quantity}\n"
                     f"{extra_spread_info}"
                     f"   {spread_label}: {compare_spread_pct:.4f}% ({threshold_label}: {threshold_pct:.4f}%)"
                 )
